@@ -1,4 +1,4 @@
-.PHONY: build test fmt vet tidy clean dev doctor web web-install
+.PHONY: build install test fmt vet tidy clean dev doctor web web-install
 
 GO        ?= go
 BIN       ?= bloodhound
@@ -6,6 +6,12 @@ LDFLAGS   ?= -X github.com/PeterSR/claude-code-bloodhound/internal/version.Versi
 
 build:
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/bloodhound
+
+install:
+	$(GO) install -ldflags '$(LDFLAGS)' ./cmd/bloodhound
+	@dest=$$($(GO) env GOBIN); \
+	  if [ -z "$$dest" ]; then dest=$$($(GO) env GOPATH)/bin; fi; \
+	  echo "installed: $$dest/$(BIN)"
 
 test:
 	$(GO) test ./...
