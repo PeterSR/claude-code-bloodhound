@@ -1,0 +1,23 @@
+# Local scratch — never tracked
+.agent-workspace/
+
+# Go build artifacts
+/bloodhound
+/bloodhound.exe
+/dist/
+/vendor/
+
+# Frontend
+/web/node_modules/
+/web/dist/
+/web/.vite/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
