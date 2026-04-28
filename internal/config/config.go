@@ -42,6 +42,14 @@ type Config struct {
 	// flag is purely informational.
 	JoinThePack bool `json:"join_the_pack"`
 
+	// UserID, if set, links this device to others belonging to the same
+	// account so the community-insights server doesn't double-count users
+	// who run Claude Code from multiple machines (the 5h / weekly quotas
+	// are pooled per Anthropic account, not per device). Blank => this
+	// device is treated as its own user. The store separately persists a
+	// random device_id; together they form the (user, device) identity.
+	UserID string `json:"user_id"`
+
 	// ClaudeBinary overrides the path to the `claude` executable used by the
 	// /usage scraper. Empty means look up "claude" on $PATH.
 	ClaudeBinary string `json:"claude_binary"`

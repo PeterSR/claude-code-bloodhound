@@ -9,8 +9,13 @@
 
 # Frontend
 /web/node_modules/
-/web/dist/
 /web/.vite/
+/web/*.tsbuildinfo
+
+# Frontend build output: track only the .gitkeep so //go:embed works on a
+# fresh checkout. Real build artifacts are local-only.
+/web/dist/*
+!/web/dist/.gitkeep
 
 # Editors
 .vscode/
