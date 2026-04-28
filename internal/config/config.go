@@ -1,0 +1,114 @@
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+)
+
+const configFileName = "config.json"
+
+// PlanTier values used for community-insights metadata. They have no effect
+// on local computation.
+const (
+	PlanUnknown = "unknown"
+	PlanPro     = "pro"
+	PlanMax5    = "max-5x"
+	PlanMax20   = "max-20x"
+)
+
+// Config is the JSON-serialized user configuration.
+//
+// Fields that aren't present in the file fall back to Default(). Missing
+// config file => returns Default() with no error.
+type Config struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+
+	PollIntervalS      int `json:"poll_interval_s"`
+	IngestIntervalS    int `json:"ingest_interval_s"`
+	AggregateIntervalS int `json:"aggregate_interval_s"`
+
+	// PlanTier is cosmetic — used only as community-insights metadata.
+	// Has no effect on the local computation. One of PlanUnknown, PlanPro,
+	// PlanMax5, PlanMax20.
+	PlanTier string `json:"plan_tier"`
+
+	// JoinThePack toggles the (future) opt-in upload of anonymized usage
+	// packets to the community-insights server. v1 has no server, so this
+	// flag is purely informational.
+	JoinThePack bool `json:"join_the_pack"`
+
+	// ClaudeBinary overrides the path to the `claude` executable used by the
+	// /usage scraper. Empty means look up "claude" on $PATH.
+	ClaudeBinary string `json:"claude_binary"`
+}
+
+// Default returns the baseline config. New installs start here.
+func Default() Config {
+	return Config{
+		Host:               "127.0.0.1",
+		Port:               7777,
+		PollIntervalS:      300,  // 5 min
+		IngestIntervalS:    300,  // 5 min
+		AggregateIntervalS: 900,  // 15 min
+		PlanTier:           PlanUnknown,
+		JoinThePack:        false,
+		ClaudeBinary:       "",
+	}
+}
+
+// Path returns the absolute path to the config file.
+func Path() (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, configFileName), nil
+}
+
+// Load reads the config file and merges it onto Default(). A missing file is
+// not an error; the returned config is the default.
+func Load() (Config, error) {
+	cfg := Default()
+	p, err := Path()
+	if err != nil {
+		return cfg, err
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return cfg, nil
+		}
+		return cfg, fmt.Errorf("read config: %w", err)
+	}
+	// Unmarshal onto the default-populated struct so that missing keys keep
+	// their default values.
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse config: %w", err)
+	}
+	return cfg, nil
+}
+
+// Save writes the config back out, creating the directory if needed.
+func Save(cfg Config) error {
+	dir, err := ConfigDir()
+	if err != nil {
+		return err
+	}
+	if err := EnsureDir(dir); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	p := filepath.Join(dir, configFileName)
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
+}
