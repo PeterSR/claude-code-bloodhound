@@ -30,6 +30,9 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/doctor", s.handleDoctor)
+	mux.HandleFunc("/api/now", s.handleNow)
+	mux.HandleFunc("/api/debug", s.handleDebug)
+	mux.HandleFunc("/api/sessions", s.handleSessions)
 
 	staticHandler := s.staticHandler()
 	mux.Handle("/", staticHandler)
