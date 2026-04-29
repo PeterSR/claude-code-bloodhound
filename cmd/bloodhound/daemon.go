@@ -1,19 +1,200 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/PeterSR/claude-code-bloodhound/internal/aggregate"
+	"github.com/PeterSR/claude-code-bloodhound/internal/config"
+	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
+	"github.com/PeterSR/claude-code-bloodhound/internal/store"
+	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
+)
+
+var (
+	daemonPollIntervalS      int
+	daemonIngestIntervalS    int
+	daemonAggregateIntervalS int
+	daemonRunOnce            bool
 )
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
-	Short: "Run an in-process scheduler for poll/ingest/aggregate (alternative to OS service)",
+	Short: "Run an in-process scheduler for poll/ingest/aggregate",
+	Long: `An alternative to wiring up systemd / launchd / scheduled tasks: a single
+long-running process that drives polling, ingestion, and aggregation on
+configured intervals (defaults from config.json: poll 5m, ingest 5m,
+aggregate 15m). All jobs run sequentially against the shared store, so
+SQLite writes never collide.
+
+For one-shot CI-style execution that does each job once and exits, pass
+--once.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return errors.New("daemon: not yet implemented")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
+
+		// CLI overrides take precedence over config.
+		pollIvl := durationS(daemonPollIntervalS, cfg.PollIntervalS, 300)
+		ingestIvl := durationS(daemonIngestIntervalS, cfg.IngestIntervalS, 300)
+		aggIvl := durationS(daemonAggregateIntervalS, cfg.AggregateIntervalS, 900)
+
+		s, err := store.Open(ctx)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+
+		w := cmd.OutOrStdout()
+		fmt.Fprintf(w, "[daemon] poll every %s, ingest every %s, aggregate every %s\n",
+			pollIvl, ingestIvl, aggIvl)
+
+		// Run each job once at startup.
+		runIngestOnce(ctx, s, w)
+		runAggregateOnce(ctx, s, w)
+		runPollOnce(ctx, cfg, s, w)
+
+		if daemonRunOnce {
+			fmt.Fprintln(w, "[daemon] --once: exiting after first cycle")
+			return nil
+		}
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			fmt.Fprintln(w, "[daemon] shutdown signal received")
+			cancel()
+		}()
+
+		// Use a single mutex to serialise all jobs against the shared store.
+		var mu sync.Mutex
+		runUnder := func(fn func()) {
+			mu.Lock()
+			defer mu.Unlock()
+			fn()
+		}
+
+		var wg sync.WaitGroup
+		schedule := func(name string, ivl time.Duration, fn func()) {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				t := time.NewTicker(ivl)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						runUnder(fn)
+					}
+				}
+			}()
+			fmt.Fprintf(w, "[daemon] scheduled %s\n", name)
+		}
+
+		schedule("poll", pollIvl, func() { runPollOnce(ctx, cfg, s, w) })
+		schedule("ingest", ingestIvl, func() { runIngestOnce(ctx, s, w) })
+		schedule("aggregate", aggIvl, func() { runAggregateOnce(ctx, s, w) })
+
+		<-ctx.Done()
+		fmt.Fprintln(w, "[daemon] waiting for in-flight jobs")
+		wg.Wait()
+		fmt.Fprintln(w, "[daemon] stopped")
+		return nil
 	},
 }
 
+func durationS(override, configured, fallback int) time.Duration {
+	if override > 0 {
+		return time.Duration(override) * time.Second
+	}
+	if configured > 0 {
+		return time.Duration(configured) * time.Second
+	}
+	return time.Duration(fallback) * time.Second
+}
+
+func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w outWriter) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	res, fetchErr := usage.Fetch(pollCtx, usage.Options{ClaudeBinary: cfg.ClaudeBinary})
+	obs, err := s.RecordUsage(pollCtx, res, fetchErr)
+	switch {
+	case err != nil:
+		fmt.Fprintf(w, "[daemon] poll: record error %v\n", err)
+	case fetchErr != nil && !errors.Is(fetchErr, context.Canceled):
+		fmt.Fprintf(w, "[daemon] poll: scrape failed (%v)\n", fetchErr)
+	case !res.OK:
+		fmt.Fprintf(w, "[daemon] poll: extraction failed (missing %v)\n", res.Extracted.Missing)
+	default:
+		sess := "?"
+		week := "?"
+		if res.SessionPct != nil {
+			sess = fmt.Sprintf("%d%%", *res.SessionPct)
+		}
+		if res.WeekPct != nil {
+			week = fmt.Sprintf("%d%%", *res.WeekPct)
+		}
+		fmt.Fprintf(w, "[daemon] poll: ok session=%s week=%s (#%d, %.1fs)\n",
+			sess, week, obs.ID, res.ElapsedS)
+	}
+}
+
+func runIngestOnce(ctx context.Context, s *store.Store, w outWriter) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	ictx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	stats, err := ingest.Run(ictx, s, ingest.Options{})
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] ingest: error %v\n", err)
+		return
+	}
+	fmt.Fprintf(w, "[daemon] ingest: %d/%d files parsed, +%d turns +%d compactions in %.2fs\n",
+		stats.FilesParsed, stats.FilesScanned, stats.TurnsAdded, stats.CompactionsAdded, stats.ElapsedS)
+}
+
+func runAggregateOnce(ctx context.Context, s *store.Store, w outWriter) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	actx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	stats, err := aggregate.Run(actx, s, aggregate.Options{})
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] aggregate: error %v\n", err)
+		return
+	}
+	fmt.Fprintf(w, "[daemon] aggregate: %d sessions, %d buckets in %.2fs\n",
+		stats.SessionsRefreshed, stats.BucketsRebuilt, stats.ElapsedS)
+}
+
+// outWriter narrows the writer Cobra hands us so the helpers above are
+// trivially mockable in a test. Just io.Writer rebadged.
+type outWriter interface{ Write(p []byte) (int, error) }
+
 func init() {
+	daemonCmd.Flags().IntVar(&daemonPollIntervalS, "poll-interval", 0, "seconds between /usage polls (0 = use config)")
+	daemonCmd.Flags().IntVar(&daemonIngestIntervalS, "ingest-interval", 0, "seconds between JSONL ingests (0 = use config)")
+	daemonCmd.Flags().IntVar(&daemonAggregateIntervalS, "aggregate-interval", 0, "seconds between aggregate refreshes (0 = use config)")
+	daemonCmd.Flags().BoolVar(&daemonRunOnce, "once", false, "run each job once at startup, then exit")
 	rootCmd.AddCommand(daemonCmd)
 }

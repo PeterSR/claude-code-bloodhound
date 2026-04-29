@@ -53,6 +53,16 @@ type Config struct {
 	// ClaudeBinary overrides the path to the `claude` executable used by the
 	// /usage scraper. Empty means look up "claude" on $PATH.
 	ClaudeBinary string `json:"claude_binary"`
+
+	// StatuslinePrefix is prepended to the `bloodhound status` output. The
+	// default emoji renders nicely in most modern terminals; on terminals
+	// that don't, set it to "BH" or "" via config.json.
+	StatuslinePrefix string `json:"statusline_prefix"`
+
+	// StaleAfterS is the threshold for "stale" badges in the UI and for
+	// the statusline's STALE indicator. Defaults to 600 (10 min) — twice
+	// the default poll cadence.
+	StaleAfterS int `json:"stale_after_s"`
 }
 
 // Default returns the baseline config. New installs start here.
@@ -66,6 +76,8 @@ func Default() Config {
 		PlanTier:           PlanUnknown,
 		JoinThePack:        false,
 		ClaudeBinary:       "",
+		StatuslinePrefix:   "🩸",
+		StaleAfterS:        600,
 	}
 }
 
