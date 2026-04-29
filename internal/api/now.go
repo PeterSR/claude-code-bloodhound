@@ -40,6 +40,13 @@ type windowState struct {
 	LimitETATS string `json:"limit_eta_ts,omitempty"`
 
 	ResetDetected bool `json:"reset_detected_in_last_obs"`
+
+	// Saturated marks that this bucket is at or above the saturation
+	// threshold (≥99%). When true the user is past the included quota
+	// and on Anthropic's pay-per-use "Extra usage" tier; pct stops
+	// moving even though tokens keep being spent. UI surfaces this so
+	// the gauge doesn't silently lie.
+	Saturated bool `json:"saturated"`
 }
 
 type pollSummary struct {
@@ -73,12 +80,14 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 
 	if obs.SessionPct != nil {
 		ws := buildWindow(*obs.SessionPct, obs.SessionResetTSISO, 5*time.Hour, obs.SessionResetDetected, now)
+		ws.Saturated = obs.SessionSaturated
 		fillBurn(ctx, s.Store, ws, *obs.SessionPct, true, now)
 		out.Session = ws
 	}
 
 	if obs.WeekPct != nil {
 		ws := buildWindow(*obs.WeekPct, obs.WeekResetTSISO, 7*24*time.Hour, obs.WeekResetDetected, now)
+		ws.Saturated = obs.WeekSaturated
 		fillBurn(ctx, s.Store, ws, *obs.WeekPct, false, now)
 		out.Week = ws
 	}

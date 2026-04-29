@@ -33,6 +33,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/now", s.handleNow)
 	mux.HandleFunc("/api/debug", s.handleDebug)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
+	mux.HandleFunc("/api/sessions/", s.handleSessionDetail)
+	mux.HandleFunc("/api/history", s.handleHistory)
+	mux.HandleFunc("/api/compactions", s.handleCompactions)
+	mux.HandleFunc("/api/leaks", s.handleLeaks)
+	mux.HandleFunc("/api/settings", s.handleSettings)
 
 	staticHandler := s.staticHandler()
 	mux.Handle("/", staticHandler)
