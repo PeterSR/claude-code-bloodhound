@@ -1,0 +1,77 @@
+# GoReleaser config for Bloodhound.
+#
+# Triggered by pushing a tag (e.g. v0.1.0) — see .github/workflows/release.yml.
+# `make web` must run before goreleaser so the embedded React bundle is
+# present; the workflow handles that step.
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: bloodhound
+    main: ./cmd/bloodhound
+    binary: bloodhound
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -tags=prod
+    ldflags:
+      - -s -w
+      - -X github.com/PeterSR/claude-code-bloodhound/internal/version.Version={{ .Version }}
+      - -X github.com/PeterSR/claude-code-bloodhound/internal/version.Commit={{ .Commit }}
+      - -X github.com/PeterSR/claude-code-bloodhound/internal/version.Date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # Windows ConPTY driver isn't shipped yet.
+      - goos: windows
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-snapshot'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^chore:'
+      - '^ci:'
+      - 'Merge pull request'
+      - 'Merge branch'
+
+release:
+  github:
+    owner: PeterSR
+    name: claude-code-bloodhound
+  draft: true
+  prerelease: auto
