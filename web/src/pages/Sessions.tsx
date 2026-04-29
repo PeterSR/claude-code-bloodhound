@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Files, Search } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import { fmtAbs, fmtNumber, fmtRel } from '../lib/format';
 
@@ -112,8 +113,10 @@ export default function Sessions() {
                     {fmtRel(secondsAgo(s.last_ts))}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs text-zinc-700 dark:text-zinc-300">
-                    <div className="truncate max-w-xs" title={s.project}>{stripProject(s.project)}</div>
-                    <div className="text-[10px] text-zinc-500">{s.session_uuid.slice(0, 8)}</div>
+                    <Link to={`/sessions/${s.session_uuid}`} className="hover:text-rose-500">
+                      <div className="truncate max-w-xs" title={s.project}>{stripProject(s.project)}</div>
+                      <div className="text-[10px] text-zinc-500">{s.session_uuid.slice(0, 8)}</div>
+                    </Link>
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{s.turn_count.toLocaleString()}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{fmtNumber(s.raw_tokens)}</td>

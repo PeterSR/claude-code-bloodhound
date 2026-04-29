@@ -14,6 +14,7 @@ type WindowState = {
   limit_eta_ms?: number;
   limit_eta_ts?: string;
   reset_detected_in_last_obs: boolean;
+  saturated: boolean;
 };
 
 type LastPoll = {
@@ -77,6 +78,7 @@ export default function Now() {
                 limitOK={data.session.limit_ok}
                 limitETAMS={data.session.limit_eta_ms}
                 limitETATS={data.session.limit_eta_ts}
+                saturated={data.session.saturated}
               />
             ) : (
               <Empty label="Session (5h)" />
@@ -93,6 +95,7 @@ export default function Now() {
                 limitOK={data.week.limit_ok}
                 limitETAMS={data.week.limit_eta_ms}
                 limitETATS={data.week.limit_eta_ts}
+                saturated={data.week.saturated}
               />
             ) : (
               <Empty label="Week" />

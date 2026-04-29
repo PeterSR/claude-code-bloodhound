@@ -3,6 +3,7 @@ import Layout from './components/Layout';
 import Now from './pages/Now';
 import History from './pages/History';
 import Sessions from './pages/Sessions';
+import SessionDetail from './pages/SessionDetail';
 import Compactions from './pages/Compactions';
 import Leaks from './pages/Leaks';
 import Debug from './pages/Debug';
@@ -16,6 +17,7 @@ export default function App() {
           <Route index element={<Now />} />
           <Route path="history" element={<History />} />
           <Route path="sessions" element={<Sessions />} />
+          <Route path="sessions/:uuid" element={<SessionDetail />} />
           <Route path="compactions" element={<Compactions />} />
           <Route path="leaks" element={<Leaks />} />
           <Route path="debug" element={<Debug />} />
