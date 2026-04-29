@@ -225,16 +225,19 @@ func parseFile(path string) (FileResult, error) {
 			tsMS := parseTSMS(rec.Timestamp)
 
 			// Confirm any pending compaction against this turn's prefix.
+			// 50% chosen empirically: real compactions cluster at 70-100%
+			// shrink; weak-shrink events are almost always rotations or
+			// restructures misidentified as compactions.
 			if pendingCompactReady {
 				confirmed := false
 				reason := "no_following_turn"
 				if pendingPrefix > 0 {
 					shrink := 1 - (float64(prefix) / float64(pendingPrefix))
-					if shrink >= 0.30 {
+					if shrink >= 0.50 {
 						confirmed = true
 						reason = ""
 					} else {
-						reason = "no_prefix_shrink"
+						reason = "weak_shrink"
 					}
 				} else {
 					reason = "no_baseline_prefix"

@@ -68,11 +68,11 @@ var doctorCmd = &cobra.Command{
 		} else {
 			fmt.Fprintf(w, "  schema version: %d\n", v)
 		}
-		id, err := s.InstallID(ctx)
+		id, err := s.DeviceID(ctx)
 		if err != nil {
-			fmt.Fprintf(w, "  install id: ERROR — %v\n", err)
+			fmt.Fprintf(w, "  device id: ERROR — %v\n", err)
 		} else {
-			fmt.Fprintf(w, "  install id: %s\n", id)
+			fmt.Fprintf(w, "  device id: %s\n", id)
 		}
 
 		return nil

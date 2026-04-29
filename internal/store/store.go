@@ -31,7 +31,7 @@ type Store struct {
 }
 
 // Open creates the data directory (if needed), opens the SQLite database,
-// applies any pending migrations, and ensures the install_id row exists.
+// applies any pending migrations, and ensures the device_id row exists.
 func Open(ctx context.Context) (*Store, error) {
 	dir, err := config.DataDir()
 	if err != nil {
@@ -57,9 +57,9 @@ func Open(ctx context.Context) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	if _, err := s.InstallID(ctx); err != nil {
+	if _, err := s.DeviceID(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("install_id: %w", err)
+		return nil, fmt.Errorf("device_id: %w", err)
 	}
 	return s, nil
 }
@@ -82,11 +82,18 @@ func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 	return v, err
 }
 
-// InstallID returns the persistent random ID generated for this install.
-// Created lazily on first call. Used as the prefix for community-insights
-// session_hash so the same machine produces stable hashes across sessions.
-func (s *Store) InstallID(ctx context.Context) (string, error) {
-	const key = "install_id"
+// DeviceID returns the persistent random ID generated for this install.
+// Created lazily on first call. Identifies one machine; combined with the
+// optional Config.UserID it forms the (user, device) tuple used by the
+// community-insights server to dedupe pooled-quota accounts that span
+// multiple devices.
+//
+// Anonymous by construction: a random UUID with no link to the user's
+// real identity. We trade un-forgeability for anonymity — a user who
+// wants to falsify a device_id can edit the meta table; we accept that
+// as the cost of not requiring any external auth.
+func (s *Store) DeviceID(ctx context.Context) (string, error) {
+	const key = "device_id"
 	var id string
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT value FROM meta WHERE key = ?`, key,
@@ -97,7 +104,7 @@ func (s *Store) InstallID(ctx context.Context) (string, error) {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
-	id, err = newInstallID()
+	id, err = newDeviceID()
 	if err != nil {
 		return "", err
 	}
@@ -111,7 +118,7 @@ func (s *Store) InstallID(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-func newInstallID() (string, error) {
+func newDeviceID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", err

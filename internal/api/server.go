@@ -53,7 +53,7 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	id, err := s.Store.InstallID(r.Context())
+	id, err := s.Store.DeviceID(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"ok":    false,
@@ -65,7 +65,7 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 		"ok":             true,
 		"version":        version.Version,
 		"schema_version": v,
-		"install_id":     id,
+		"device_id":      id,
 		"db_path":        s.Store.Path,
 		"web_bundled":    web.Has(),
 	})
