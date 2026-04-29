@@ -8,6 +8,13 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
 )
 
+// SaturatedThresholdPct is the percentage at or above which a bucket is
+// treated as saturated (hit cap). Used by RecordUsage to tag observations
+// so future tokens-per-1% calibration can skip them — when pct stops
+// moving but tokens continue accumulating (e.g. on Anthropic's on-demand
+// "Extra usage" tier), the naive Δtokens/Δpct ratio explodes.
+const SaturatedThresholdPct = 99
+
 // Observation is a tiny summary of what RecordUsage just persisted.
 type Observation struct {
 	ID                   int64
@@ -17,6 +24,8 @@ type Observation struct {
 	ParseOK              bool
 	SessionResetDetected bool
 	WeekResetDetected    bool
+	SessionSaturated     bool
+	WeekSaturated        bool
 }
 
 // RecordUsage persists a /usage scrape (success or failure) into raw_dumps +
@@ -100,6 +109,15 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		parseOK = 1
 	}
 
+	sessionSaturated := 0
+	weekSaturated := 0
+	if sessionPct.Valid && sessionPct.Int64 >= SaturatedThresholdPct {
+		sessionSaturated = 1
+	}
+	if weekPct.Valid && weekPct.Int64 >= SaturatedThresholdPct {
+		weekSaturated = 1
+	}
+
 	r, err := tx.ExecContext(ctx,
 		`INSERT INTO usage_observations (
 			ts, ts_unix_ms,
@@ -108,14 +126,16 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 			session_reset_ts, week_reset_ts,
 			raw_dump_id,
 			session_reset_detected, week_reset_detected,
+			session_saturated, week_saturated,
 			elapsed_s, parse_ok
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		tsISO, tsMS,
 		nullInt(sessionPct), nullInt(weekPct),
 		nullStr(sessionResetRaw), nullStr(weekResetRaw),
 		nullStr(sessionResetTS), nullStr(weekResetTS),
 		dumpID,
 		sessionResetDetected, weekResetDetected,
+		sessionSaturated, weekSaturated,
 		res.ElapsedS, parseOK,
 	)
 	if err != nil {
@@ -133,6 +153,8 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		ParseOK:              res.OK,
 		SessionResetDetected: sessionResetDetected == 1,
 		WeekResetDetected:    weekResetDetected == 1,
+		SessionSaturated:     sessionSaturated == 1,
+		WeekSaturated:        weekSaturated == 1,
 	}
 	if sessionPct.Valid {
 		v := int(sessionPct.Int64)

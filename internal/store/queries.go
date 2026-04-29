@@ -19,6 +19,8 @@ type LatestObservation struct {
 	WeekResetTSISO       string
 	SessionResetDetected bool
 	WeekResetDetected    bool
+	SessionSaturated     bool
+	WeekSaturated        bool
 	ElapsedS             float64
 	ParseOK              bool
 }
@@ -32,6 +34,7 @@ func (s *Store) LatestUsage(ctx context.Context) (*LatestObservation, error) {
 		       session_reset_raw, week_reset_raw,
 		       session_reset_ts, week_reset_ts,
 		       session_reset_detected, week_reset_detected,
+		       session_saturated, week_saturated,
 		       elapsed_s, parse_ok
 		FROM usage_observations
 		ORDER BY ts_unix_ms DESC LIMIT 1
@@ -41,6 +44,7 @@ func (s *Store) LatestUsage(ctx context.Context) (*LatestObservation, error) {
 		sessPct, weekPct                        sql.NullInt64
 		sessRaw, weekRaw, sessTS, weekTS        sql.NullString
 		sessReset, weekReset, parseOK           int
+		sessSat, weekSat                        int
 		elapsed                                 sql.NullFloat64
 	)
 	err := row.Scan(&o.ID, &o.TSISO, &o.TSUnixMS,
@@ -48,6 +52,7 @@ func (s *Store) LatestUsage(ctx context.Context) (*LatestObservation, error) {
 		&sessRaw, &weekRaw,
 		&sessTS, &weekTS,
 		&sessReset, &weekReset,
+		&sessSat, &weekSat,
 		&elapsed, &parseOK,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -78,6 +83,8 @@ func (s *Store) LatestUsage(ctx context.Context) (*LatestObservation, error) {
 	}
 	o.SessionResetDetected = sessReset == 1
 	o.WeekResetDetected = weekReset == 1
+	o.SessionSaturated = sessSat == 1
+	o.WeekSaturated = weekSat == 1
 	if elapsed.Valid {
 		o.ElapsedS = elapsed.Float64
 	}
