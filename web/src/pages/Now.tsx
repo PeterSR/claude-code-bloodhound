@@ -7,10 +7,12 @@ type WindowState = {
   pct: number;
   reset_ts?: string;
   window_start_ts?: string;
+  time_to_reset_ms?: number;
   burn_pct_per_hour?: number;
   burn_ok: boolean;
-  eta_ms?: number;
-  eta_ts?: string;
+  limit_ok: boolean;
+  limit_eta_ms?: number;
+  limit_eta_ts?: string;
   reset_detected_in_last_obs: boolean;
 };
 
@@ -69,10 +71,12 @@ export default function Now() {
                 pct={data.session.pct}
                 resetTS={data.session.reset_ts}
                 windowStartTS={data.session.window_start_ts}
+                timeToResetMS={data.session.time_to_reset_ms}
                 burnPctPerHour={data.session.burn_pct_per_hour}
                 burnOK={data.session.burn_ok}
-                etaMS={data.session.eta_ms}
-                etaTS={data.session.eta_ts}
+                limitOK={data.session.limit_ok}
+                limitETAMS={data.session.limit_eta_ms}
+                limitETATS={data.session.limit_eta_ts}
               />
             ) : (
               <Empty label="Session (5h)" />
@@ -83,10 +87,12 @@ export default function Now() {
                 pct={data.week.pct}
                 resetTS={data.week.reset_ts}
                 windowStartTS={data.week.window_start_ts}
+                timeToResetMS={data.week.time_to_reset_ms}
                 burnPctPerHour={data.week.burn_pct_per_hour}
                 burnOK={data.week.burn_ok}
-                etaMS={data.week.eta_ms}
-                etaTS={data.week.eta_ts}
+                limitOK={data.week.limit_ok}
+                limitETAMS={data.week.limit_eta_ms}
+                limitETATS={data.week.limit_eta_ts}
               />
             ) : (
               <Empty label="Week" />
@@ -109,7 +115,7 @@ function PollBanner({ poll }: { poll: LastPoll | null }) {
       </div>
     );
   }
-  const stale = poll.age_s > 600; // > 10 min
+  const stale = poll.age_s > 600;
   return (
     <div
       className={[

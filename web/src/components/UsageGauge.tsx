@@ -1,3 +1,4 @@
+import { AlertTriangle } from 'lucide-react';
 import { fmtAbs, fmtDuration, pctBgColor, pctColor } from '../lib/format';
 
 type Props = {
@@ -5,26 +6,35 @@ type Props = {
   pct: number;
   resetTS?: string;
   windowStartTS?: string;
+  timeToResetMS?: number;
   burnPctPerHour?: number;
   burnOK: boolean;
-  etaMS?: number;
-  etaTS?: string;
+  limitOK: boolean;
+  limitETAMS?: number;
+  limitETATS?: string;
 };
 
 /**
- * UsageGauge shows one bucket's state: percentage, the actual reset window
- * (anchored to /usage's reset_ts when we have it), burn rate, and ETA.
- * Designed to be glanceable; no chart, no interaction.
+ * UsageGauge shows one bucket's state. Two distinct time concepts:
+ *
+ *   Time to reset — always shown when known. The natural cycle boundary
+ *   parsed from /usage; we are inside [window_start, reset].
+ *
+ *   Limit projection — only shown when the burn rate would actually hit
+ *   100% before reset. Projecting "100% in 8 days" when the bucket
+ *   resets in 3h is noise, not signal.
  */
 export default function UsageGauge({
   label,
   pct,
   resetTS,
   windowStartTS,
+  timeToResetMS,
   burnPctPerHour,
   burnOK,
-  etaMS,
-  etaTS,
+  limitOK,
+  limitETAMS,
+  limitETATS,
 }: Props) {
   const clampedPct = Math.max(0, Math.min(100, pct));
   return (
@@ -43,7 +53,34 @@ export default function UsageGauge({
         />
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
+      {/* Headline: time-to-reset is always primary. */}
+      <div className="mt-4">
+        <Field label="Time to reset">
+          {timeToResetMS !== undefined && timeToResetMS > 0 ? (
+            <span className="tabular-nums">{fmtDuration(timeToResetMS)}</span>
+          ) : (
+            <span className="text-zinc-500">—</span>
+          )}
+          {resetTS && (
+            <span className="text-zinc-500 ml-2">at {fmtAbs(resetTS)}</span>
+          )}
+        </Field>
+      </div>
+
+      {/* Warning row only when the burn-rate projection is actionable. */}
+      {limitOK && limitETAMS !== undefined && (
+        <div className="mt-2 flex items-center gap-1.5 text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 rounded-md px-3 py-1.5 text-sm">
+          <AlertTriangle className="size-3.5 shrink-0" />
+          <span>
+            On track to hit 100% in <strong className="tabular-nums">{fmtDuration(limitETAMS)}</strong>
+            {limitETATS && (
+              <span className="text-amber-600 dark:text-amber-500/80"> ({fmtAbs(limitETATS)})</span>
+            )}
+          </span>
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
         <Field label="Window">
           {windowStartTS && resetTS ? (
             <span className="tabular-nums">
@@ -61,20 +98,6 @@ export default function UsageGauge({
             </span>
           ) : (
             <span className="text-zinc-500">need more data</span>
-          )}
-        </Field>
-        <Field label="ETA to 100%">
-          {etaMS !== undefined && etaTS ? (
-            <span className="tabular-nums">{fmtDuration(etaMS)}</span>
-          ) : (
-            <span className="text-zinc-500">—</span>
-          )}
-        </Field>
-        <Field label="ETA at">
-          {etaTS ? (
-            <span className="tabular-nums">{fmtAbs(etaTS)}</span>
-          ) : (
-            <span className="text-zinc-500">—</span>
           )}
         </Field>
       </div>

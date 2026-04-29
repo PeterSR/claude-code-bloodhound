@@ -17,6 +17,11 @@ import (
 // Render returns the single-line status string. Never returns an error;
 // when the DB has nothing useful, returns a "no data" form so the caller
 // can still print something.
+//
+// Format: "🩸 72%/5h (3h12m) · 68%/wk (1d18h)" where parens are the time
+// until the bucket's natural reset (parsed from /usage). When the burn-rate
+// projection says we'd hit 100% before that reset, a "⚠100% in 26m" warning
+// is inserted: "🩸 72%/5h ⚠100% in 26m (3h12m) · …".
 func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Time) string {
 	prefix := cfg.StatuslinePrefix
 	if prefix != "" {
@@ -32,10 +37,9 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 	if staleAfter <= 0 {
 		staleAfter = 10 * time.Minute
 	}
-	ageS := now.UnixMilli() - obs.TSUnixMS
-	age := time.Duration(ageS) * time.Millisecond
+	age := time.Duration(now.UnixMilli()-obs.TSUnixMS) * time.Millisecond
 	if age >= staleAfter {
-		return prefix + fmt.Sprintf("STALE %s", fmtDur(age))
+		return prefix + "STALE " + fmtDur(age)
 	}
 
 	if !obs.ParseOK {
@@ -43,18 +47,16 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 	}
 
 	parts := []string{}
+
 	if obs.SessionPct != nil {
-		bit := fmt.Sprintf("%d%%/5h", *obs.SessionPct)
-		// ETA from session burn rate.
-		if pts, err := s.SessionPctSinceLastReset(ctx); err == nil {
-			if eta, ok := etaFromPoints(pts, *obs.SessionPct); ok {
-				bit += " " + fmtDur(eta) + " left"
-			}
-		}
-		parts = append(parts, bit)
+		sessPts, _ := s.SessionPctSinceLastReset(ctx)
+		parts = append(parts, formatBucket(*obs.SessionPct, "5h",
+			obs.SessionResetTSISO, sessPts, now))
 	}
 	if obs.WeekPct != nil {
-		parts = append(parts, fmt.Sprintf("%d%%/wk", *obs.WeekPct))
+		weekPts, _ := s.WeekPctSinceLastReset(ctx)
+		parts = append(parts, formatBucket(*obs.WeekPct, "wk",
+			obs.WeekResetTSISO, weekPts, now))
 	}
 
 	if len(parts) == 0 {
@@ -63,10 +65,50 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 	return prefix + strings.Join(parts, " · ")
 }
 
-// etaFromPoints computes the ms until 100% based on the slope over the
-// last hour of pct points. Returns false if we don't have a meaningful
-// positive slope.
-func etaFromPoints(points []store.PctPoint, currentPct int) (time.Duration, bool) {
+// formatBucket builds one bucket's segment. Anchors on the parsed reset_ts
+// where available, optionally prefixed with a burn-rate warning when a
+// projection would hit 100% before that reset.
+func formatBucket(pct int, label, resetISO string, points []store.PctPoint, now time.Time) string {
+	timeToReset, hasReset := timeUntil(resetISO, now)
+
+	// Burn-rate projection (only meaningful as a warning when it would
+	// fire before the natural reset).
+	limitETA, hasLimit := etaToLimit(points, pct)
+	if hasReset && hasLimit && limitETA >= timeToReset {
+		hasLimit = false // limit is after reset; not actionable
+	}
+
+	out := fmt.Sprintf("%d%%/%s", pct, label)
+	if hasLimit {
+		out += " ⚠100% in " + fmtDur(limitETA)
+	}
+	if hasReset {
+		out += " (" + fmtDur(timeToReset) + ")"
+	}
+	return out
+}
+
+// timeUntil parses an ISO-8601 timestamp and returns the duration from now
+// to that time, or (0, false) on failure / past timestamps.
+func timeUntil(iso string, now time.Time) (time.Duration, bool) {
+	if iso == "" {
+		return 0, false
+	}
+	t, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return 0, false
+	}
+	d := t.Sub(now)
+	if d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+// etaToLimit returns the time until 100% based on the slope over the last
+// hour of pct points. Returns (0, false) when the slope is too flat or
+// the inputs aren't sufficient.
+func etaToLimit(points []store.PctPoint, currentPct int) (time.Duration, bool) {
 	if len(points) < 2 {
 		return 0, false
 	}
