@@ -14,17 +14,20 @@ import (
 
 // Stats summarises one Run.
 type Stats struct {
-	SessionsRefreshed int     `json:"sessions_refreshed"`
-	BucketsRebuilt    int     `json:"buckets_rebuilt"`
-	ElapsedS          float64 `json:"elapsed_s"`
+	SessionsRefreshed     int     `json:"sessions_refreshed"`
+	BucketsRebuilt        int     `json:"buckets_rebuilt"`
+	CalibrationPointsBuilt int    `json:"calibration_points_built"`
+	ElapsedS              float64 `json:"elapsed_s"`
 }
 
 // Options configures Run.
 type Options struct {
-	// SkipSessions / SkipBuckets let callers run only one phase. Mostly
-	// useful in tests; production always wants both.
-	SkipSessions bool
-	SkipBuckets  bool
+	// SkipSessions / SkipBuckets / SkipCalibration let callers run only
+	// one phase. Mostly useful in tests; production always wants all
+	// three.
+	SkipSessions    bool
+	SkipBuckets     bool
+	SkipCalibration bool
 }
 
 // Run recomputes the materialized aggregate tables in one logical pass.
@@ -48,6 +51,14 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 			return st, fmt.Errorf("refresh buckets: %w", err)
 		}
 		st.BucketsRebuilt = n
+	}
+
+	if !opts.SkipCalibration {
+		n, err := refreshCalibration(ctx, s)
+		if err != nil {
+			return st, fmt.Errorf("refresh calibration: %w", err)
+		}
+		st.CalibrationPointsBuilt = n
 	}
 
 	st.ElapsedS = time.Since(t0).Seconds()

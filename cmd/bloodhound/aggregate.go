@@ -37,8 +37,8 @@ second). Run on a slower cadence than ingest itself.`,
 			fmt.Fprintln(w, string(b))
 			return err
 		}
-		fmt.Fprintf(w, "aggregate: %d sessions, %d buckets in %.2fs\n",
-			stats.SessionsRefreshed, stats.BucketsRebuilt, stats.ElapsedS)
+		fmt.Fprintf(w, "aggregate: %d sessions, %d buckets, %d cal-points in %.2fs\n",
+			stats.SessionsRefreshed, stats.BucketsRebuilt, stats.CalibrationPointsBuilt, stats.ElapsedS)
 		return err
 	},
 }

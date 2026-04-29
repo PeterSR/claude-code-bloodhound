@@ -212,8 +212,8 @@ func runAggregateOnce(ctx context.Context, s *store.Store, w io.Writer) {
 		fmt.Fprintf(w, "[daemon] aggregate: error %v\n", err)
 		return
 	}
-	fmt.Fprintf(w, "[daemon] aggregate: %d sessions, %d buckets in %.2fs\n",
-		stats.SessionsRefreshed, stats.BucketsRebuilt, stats.ElapsedS)
+	fmt.Fprintf(w, "[daemon] aggregate: %d sessions, %d buckets, %d cal-points in %.2fs\n",
+		stats.SessionsRefreshed, stats.BucketsRebuilt, stats.CalibrationPointsBuilt, stats.ElapsedS)
 }
 
 func init() {
