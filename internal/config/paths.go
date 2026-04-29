@@ -113,3 +113,18 @@ func EnsureDir(dir string) error {
 	}
 	return nil
 }
+
+// DaemonLogPath returns the default file path for daemon stdout/stderr,
+// living under the state directory because logs are persistent state but
+// not load-bearing. Override via the daemon's --log-file flag.
+//
+// Linux:   $XDG_STATE_HOME/bloodhound/daemon.log
+// macOS:   $HOME/Library/Application Support/bloodhound/daemon.log
+// Windows: %LOCALAPPDATA%\bloodhound\daemon.log
+func DaemonLogPath() (string, error) {
+	dir, err := StateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "daemon.log"), nil
+}

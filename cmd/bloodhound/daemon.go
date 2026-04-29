@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +26,8 @@ var (
 	daemonIngestIntervalS    int
 	daemonAggregateIntervalS int
 	daemonRunOnce            bool
+	daemonLogFile            string
+	daemonNoLogFile          bool
 )
 
 var daemonCmd = &cobra.Command{
@@ -34,6 +38,11 @@ long-running process that drives polling, ingestion, and aggregation on
 configured intervals (defaults from config.json: poll 5m, ingest 5m,
 aggregate 15m). All jobs run sequentially against the shared store, so
 SQLite writes never collide.
+
+By default, daemon output is mirrored to both stdout and a log file at
+$XDG_STATE_HOME/bloodhound/daemon.log (or the per-OS state directory on
+macOS/Windows). Pass --log-file to override the path, or --no-log-file
+to disable file output entirely.
 
 For one-shot CI-style execution that does each job once and exits, pass
 --once.`,
@@ -46,7 +55,28 @@ For one-shot CI-style execution that does each job once and exits, pass
 			return fmt.Errorf("config: %w", err)
 		}
 
-		// CLI overrides take precedence over config.
+		// Resolve log destination first so startup messages also go there.
+		var w io.Writer = cmd.OutOrStdout()
+		if !daemonNoLogFile {
+			path := daemonLogFile
+			if path == "" {
+				path, err = config.DaemonLogPath()
+				if err != nil {
+					return fmt.Errorf("resolve default log path: %w", err)
+				}
+			}
+			if err := config.EnsureDir(filepath.Dir(path)); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			if err != nil {
+				return fmt.Errorf("open log file %s: %w", path, err)
+			}
+			defer f.Close()
+			fmt.Fprintf(w, "[daemon] log file: %s\n", path)
+			w = io.MultiWriter(w, f)
+		}
+
 		pollIvl := durationS(daemonPollIntervalS, cfg.PollIntervalS, 300)
 		ingestIvl := durationS(daemonIngestIntervalS, cfg.IngestIntervalS, 300)
 		aggIvl := durationS(daemonAggregateIntervalS, cfg.AggregateIntervalS, 900)
@@ -57,11 +87,11 @@ For one-shot CI-style execution that does each job once and exits, pass
 		}
 		defer s.Close()
 
-		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "[daemon] poll every %s, ingest every %s, aggregate every %s\n",
-			pollIvl, ingestIvl, aggIvl)
+		fmt.Fprintf(w, "[daemon] started %s · poll %s · ingest %s · aggregate %s\n",
+			time.Now().UTC().Format(time.RFC3339), pollIvl, ingestIvl, aggIvl)
 
-		// Run each job once at startup.
+		// Run each job once at startup (cheapest first so observation
+		// percentages persist quickly even on a slow first scrape).
 		runIngestOnce(ctx, s, w)
 		runAggregateOnce(ctx, s, w)
 		runPollOnce(ctx, cfg, s, w)
@@ -79,7 +109,6 @@ For one-shot CI-style execution that does each job once and exits, pass
 			cancel()
 		}()
 
-		// Use a single mutex to serialise all jobs against the shared store.
 		var mu sync.Mutex
 		runUnder := func(fn func()) {
 			mu.Lock()
@@ -128,7 +157,7 @@ func durationS(override, configured, fallback int) time.Duration {
 	return time.Duration(fallback) * time.Second
 }
 
-func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w outWriter) {
+func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Writer) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
@@ -157,7 +186,7 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w outWr
 	}
 }
 
-func runIngestOnce(ctx context.Context, s *store.Store, w outWriter) {
+func runIngestOnce(ctx context.Context, s *store.Store, w io.Writer) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
@@ -172,7 +201,7 @@ func runIngestOnce(ctx context.Context, s *store.Store, w outWriter) {
 		stats.FilesParsed, stats.FilesScanned, stats.TurnsAdded, stats.CompactionsAdded, stats.ElapsedS)
 }
 
-func runAggregateOnce(ctx context.Context, s *store.Store, w outWriter) {
+func runAggregateOnce(ctx context.Context, s *store.Store, w io.Writer) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
@@ -187,14 +216,14 @@ func runAggregateOnce(ctx context.Context, s *store.Store, w outWriter) {
 		stats.SessionsRefreshed, stats.BucketsRebuilt, stats.ElapsedS)
 }
 
-// outWriter narrows the writer Cobra hands us so the helpers above are
-// trivially mockable in a test. Just io.Writer rebadged.
-type outWriter interface{ Write(p []byte) (int, error) }
-
 func init() {
 	daemonCmd.Flags().IntVar(&daemonPollIntervalS, "poll-interval", 0, "seconds between /usage polls (0 = use config)")
 	daemonCmd.Flags().IntVar(&daemonIngestIntervalS, "ingest-interval", 0, "seconds between JSONL ingests (0 = use config)")
 	daemonCmd.Flags().IntVar(&daemonAggregateIntervalS, "aggregate-interval", 0, "seconds between aggregate refreshes (0 = use config)")
 	daemonCmd.Flags().BoolVar(&daemonRunOnce, "once", false, "run each job once at startup, then exit")
+	daemonCmd.Flags().StringVar(&daemonLogFile, "log-file", "",
+		"file to mirror daemon output to (default $XDG_STATE_HOME/bloodhound/daemon.log)")
+	daemonCmd.Flags().BoolVar(&daemonNoLogFile, "no-log-file", false,
+		"don't write a log file (stdout only)")
 	rootCmd.AddCommand(daemonCmd)
 }
