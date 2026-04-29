@@ -31,6 +31,8 @@ type Result struct {
 	WeekPct         *int   `json:"week_pct,omitempty"`
 	SessionResetRaw string `json:"session_reset_raw,omitempty"`
 	WeekResetRaw    string `json:"week_reset_raw,omitempty"`
+	SessionResetTZ  string `json:"session_reset_tz,omitempty"`
+	WeekResetTZ     string `json:"week_reset_tz,omitempty"`
 
 	// Extracted is the raw output of the Extractor, exposed for the
 	// Debug page so the user can see exactly what fired and what didn't.
@@ -88,6 +90,12 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 	}
 	if s, ok := res.Extracted.Values["week_reset"].(string); ok {
 		res.WeekResetRaw = s
+	}
+	if s, ok := res.Extracted.Values["session_reset_tz"].(string); ok {
+		res.SessionResetTZ = s
+	}
+	if s, ok := res.Extracted.Values["week_reset_tz"].(string); ok {
+		res.WeekResetTZ = s
 	}
 	return res, nil
 }

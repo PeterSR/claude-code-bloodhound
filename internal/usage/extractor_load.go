@@ -42,11 +42,24 @@ func LoadExtractor() (*Extractor, ExtractorOrigin, error) {
 		userPath := filepath.Join(dir, extractorFileName)
 		data, err := os.ReadFile(userPath)
 		if err == nil {
-			ex, err := ParseExtractor(data)
-			if err != nil {
-				return nil, "", fmt.Errorf("user extractor at %s is invalid: %w", userPath, err)
+			ex, parseErr := ParseExtractor(data)
+			if parseErr == nil {
+				return ex, OriginUser, nil
 			}
-			return ex, OriginUser, nil
+			if errors.Is(parseErr, ErrExtractorVersionMismatch) {
+				// Soft fail: a previous version's extractor on disk shouldn't
+				// brick the tool. Fall back to default and log once; the
+				// user can run --rebootstrap to regenerate.
+				ex, err := ParseExtractor(defaultExtractorJSON)
+				if err != nil {
+					return nil, "", fmt.Errorf("parse bundled default extractor: %w", err)
+				}
+				fmt.Fprintf(os.Stderr,
+					"[usage] %s is a previous version (%v); using bundled default. Run `bloodhound poll --rebootstrap` to regenerate.\n",
+					userPath, parseErr)
+				return ex, OriginDefault, nil
+			}
+			return nil, "", fmt.Errorf("user extractor at %s is invalid: %w", userPath, parseErr)
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, "", fmt.Errorf("read user extractor: %w", err)

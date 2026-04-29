@@ -105,6 +105,8 @@ func Reapply(res Result, ext *Extractor) Result {
 	res.WeekPct = nil
 	res.SessionResetRaw = ""
 	res.WeekResetRaw = ""
+	res.SessionResetTZ = ""
+	res.WeekResetTZ = ""
 	if v, ok := res.Extracted.Values["session_pct"].(int); ok {
 		res.SessionPct = &v
 	}
@@ -116,6 +118,12 @@ func Reapply(res Result, ext *Extractor) Result {
 	}
 	if s, ok := res.Extracted.Values["week_reset"].(string); ok {
 		res.WeekResetRaw = s
+	}
+	if s, ok := res.Extracted.Values["session_reset_tz"].(string); ok {
+		res.SessionResetTZ = s
+	}
+	if s, ok := res.Extracted.Values["week_reset_tz"].(string); ok {
+		res.WeekResetTZ = s
 	}
 	return res
 }
@@ -131,17 +139,23 @@ Below, between the BEGIN/END markers, is the cleaned terminal output of running 
   ]
 }
 
-REQUIRED fields (must extract or the extractor is invalid):
-- session_pct (int): the "Current session" percentage value
+REQUIRED fields (every one of these must extract; mark required: true):
+- session_pct (int): the "Current session" percentage value.
+- session_reset (string): the wall-clock reset time for the session bucket, e.g. "May 1, 1am" or "10:50am". Capture only the time, NOT the timezone.
+- session_reset_tz (string): the IANA timezone name in parentheses next to the session reset, e.g. "Europe/Copenhagen", "America/Los_Angeles". Capture only the contents of the parens.
 - week_pct (int): the "Current week (all models)" percentage. Do NOT pick the per-model line (e.g. "Current week (Sonnet only)") if present.
+- week_reset (string): same as session_reset but for the weekly bucket.
+- week_reset_tz (string): the IANA timezone name for the weekly reset.
 
-OPTIONAL fields (extract if visible, mark required: false):
-- session_reset (string): human-readable reset hint for the session bucket, e.g. "May 1, 1am" or "2am". Capture only the value, NOT the timezone in parentheses.
-- week_reset (string): same for the weekly bucket.
+All six are load-bearing. If any one is missing the panel parse fails loudly and the user is prompted to re-bootstrap; that's better than silently storing wrong / missing data.
+
+The timezone is essential — without it, "10:50am" is ambiguous and resolves to the wrong UTC instant.
 
 CRITICAL constraints:
 - Regexes must be RE2-compatible (Go's regexp package). No backreferences, no lookarounds.
 - The TUI uses cursor positioning rather than whitespace, so labels often appear run together: "Currentsession" (no space), "Currentweek(allmodels)". Account for this; use \s* not \s+ where whitespace might be missing.
+- Cursor positioning can also overwrite mid-word: the session reset line sometimes appears as "Reses10:50am" with the 't' missing. Don't rely on the literal word "Resets" matching — match a permissive prefix like "Rese(?:s|ts?)?" before the time so a typo'd line still parses.
+- Each bucket's regex must NOT match content from a different bucket. Anchor each regex on its own bucket's "Current X" header and use lazy quantifiers, but if a bucket's reset line is too garbled to match, prefer a no-match (which surfaces as a loud failure) over silently picking up another bucket's reset line.
 - Use case-insensitive flag (?i) and DOTALL (?s) where appropriate. Use lazy quantifiers (.*?) to avoid over-matching across buckets.
 - "group" is the regex capture group whose contents become the field value (1 = first capture, 0 = whole match).
 

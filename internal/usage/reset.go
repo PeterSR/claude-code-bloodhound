@@ -20,26 +20,38 @@ func normalizeReset(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// ParseReset best-effort converts a /usage "Resets …" hint into an absolute
-// time in the local zone of `now`. Inputs we've observed include:
+// ParseReset converts a /usage "Resets …" hint into an absolute UTC time.
 //
-//	"May 1, 1am"
-//	"May 1, 12am"
-//	"10pm"
-//	"1am"
-//	"15:04"
+// The TUI emits the wall-clock time ("10:50am") and the IANA timezone
+// ("Europe/Copenhagen") as separate fields; pass both. tz is required for
+// correctness — wall-clock strings without a zone are ambiguous, and
+// silently treating "10:50am" as UTC produces times that drift by hours
+// from the user's actual reset window. If tz is unknown / unloadable the
+// function falls back to now.Location() and the result is best-effort.
 //
-// Returns ok=false on any parse failure. Callers should persist the raw
-// string regardless.
-func ParseReset(s string, now time.Time) (time.Time, bool) {
+// Inputs we've observed in the wild:
+//
+//	"May 1, 1am"        + "Europe/Copenhagen"
+//	"May 1, 12am"       + "Europe/Copenhagen"
+//	"10:50am"           + "Europe/Copenhagen"
+//	"1am"               + "America/Los_Angeles"
+//	"15:04"             + ""  (timezone not captured; fallback)
+//
+// Returns (UTC time, true) on success, (zero, false) on parse failure.
+func ParseReset(s, tz string, now time.Time) (time.Time, bool) {
 	s = normalizeReset(s)
 	if s == "" {
 		return time.Time{}, false
 	}
 	loc := now.Location()
-	year := now.Year()
+	if tz = strings.TrimSpace(tz); tz != "" {
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc = l
+		}
+	}
+	nowInLoc := now.In(loc)
 
-	// Layouts that include a date component.
+	// Layouts that include a date.
 	dateLayouts := []string{
 		"Jan 2, 3:04pm",
 		"Jan 2, 3pm",
@@ -50,14 +62,15 @@ func ParseReset(s string, now time.Time) (time.Time, bool) {
 		if err != nil {
 			continue
 		}
-		out := time.Date(year, t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, loc)
+		out := time.Date(nowInLoc.Year(), t.Month(), t.Day(),
+			t.Hour(), t.Minute(), 0, 0, loc)
 		if out.Before(now) {
 			out = out.AddDate(1, 0, 0)
 		}
-		return out, true
+		return out.UTC(), true
 	}
 
-	// Time-only layouts: assume nearest future occurrence.
+	// Time-only layouts: nearest future occurrence in the target TZ.
 	timeLayouts := []string{
 		"3:04pm",
 		"3pm",
@@ -68,11 +81,12 @@ func ParseReset(s string, now time.Time) (time.Time, bool) {
 		if err != nil {
 			continue
 		}
-		out := time.Date(year, now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, loc)
+		out := time.Date(nowInLoc.Year(), nowInLoc.Month(), nowInLoc.Day(),
+			t.Hour(), t.Minute(), 0, 0, loc)
 		if out.Before(now) {
 			out = out.AddDate(0, 0, 1)
 		}
-		return out, true
+		return out.UTC(), true
 	}
 
 	return time.Time{}, false

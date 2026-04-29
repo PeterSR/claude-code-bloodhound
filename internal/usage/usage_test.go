@@ -56,6 +56,17 @@ func TestDefaultExtractor_OptionalResets(t *testing.T) {
 	}
 }
 
+func TestDefaultExtractor_OptionalResetTZs(t *testing.T) {
+	ex := loadDefault(t)
+	out := ex.Apply(fakePanel)
+	if got, _ := out.Values["session_reset_tz"].(string); got != "Europe/Copenhagen" {
+		t.Errorf("session_reset_tz: want %q, got %q", "Europe/Copenhagen", got)
+	}
+	if got, _ := out.Values["week_reset_tz"].(string); got != "Europe/Copenhagen" {
+		t.Errorf("week_reset_tz: want %q, got %q", "Europe/Copenhagen", got)
+	}
+}
+
 func TestDefaultExtractor_PicksWeekAllNotPerModel(t *testing.T) {
 	ex := loadDefault(t)
 	out := ex.Apply(fakePanel)
@@ -124,50 +135,91 @@ func TestStripANSI(t *testing.T) {
 	}
 }
 
-func TestParseReset_TimeOnly_NearestFuture(t *testing.T) {
+func TestParseReset_TimeOnly_NearestFuture_UTC(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	got, ok := ParseReset("2am", now)
+	got, ok := ParseReset("2am", "UTC", now)
 	if !ok {
 		t.Fatal("ParseReset(2am) returned ok=false")
 	}
 	want := time.Date(2026, 5, 2, 2, 0, 0, 0, time.UTC)
 	if !got.Equal(want) {
-		t.Errorf("ParseReset(2am): want %s, got %s", want, got)
+		t.Errorf("ParseReset(2am UTC): want %s, got %s", want, got)
 	}
 }
 
-func TestParseReset_DateAndTime(t *testing.T) {
-	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
-	got, ok := ParseReset("May1,1am", now)
+func TestParseReset_TimeOnly_TZShiftsResultUTC(t *testing.T) {
+	// 10:50am Europe/Copenhagen during CEST (UTC+2) is 08:50 UTC.
+	// "now" is set 06:00 UTC = 08:00 CEST, so the reset is later today.
+	now := time.Date(2026, 4, 29, 6, 0, 0, 0, time.UTC)
+	got, ok := ParseReset("10:50am", "Europe/Copenhagen", now)
 	if !ok {
-		t.Fatal("ParseReset(May1,1am) returned ok=false")
+		t.Fatal("ok=false")
 	}
-	want := time.Date(2026, 5, 1, 1, 0, 0, 0, time.UTC)
+	want := time.Date(2026, 4, 29, 8, 50, 0, 0, time.UTC)
 	if !got.Equal(want) {
-		t.Errorf("ParseReset(May1,1am): want %s, got %s", want, got)
+		t.Errorf("CEST 10:50am: want UTC %s, got %s", want, got)
+	}
+}
+
+func TestParseReset_DateAndTime_TZ(t *testing.T) {
+	// May 1, 1am Europe/Copenhagen during CEST = April 30, 23:00 UTC.
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	got, ok := ParseReset("May1,1am", "Europe/Copenhagen", now)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	want := time.Date(2026, 4, 30, 23, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("CEST May 1 1am: want UTC %s, got %s", want, got)
 	}
 }
 
 func TestParseReset_PastBecomesNextOccurrence(t *testing.T) {
-	now := time.Date(2026, 4, 28, 14, 0, 0, 0, time.UTC) // 2pm
-	got, ok := ParseReset("1am", now)
+	// 1am UTC, server clock 2pm UTC same day -> next 1am is tomorrow.
+	now := time.Date(2026, 4, 28, 14, 0, 0, 0, time.UTC)
+	got, ok := ParseReset("1am", "UTC", now)
 	if !ok {
-		t.Fatal("ParseReset(1am) returned ok=false")
+		t.Fatal("ok=false")
 	}
 	want := time.Date(2026, 4, 29, 1, 0, 0, 0, time.UTC)
 	if !got.Equal(want) {
-		t.Errorf("ParseReset(1am at 2pm): want %s, got %s", want, got)
+		t.Errorf("ParseReset(1am at 2pm UTC): want %s, got %s", want, got)
+	}
+}
+
+func TestParseReset_EmptyTZFallsBackToNowLocation(t *testing.T) {
+	// With UTC-clocked "now" and empty TZ, fallback is loc=UTC.
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	got, ok := ParseReset("2am", "", now)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	want := time.Date(2026, 5, 2, 2, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("ParseReset(2am, empty tz, UTC now): want %s, got %s", want, got)
+	}
+}
+
+func TestParseReset_BadTZFallsBackToNowLocation(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	got, ok := ParseReset("2am", "Pluto/Cydonia", now)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	want := time.Date(2026, 5, 2, 2, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("bad TZ should fall back: want %s, got %s", want, got)
 	}
 }
 
 func TestParseReset_Empty(t *testing.T) {
-	if _, ok := ParseReset("", time.Now()); ok {
+	if _, ok := ParseReset("", "Europe/Copenhagen", time.Now()); ok {
 		t.Error("ParseReset(\"\"): want ok=false")
 	}
 }
 
 func TestParseReset_Garbage(t *testing.T) {
-	if _, ok := ParseReset("not a time", time.Now()); ok {
+	if _, ok := ParseReset("not a time", "Europe/Copenhagen", time.Now()); ok {
 		t.Error("ParseReset garbage: want ok=false")
 	}
 }

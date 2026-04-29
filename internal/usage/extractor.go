@@ -2,15 +2,30 @@ package usage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
+// ErrExtractorVersionMismatch is returned by ParseExtractor when the file's
+// version doesn't equal ExtractorVersion. Callers (specifically
+// LoadExtractor) treat this distinctly from other validation errors so we
+// can fall back to the bundled default rather than fail loudly.
+var ErrExtractorVersionMismatch = errors.New("extractor version mismatch")
+
 // ExtractorVersion is the on-disk schema version. Bump when the DSL grows
-// new primitives; older extractors are refused on load and re-bootstrapped.
-const ExtractorVersion = 1
+// new primitives or when a new field becomes load-bearing; older extractors
+// are refused on load (LoadExtractor falls back to the bundled default and
+// emits a re-bootstrap hint).
+//
+// Bump history:
+//
+//	v1 — initial: session_pct / week_pct + optional reset strings
+//	v2 — added session_reset_tz / week_reset_tz so reset times are parsed
+//	     in the user's actual timezone instead of being treated as UTC
+const ExtractorVersion = 2
 
 // FieldRule is one named extraction in the DSL. Strictly regex-based so
 // the language stays non-Turing-complete and trivially safe to evaluate.
@@ -46,7 +61,8 @@ type compiledRule struct {
 // be called before Apply (LoadExtractor / ParseExtractor invoke this).
 func (e *Extractor) Validate() error {
 	if e.Version != ExtractorVersion {
-		return fmt.Errorf("extractor version %d not supported (need %d)", e.Version, ExtractorVersion)
+		return fmt.Errorf("%w: file is v%d, code expects v%d",
+			ErrExtractorVersionMismatch, e.Version, ExtractorVersion)
 	}
 	if len(e.Fields) == 0 {
 		return fmt.Errorf("extractor has no fields")

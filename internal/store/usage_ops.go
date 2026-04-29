@@ -58,15 +58,17 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		weekResetRaw = sql.NullString{String: res.WeekResetRaw, Valid: true}
 	}
 
-	// Parse reset hints (best-effort).
+	// Parse reset hints (best-effort). Pass the IANA timezone captured
+	// from the panel so wall-clock times resolve to the correct UTC
+	// instant — the TUI emits the time and zone separately.
 	var sessionResetTS, weekResetTS sql.NullString
 	if sessionResetRaw.Valid {
-		if t, ok := usage.ParseReset(sessionResetRaw.String, res.FetchedAt); ok {
+		if t, ok := usage.ParseReset(sessionResetRaw.String, res.SessionResetTZ, res.FetchedAt); ok {
 			sessionResetTS = sql.NullString{String: t.UTC().Format(time.RFC3339), Valid: true}
 		}
 	}
 	if weekResetRaw.Valid {
-		if t, ok := usage.ParseReset(weekResetRaw.String, res.FetchedAt); ok {
+		if t, ok := usage.ParseReset(weekResetRaw.String, res.WeekResetTZ, res.FetchedAt); ok {
 			weekResetTS = sql.NullString{String: t.UTC().Format(time.RFC3339), Valid: true}
 		}
 	}

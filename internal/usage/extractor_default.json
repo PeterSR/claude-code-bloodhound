@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "generated_at": "2026-04-29T00:00:00Z",
   "generated_by": "default",
   "fields": [
@@ -13,9 +13,16 @@
     {
       "name": "session_reset",
       "type": "string",
-      "regex": "(?is)Current\\s*session\\b.*?Resets?\\s*([^(]+?)\\s*\\(",
+      "regex": "(?is)Current\\s*session\\b.*?Rese(?:s|ts?)?\\s*([^(]+?)\\s*\\(",
       "group": 1,
-      "required": false
+      "required": true
+    },
+    {
+      "name": "session_reset_tz",
+      "type": "string",
+      "regex": "(?is)Current\\s*session\\b.*?Rese(?:s|ts?)?\\s*[^(]+?\\(([^)]+)\\)",
+      "group": 1,
+      "required": true
     },
     {
       "name": "week_pct",
@@ -27,9 +34,16 @@
     {
       "name": "week_reset",
       "type": "string",
-      "regex": "(?is)Current\\s*week\\s*\\(?\\s*all.*?Resets?\\s*([^(]+?)\\s*\\(",
+      "regex": "(?is)Current\\s*week\\s*\\(?\\s*all.*?Rese(?:s|ts?)?\\s*([^(]+?)\\s*\\(",
       "group": 1,
-      "required": false
+      "required": true
+    },
+    {
+      "name": "week_reset_tz",
+      "type": "string",
+      "regex": "(?is)Current\\s*week\\s*\\(?\\s*all.*?Rese(?:s|ts?)?\\s*[^(]+?\\(([^)]+)\\)",
+      "group": 1,
+      "required": true
     }
   ]
 }
