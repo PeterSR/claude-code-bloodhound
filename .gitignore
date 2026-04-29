@@ -12,10 +12,11 @@
 /web/.vite/
 /web/*.tsbuildinfo
 
-# Frontend build output: track only the .gitkeep so //go:embed works on a
-# fresh checkout. Real build artifacts are local-only.
-/web/dist/*
-!/web/dist/.gitkeep
+# Frontend build output: never tracked. //go:embed lives behind a `prod`
+# build tag (see web/embed_prod.go); dev builds use the stub at
+# web/embed_stub.go and serve a placeholder page. Production builds via
+# `make build` populate web/dist before invoking go build.
+/web/dist/
 
 # Editors
 .vscode/

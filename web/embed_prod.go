@@ -1,8 +1,12 @@
+//go:build prod
+
 // Package web embeds the built React bundle so the Go binary can serve it
 // without needing the on-disk web/dist directory at runtime.
 //
-// The embed always succeeds because web/dist/.gitkeep is committed. Whether
-// a real bundle is present is detected at runtime via Has().
+// The prod build tag gates the embed: production builds (via `make build`,
+// which depends on `make web`) include the real bundle; dev builds (plain
+// `go build`, `go run`) do not, and the runtime falls back to a placeholder.
+// This means web/dist itself is never committed to the repo.
 package web
 
 import (

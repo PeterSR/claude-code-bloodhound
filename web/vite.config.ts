@@ -11,10 +11,7 @@ export default defineConfig({
     },
   },
   build: {
-    // emptyOutDir is false so the tracked dist/.gitkeep survives builds.
-    // Stale hashed asset files will linger; harmless and rebuilt on next
-    // clean.
     outDir: 'dist',
-    emptyOutDir: false,
+    emptyOutDir: true,
   },
 });
