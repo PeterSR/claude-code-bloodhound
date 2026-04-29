@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "generated_at": "2026-04-29T00:00:00Z",
+  "generated_by": "default",
+  "fields": [
+    {
+      "name": "session_pct",
+      "type": "int",
+      "regex": "(?i)Current\\s*session\\b[^%]*?(\\d+)\\s*%\\s*used",
+      "group": 1,
+      "required": true
+    },
+    {
+      "name": "session_reset",
+      "type": "string",
+      "regex": "(?is)Current\\s*session\\b.*?Resets?\\s*([^(]+?)\\s*\\(",
+      "group": 1,
+      "required": false
+    },
+    {
+      "name": "week_pct",
+      "type": "int",
+      "regex": "(?i)Current\\s*week\\s*\\(?\\s*all[^%]*?(\\d+)\\s*%\\s*used",
+      "group": 1,
+      "required": true
+    },
+    {
+      "name": "week_reset",
+      "type": "string",
+      "regex": "(?is)Current\\s*week\\s*\\(?\\s*all.*?Resets?\\s*([^(]+?)\\s*\\(",
+      "group": 1,
+      "required": false
+    }
+  ]
+}

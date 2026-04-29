@@ -1,33 +1,40 @@
 // Package usage drives Claude Code's /usage TUI panel in a pty, captures the
-// rendered output, strips ANSI, and parses out the per-bucket percentages and
-// reset hints. The scraper is faithful to the Python POC's behaviour but
-// returns structured Go types.
+// rendered output, strips ANSI, and applies a configurable Extractor to pull
+// out the session and week percentages plus reset hints.
+//
+// The extractor is data-driven (regex DSL persisted to $XDG_STATE_HOME) so
+// we can tolerate Anthropic redesigning the panel: an extraction failure
+// is loud, and `bloodhound poll --rebootstrap` regenerates the rules by
+// asking the local Claude Code to study a fresh panel snapshot.
 package usage
 
 import (
 	"context"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
 
-// Bucket is one row from the /usage panel.
-type Bucket struct {
-	Label    string `json:"label"`
-	Pct      int    `json:"pct"`
-	ResetRaw string `json:"reset_raw,omitempty"`
-}
-
-// Result is everything we know after scraping.
+// Result is everything we know after scraping. The two-pct accessors
+// (SessionPct, WeekPct) are optional because the extractor may not have
+// matched them; OK reports whether all required extractor fields were
+// present.
 type Result struct {
-	OK         bool      `json:"ok"`
-	FetchedAt  time.Time `json:"fetched_at"`
-	ElapsedS   float64   `json:"elapsed_s"`
-	Buckets    []Bucket  `json:"buckets"`
-	Raw        string    `json:"raw"` // tail of the cleaned terminal output (debug)
-	SessionPct *int      `json:"session_pct,omitempty"`
-	WeekAllPct *int      `json:"week_all_pct,omitempty"`
+	OK              bool      `json:"ok"`
+	FetchedAt       time.Time `json:"fetched_at"`
+	ElapsedS        float64   `json:"elapsed_s"`
+	Raw             string    `json:"raw"` // tail of the cleaned terminal output (debug)
+	RawFull         string    `json:"-"`   // full cleaned output (kept in-memory for bootstrap; not serialised)
+	ExtractorOrigin string    `json:"extractor_origin"` // "user" | "default"
+
+	SessionPct      *int   `json:"session_pct,omitempty"`
+	WeekPct         *int   `json:"week_pct,omitempty"`
+	SessionResetRaw string `json:"session_reset_raw,omitempty"`
+	WeekResetRaw    string `json:"week_reset_raw,omitempty"`
+
+	// Extracted is the raw output of the Extractor, exposed for the
+	// Debug page so the user can see exactly what fired and what didn't.
+	Extracted Extracted `json:"extracted"`
 }
 
 // Options configures Fetch.
@@ -36,9 +43,9 @@ type Options struct {
 	Timeout      time.Duration // 0 => 22s
 }
 
-// Fetch spawns Claude Code, types `/usage`, captures and parses the panel.
-// Returns the (partially-populated) Result alongside any error so callers can
-// persist a failed attempt for debugging.
+// Fetch spawns Claude Code, captures the /usage panel, and applies the
+// active Extractor. Returns a populated Result alongside any error so
+// callers can persist a failed attempt for debugging.
 func Fetch(ctx context.Context, opts Options) (Result, error) {
 	if opts.ClaudeBinary == "" {
 		opts.ClaudeBinary = "claude"
@@ -48,7 +55,7 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	t0 := time.Now()
-	rawBytes, err := drive(ctx, opts)
+	rawBytes, driveErr := drive(ctx, opts)
 	elapsed := time.Since(t0).Seconds()
 	cleaned := stripANSI(rawBytes)
 
@@ -56,12 +63,32 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 		FetchedAt: time.Now().UTC(),
 		ElapsedS:  round2(elapsed),
 		Raw:       tail(cleaned, 3000),
+		RawFull:   cleaned,
 	}
+	if driveErr != nil {
+		return res, driveErr
+	}
+
+	ext, origin, err := LoadExtractor()
 	if err != nil {
 		return res, err
 	}
-	res = parseInto(res, cleaned)
-	res.OK = len(res.Buckets) > 0
+	res.ExtractorOrigin = string(origin)
+	res.Extracted = ext.Apply(cleaned)
+	res.OK = len(res.Extracted.Missing) == 0
+
+	if v, ok := res.Extracted.Values["session_pct"].(int); ok {
+		res.SessionPct = &v
+	}
+	if v, ok := res.Extracted.Values["week_pct"].(int); ok {
+		res.WeekPct = &v
+	}
+	if s, ok := res.Extracted.Values["session_reset"].(string); ok {
+		res.SessionResetRaw = s
+	}
+	if s, ok := res.Extracted.Values["week_reset"].(string); ok {
+		res.WeekResetRaw = s
+	}
 	return res, nil
 }
 
@@ -78,46 +105,6 @@ var ansiRe = regexp.MustCompile(strings.Join([]string{
 
 func stripANSI(b []byte) string {
 	return ansiRe.ReplaceAllString(string(b), "")
-}
-
-var (
-	// pctRe captures the bucket label and percentage. The label-character class
-	// is permissive because the TUI uses cursor positioning rather than
-	// whitespace, producing run-together text like "Currentweek(allmodels)".
-	pctRe    = regexp.MustCompile(`(?i)(Current\s*(?:session|week\s*\(?[^)]*\)?))\s*[\s▀-▟]*?(\d+)\s*%\s*used`)
-	// resetRe permits zero whitespace after "Resets" — actual TUI output is
-	// often "Resets2am(Europe/Copenhagen)" with no space.
-	resetRe  = regexp.MustCompile(`(?i)Resets?\s*([A-Za-z0-9: ,]+?)\s*\([^)]+\)`)
-	spacesRe = regexp.MustCompile(`\s+`)
-)
-
-func parseInto(res Result, text string) Result {
-	pcts := pctRe.FindAllStringSubmatch(text, -1)
-	resets := resetRe.FindAllStringSubmatch(text, -1)
-
-	for i, m := range pcts {
-		label := strings.TrimSpace(spacesRe.ReplaceAllString(m[1], " "))
-		pct, _ := strconv.Atoi(m[2])
-		var rs string
-		if i < len(resets) {
-			rs = strings.TrimSpace(resets[i][1])
-		}
-		res.Buckets = append(res.Buckets, Bucket{Label: label, Pct: pct, ResetRaw: rs})
-	}
-
-	for i := range res.Buckets {
-		l := strings.ToLower(res.Buckets[i].Label)
-		if res.SessionPct == nil && strings.Contains(l, "session") {
-			v := res.Buckets[i].Pct
-			res.SessionPct = &v
-		}
-		if res.WeekAllPct == nil && strings.Contains(l, "week") &&
-			(strings.Contains(l, "all") || !strings.Contains(l, "(")) {
-			v := res.Buckets[i].Pct
-			res.WeekAllPct = &v
-		}
-	}
-	return res
 }
 
 func tail(s string, n int) string {

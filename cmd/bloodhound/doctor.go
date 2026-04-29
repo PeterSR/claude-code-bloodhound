@@ -11,6 +11,7 @@ import (
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
+	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
 	"github.com/PeterSR/claude-code-bloodhound/internal/version"
 )
 
@@ -26,6 +27,8 @@ var doctorCmd = &cobra.Command{
 		fmt.Fprintln(w, "\nPaths:")
 		dataDir, err := config.DataDir()
 		fmt.Fprintf(w, "  data dir:    %s%s\n", dataDir, errSuffix(err))
+		stateDir, err := config.StateDir()
+		fmt.Fprintf(w, "  state dir:   %s%s\n", stateDir, errSuffix(err))
 		cfgDir, err := config.ConfigDir()
 		fmt.Fprintf(w, "  config dir:  %s%s\n", cfgDir, errSuffix(err))
 		cfgPath, err := config.Path()
@@ -73,6 +76,22 @@ var doctorCmd = &cobra.Command{
 			fmt.Fprintf(w, "  device id: ERROR — %v\n", err)
 		} else {
 			fmt.Fprintf(w, "  device id: %s\n", id)
+		}
+
+		fmt.Fprintln(w, "\nExtractor:")
+		ext, origin, exErr := usage.LoadExtractor()
+		if exErr != nil {
+			fmt.Fprintf(w, "  load: ERROR — %v\n", exErr)
+		} else {
+			extractorPath, snapshotPath, _ := usage.ExtractorPaths()
+			fmt.Fprintf(w, "  origin:    %s\n", origin)
+			fmt.Fprintf(w, "  version:   %d\n", ext.Version)
+			if ext.GeneratedAt != "" {
+				fmt.Fprintf(w, "  generated: %s by %s\n", ext.GeneratedAt, ext.GeneratedBy)
+			}
+			fmt.Fprintf(w, "  fields:    %d\n", len(ext.Fields))
+			fmt.Fprintf(w, "  state:     %s\n", extractorPath)
+			fmt.Fprintf(w, "  snapshot:  %s\n", snapshotPath)
 		}
 
 		return nil

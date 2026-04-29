@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,13 +78,14 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 	const (
 		minRenderAfterType = 5 * time.Second
 		settleAfterReady   = 400 * time.Millisecond
+		graceAfterExit     = 1500 * time.Millisecond // collect trailing bytes after Ctrl-C
 	)
 	deadline := time.Now().Add(opts.Timeout)
 	startTime := time.Now()
 
 	typed := false
 	sentExit := false
-	var typedAt time.Time
+	var typedAt, sentExitAt time.Time
 
 	for {
 		if time.Now().After(deadline) {
@@ -119,18 +121,29 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 		}
 
 		if !sentExit {
-			if time.Since(typedAt) > minRenderAfterType && bytes.Contains(curBytes, []byte("% used")) {
+			// Strip ANSI before scanning: raw bytes can have escape sequences
+			// between any two characters, so a literal substring check is
+			// unreliable. Cleaned text consistently shows "%used" or "% used".
+			cleanedSoFar := stripANSI(curBytes)
+			panelRendered := strings.Contains(cleanedSoFar, "% used") ||
+				strings.Contains(cleanedSoFar, "%used")
+			if time.Since(typedAt) > minRenderAfterType && panelRendered {
 				time.Sleep(700 * time.Millisecond)
 				_, _ = ptyFile.Write([]byte{0x03, 0x03})
 				sentExit = true
+				sentExitAt = time.Now()
 			} else if time.Until(deadline) < 3*time.Second {
 				_, _ = ptyFile.Write([]byte{0x03, 0x03})
 				sentExit = true
+				sentExitAt = time.Now()
 			}
 			continue
 		}
 
-		if time.Until(deadline) < 1*time.Second {
+		// After Ctrl-C: short grace window for trailing output, then exit.
+		// Do NOT wait for the deadline — that needlessly stretches every
+		// successful poll out to the full timeout.
+		if time.Since(sentExitAt) > graceAfterExit {
 			break
 		}
 	}

@@ -69,6 +69,31 @@ func CacheDir() (string, error) {
 	return filepath.Join(base, appName), nil
 }
 
+// StateDir returns the directory where bloodhound stores derived state
+// (e.g. learned /usage extractors and snapshots). XDG defines a "state"
+// directory distinct from data and config; on platforms that don't have
+// the concept we fall back to DataDir.
+//
+// Linux:   $XDG_STATE_HOME/bloodhound  (defaults to $HOME/.local/state/bloodhound)
+// macOS:   $HOME/Library/Application Support/bloodhound  (no separate state convention)
+// Windows: %LOCALAPPDATA%\bloodhound                      (no separate state convention)
+func StateDir() (string, error) {
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		return DataDir()
+	default:
+		base := os.Getenv("XDG_STATE_HOME")
+		if base == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", err
+			}
+			base = filepath.Join(home, ".local", "state")
+		}
+		return filepath.Join(base, appName), nil
+	}
+}
+
 // ClaudeProjectsDir returns the path where Claude Code stores its session
 // JSONL files. We assume Anthropic's CLI uses ~/.claude/projects on every
 // platform; if that turns out to be wrong elsewhere this is the place to

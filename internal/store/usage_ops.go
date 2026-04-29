@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
@@ -43,24 +42,20 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 	}
 	dumpID, _ := rd.LastInsertId()
 
-	// Pull session + week buckets from result (the package already chose them).
+	// The Result already carries the extracted values directly.
 	var sessionPct, weekPct sql.NullInt64
 	var sessionResetRaw, weekResetRaw sql.NullString
-	for _, b := range res.Buckets {
-		l := strings.ToLower(b.Label)
-		if !sessionPct.Valid && strings.Contains(l, "session") {
-			sessionPct = sql.NullInt64{Int64: int64(b.Pct), Valid: true}
-			if b.ResetRaw != "" {
-				sessionResetRaw = sql.NullString{String: b.ResetRaw, Valid: true}
-			}
-		}
-		if !weekPct.Valid && strings.Contains(l, "week") &&
-			(strings.Contains(l, "all") || !strings.Contains(l, "(")) {
-			weekPct = sql.NullInt64{Int64: int64(b.Pct), Valid: true}
-			if b.ResetRaw != "" {
-				weekResetRaw = sql.NullString{String: b.ResetRaw, Valid: true}
-			}
-		}
+	if res.SessionPct != nil {
+		sessionPct = sql.NullInt64{Int64: int64(*res.SessionPct), Valid: true}
+	}
+	if res.WeekPct != nil {
+		weekPct = sql.NullInt64{Int64: int64(*res.WeekPct), Valid: true}
+	}
+	if res.SessionResetRaw != "" {
+		sessionResetRaw = sql.NullString{String: res.SessionResetRaw, Valid: true}
+	}
+	if res.WeekResetRaw != "" {
+		weekResetRaw = sql.NullString{String: res.WeekResetRaw, Valid: true}
 	}
 
 	// Parse reset hints (best-effort).
