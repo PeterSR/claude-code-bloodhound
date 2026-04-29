@@ -73,7 +73,12 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		}
 	}
 
-	// Reset detection: compare to most-recent prior observation's percentages.
+	// Reset detection: compare to most-recent prior observation's
+	// percentages. Real resets drop the bucket from near-100 to near-0.
+	// A 1-2 point dip between adjacent polls is just noise from
+	// Anthropic's rolling-window accounting; require a substantial drop
+	// before flagging.
+	const resetDropThresholdPP = 30
 	var prevSessionPct, prevWeekPct sql.NullInt64
 	row := tx.QueryRowContext(ctx,
 		`SELECT session_pct, week_pct FROM usage_observations ORDER BY ts_unix_ms DESC LIMIT 1`,
@@ -81,10 +86,12 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 	_ = row.Scan(&prevSessionPct, &prevWeekPct)
 	sessionResetDetected := 0
 	weekResetDetected := 0
-	if prevSessionPct.Valid && sessionPct.Valid && sessionPct.Int64 < prevSessionPct.Int64 {
+	if prevSessionPct.Valid && sessionPct.Valid &&
+		prevSessionPct.Int64-sessionPct.Int64 >= resetDropThresholdPP {
 		sessionResetDetected = 1
 	}
-	if prevWeekPct.Valid && weekPct.Valid && weekPct.Int64 < prevWeekPct.Int64 {
+	if prevWeekPct.Valid && weekPct.Valid &&
+		prevWeekPct.Int64-weekPct.Int64 >= resetDropThresholdPP {
 		weekResetDetected = 1
 	}
 
