@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +18,13 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/version"
 	"github.com/PeterSR/claude-code-bloodhound/web"
 )
+
+func init() {
+	// Go's mime package doesn't know .webmanifest by default; register it
+	// so http.FileServer serves the PWA manifest with the spec-correct
+	// content type rather than application/octet-stream.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
 
 // Server bundles the deps the HTTP handlers need.
 type Server struct {
