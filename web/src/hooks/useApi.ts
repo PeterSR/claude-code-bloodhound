@@ -22,7 +22,13 @@ export function useApi<T>(path: string, refreshIntervalMs?: number): ApiState<T>
   useEffect(() => {
     let cancelled = false;
 
-    const run = async () => {
+    // Flip loading=true on every fetch the effect kicks off (initial
+    // mount + manual refresh). Background polling re-uses run() through
+    // setInterval, which doesn't update loading — the user shouldn't see
+    // a spinner for those.
+    setLoading(true);
+
+    const run = async (showSpinner: boolean) => {
       try {
         const json = await apiGet<T>(path);
         if (!cancelled) {
@@ -34,15 +40,15 @@ export function useApi<T>(path: string, refreshIntervalMs?: number): ApiState<T>
           setError(e instanceof ApiError ? e : (e as Error));
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && showSpinner) setLoading(false);
       }
     };
 
-    run();
+    run(true);
 
     let interval: number | undefined;
     if (refreshIntervalMs && refreshIntervalMs > 0) {
-      interval = window.setInterval(run, refreshIntervalMs);
+      interval = window.setInterval(() => run(false), refreshIntervalMs);
     }
     return () => {
       cancelled = true;

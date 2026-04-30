@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 )
 
 // NowResponse is everything the "Now" page needs in one payload.
@@ -13,6 +15,25 @@ type NowResponse struct {
 	Week     *windowState `json:"week"`
 	LastPoll *pollSummary `json:"last_poll"`
 	NowMS    int64        `json:"server_now_ms"`
+
+	// PollIntervalS is the configured cadence between /usage scrapes. The
+	// UI uses it to decide whether the latest poll is "fresh" — e.g. to
+	// suppress redundant "now" annotations on the chart.
+	PollIntervalS int `json:"poll_interval_s,omitempty"`
+	StaleAfterS   int `json:"stale_after_s,omitempty"`
+
+	// SessionHistory and WeekHistory are observation series within each
+	// current window — anchored to [window_start_ts, reset_ts]. Empty
+	// when the matching window is unknown (no parsed reset).
+	SessionHistory []nowHistoryPoint `json:"session_history,omitempty"`
+	WeekHistory    []nowHistoryPoint `json:"week_history,omitempty"`
+}
+
+// nowHistoryPoint is one observation slimmed for the in-window chart.
+type nowHistoryPoint struct {
+	TSUnixMS  int64 `json:"ts_unix_ms"`
+	Pct       *int  `json:"pct,omitempty"`
+	Saturated bool  `json:"saturated"`
 }
 
 // windowState describes one bucket. Two distinct time concepts to keep
@@ -60,6 +81,10 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
 	out := NowResponse{NowMS: now.UnixMilli()}
+	if cfg, err := config.Load(); err == nil {
+		out.PollIntervalS = cfg.PollIntervalS
+		out.StaleAfterS = cfg.StaleAfterS
+	}
 
 	obs, err := s.Store.LatestUsage(ctx)
 	if err != nil {
@@ -83,6 +108,11 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 		ws.Saturated = obs.SessionSaturated
 		fillBurn(ctx, s.Store, ws, *obs.SessionPct, true, now)
 		out.Session = ws
+		if ws.WindowStartTSISO != "" {
+			if start, err := time.Parse(time.RFC3339, ws.WindowStartTSISO); err == nil {
+				out.SessionHistory = s.queryNowHistory(ctx, true, start.UnixMilli(), now.UnixMilli())
+			}
+		}
 	}
 
 	if obs.WeekPct != nil {
@@ -90,9 +120,52 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 		ws.Saturated = obs.WeekSaturated
 		fillBurn(ctx, s.Store, ws, *obs.WeekPct, false, now)
 		out.Week = ws
+		if ws.WindowStartTSISO != "" {
+			if start, err := time.Parse(time.RFC3339, ws.WindowStartTSISO); err == nil {
+				out.WeekHistory = s.queryNowHistory(ctx, false, start.UnixMilli(), now.UnixMilli())
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+// queryNowHistory returns the pct + saturated series for one bucket within
+// [startMS, endMS]. Errors collapse to an empty result — the chart is
+// non-essential and we'd rather render the gauges than fail the page.
+func (s *Server) queryNowHistory(ctx context.Context, isSession bool, startMS, endMS int64) []nowHistoryPoint {
+	pctCol, satCol := "session_pct", "session_saturated"
+	if !isSession {
+		pctCol, satCol = "week_pct", "week_saturated"
+	}
+	rows, err := s.Store.DB.QueryContext(ctx, `
+		SELECT ts_unix_ms, `+pctCol+`, `+satCol+`
+		FROM usage_observations
+		WHERE ts_unix_ms BETWEEN ? AND ?
+		  AND parse_ok = 1
+		ORDER BY ts_unix_ms ASC
+	`, startMS, endMS)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []nowHistoryPoint
+	for rows.Next() {
+		var (
+			ts     int64
+			pctRaw any
+			sat    int
+		)
+		if err := rows.Scan(&ts, &pctRaw, &sat); err != nil {
+			return out
+		}
+		p := nowHistoryPoint{TSUnixMS: ts, Saturated: sat == 1}
+		if v, ok := nullableInt(pctRaw); ok {
+			p.Pct = &v
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func buildWindow(pct int, resetISO string, span time.Duration, resetDetected bool, now time.Time) *windowState {
