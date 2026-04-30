@@ -22,6 +22,13 @@ type HistoryResponse struct {
 	LatestSessionMedianN  int                 `json:"latest_session_median_n"`
 	LatestWeekMedianN     int                 `json:"latest_week_median_n"`
 	HourlyHeatmap         [7][24]int64        `json:"hourly_heatmap"` // raw tokens per (weekday Sun=0, hour)
+	// PctBurnedHeatmap sums positive session_pct deltas per (weekday Sun=0,
+	// hour) over the window. Saturated and reset-bracketed deltas are
+	// skipped — they don't represent real "burn." Useful next to
+	// HourlyHeatmap to see when the user actually eats into their limit
+	// vs when raw token volume happens to be high (cache-heavy windows
+	// can spend tokens cheaply in pct terms, and vice versa).
+	PctBurnedHeatmap [7][24]int64 `json:"pct_burned_heatmap"`
 }
 
 // ObservationPoint is a slimmed-down /usage observation for charting.
@@ -104,6 +111,28 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if err := rows.Err(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
+	}
+
+	// Pct-burned heatmap from session_pct deltas across adjacent
+	// observations. Skipped if either side is saturated (pct doesn't
+	// move while capped) or b is right after a reset (rolled back to 0).
+	for i := 1; i < len(out.Observations); i++ {
+		a, b := out.Observations[i-1], out.Observations[i]
+		if a.SessionPct == nil || b.SessionPct == nil {
+			continue
+		}
+		if a.SessionSaturated || b.SessionSaturated {
+			continue
+		}
+		if b.SessionReset {
+			continue
+		}
+		delta := *b.SessionPct - *a.SessionPct
+		if delta <= 0 {
+			continue
+		}
+		t := time.UnixMilli(b.TSUnixMS)
+		out.PctBurnedHeatmap[t.Weekday()][t.Hour()] += int64(delta)
 	}
 
 	sessPts, err := s.Store.CalibrationPoints(ctx, "session")
