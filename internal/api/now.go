@@ -78,6 +78,14 @@ type sessionInsight struct {
 	// or TurnCount if this session has never been compacted.
 	TurnsSinceCompact int `json:"turns_since_compact,omitempty"`
 
+	// CompactCostPct estimates what running /compact right now would cost,
+	// as % of the session bucket. /compact mechanically resembles one
+	// normal turn (current context as input, summary as output), so we use
+	// the smoothed recent-turn cost as a first-order estimate. Only set
+	// when the recommendation suggests compacting could be worthwhile —
+	// the field is the answer to "how much does it cost to act on this?"
+	CompactCostPct float64 `json:"compact_cost_pct,omitempty"`
+
 	// TokensPerPctCW echoes the latest median used for the % conversions
 	// above. Lets the UI render "(at ≈X tok/1%)" without a second call.
 	TokensPerPctCW float64 `json:"tokens_per_pct_cw,omitempty"`
@@ -444,6 +452,10 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project string, 
 		default:
 			info.Recommendation = "ok"
 		}
+	}
+
+	if (info.Recommendation == "compact" || info.Recommendation == "watch") && info.Recent3AvgPct > 0 {
+		info.CompactCostPct = info.Recent3AvgPct
 	}
 	return info
 }

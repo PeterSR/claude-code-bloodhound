@@ -59,6 +59,7 @@ type SessionInsight = {
   session_avg_pct?: number;
   turns_since_compact?: number;
   tokens_per_pct_cw?: number;
+  compact_cost_pct?: number;
   recommendation?: 'ok' | 'watch' | 'compact';
   recommendation_reason?: string;
 };
@@ -261,6 +262,11 @@ function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
           )}
           {!s.recommendation && (
             <span>Need more turns before context bloat can be flagged.</span>
+          )}
+          {s.compact_cost_pct != null && s.compact_cost_pct > 0 && (
+            <span className="text-zinc-500 dark:text-zinc-500">
+              {' '}· ≈{s.compact_cost_pct.toFixed(2)}% to /compact
+            </span>
           )}
           {s.turns_since_compact != null && s.turns_since_compact > 0 && (
             <span className="text-zinc-500 dark:text-zinc-500">
