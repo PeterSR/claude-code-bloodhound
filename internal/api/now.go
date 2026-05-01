@@ -415,36 +415,46 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project, cacheTT
 	}
 
 	if rows, err := s.Store.DB.QueryContext(ctx, `
-		SELECT `+rawExpr+`, `+cwExpr+`, `+coldPrefixCWExpr+`
+		SELECT `+rawExpr+`, `+cwExpr+`, `+coldPrefixCWExpr+`, cache_create_5m, cache_create_1h
 		FROM turns WHERE session_uuid = ?
 		ORDER BY turn_idx DESC LIMIT 3
 	`, uuid); err == nil {
 		defer rows.Close()
-		var lastRaw int64
+		var lastRaw, lastCC5m, lastCC1h int64
 		var lastCW, lastColdPrefix, sumCW float64
 		var n int
 		for rows.Next() {
-			var r int64
+			var r, cc5m, cc1h int64
 			var c, cp float64
-			if err := rows.Scan(&r, &c, &cp); err != nil {
+			if err := rows.Scan(&r, &c, &cp, &cc5m, &cc1h); err != nil {
 				break
 			}
 			if n == 0 {
 				lastRaw = r
 				lastCW = c
 				lastColdPrefix = cp
+				lastCC5m = cc5m
+				lastCC1h = cc1h
 			}
 			sumCW += c
 			n++
 		}
 		info.LastTurnRawTokens = lastRaw
 		info.LastTurnCWTokens = round2(lastCW)
-		// Cold-resume cost only applies if the cache has actually expired.
-		// Sessions on 1h TTL stay warm longer; everything else (5m, mix,
-		// none, unknown) defaults to the 5m boundary. Within TTL the cache
-		// is still warm and showing a cold cost would be misleading.
+		// Cold-resume cost only applies once the cache has actually
+		// expired. The right threshold is the TTL of the *last turn's*
+		// cache, not the session-level cache_ttl summary — a 'mix' session
+		// you're actively in cached the most-recent prefix at whatever the
+		// last turn used (typically 1h, the Claude Code default). Decide
+		// per-turn: 1h if the last turn cached at 1h, else 5m if it cached
+		// at 5m, else fall back to the session aggregate.
 		var coldThresholdS int64 = 300
-		if cacheTTL == "1h" {
+		switch {
+		case lastCC1h > 0:
+			coldThresholdS = 3600
+		case lastCC5m > 0:
+			coldThresholdS = 300
+		case cacheTTL == "1h":
 			coldThresholdS = 3600
 		}
 		if info.AgeS >= coldThresholdS {
