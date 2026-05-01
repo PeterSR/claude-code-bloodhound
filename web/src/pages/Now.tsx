@@ -48,8 +48,8 @@ type SessionInsight = {
   last_ts_unix_ms: number;
   age_s: number;
   turn_count: number;
-  raw_tokens: number;
-  cw_tokens: number;
+  total_raw_tokens: number;
+  total_cw_tokens: number;
   last_turn_raw_tokens: number;
   last_turn_cw_tokens: number;
   last_turn_pct?: number;
@@ -59,7 +59,10 @@ type SessionInsight = {
   session_avg_pct?: number;
   turns_since_compact?: number;
   tokens_per_pct_cw?: number;
+  compact_cost_cw_tokens?: number;
   compact_cost_pct?: number;
+  cold_resume_cost_cw_tokens?: number;
+  cold_resume_cost_pct?: number;
   recommendation?: 'ok' | 'watch' | 'compact';
   recommendation_reason?: string;
 };
@@ -217,7 +220,7 @@ function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
 
       <div className="grid grid-cols-3 gap-3 mb-3">
         <Stat label="Turns" value={fmtNumber(s.turn_count)} />
-        <Stat label="Tokens (cw)" value={fmtNumber(s.cw_tokens)} hint={`${fmtNumber(s.raw_tokens)} raw`} />
+        <Stat label="Tokens (cw)" value={fmtNumber(s.total_cw_tokens)} hint={`${fmtNumber(s.total_raw_tokens)} raw`} />
         <Stat
           label="Last turn"
           value={s.last_turn_pct ? `${s.last_turn_pct.toFixed(2)}%` : '—'}
@@ -238,6 +241,14 @@ function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
           {ratio != null && (
             <span className="ml-1 text-zinc-500">
               ({ratio < 1 ? ratio.toFixed(2) : ratio.toFixed(1)}×)
+            </span>
+          )}
+          {s.cold_resume_cost_pct != null && s.cold_resume_cost_pct > 0 && (
+            <span title="Estimated cost of replaying the conversation prefix when the cache has gone cold (5m TTL). Doesn't include the next prompt or response.">
+              {' · '}cold resume{' '}
+              <span className="text-zinc-800 dark:text-zinc-200 tabular-nums">
+                ≈{s.cold_resume_cost_pct.toFixed(2)}%
+              </span>
             </span>
           )}
         </div>

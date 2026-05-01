@@ -58,9 +58,9 @@ type sessionInsight struct {
 	LastTSUnixMS int64  `json:"last_ts_unix_ms"`
 	AgeS         int64  `json:"age_s"`
 
-	TurnCount int     `json:"turn_count"`
-	RawTokens int64   `json:"raw_tokens"`
-	CWTokens  float64 `json:"cw_tokens"`
+	TurnCount      int     `json:"turn_count"`
+	TotalRawTokens int64   `json:"total_raw_tokens"`
+	TotalCWTokens  float64 `json:"total_cw_tokens"`
 
 	// Last turn's actual cost.
 	LastTurnRawTokens int64   `json:"last_turn_raw_tokens"`
@@ -78,13 +78,24 @@ type sessionInsight struct {
 	// or TurnCount if this session has never been compacted.
 	TurnsSinceCompact int `json:"turns_since_compact,omitempty"`
 
-	// CompactCostPct estimates what running /compact right now would cost,
-	// as % of the session bucket. /compact mechanically resembles one
-	// normal turn (current context as input, summary as output), so we use
-	// the smoothed recent-turn cost as a first-order estimate. Only set
-	// when the recommendation suggests compacting could be worthwhile —
-	// the field is the answer to "how much does it cost to act on this?"
-	CompactCostPct float64 `json:"compact_cost_pct,omitempty"`
+	// CompactCostCWTokens / CompactCostPct estimate what running /compact
+	// right now would cost. /compact mechanically resembles one normal
+	// turn (current context as input, summary as output), so we use the
+	// smoothed recent-turn cost as a first-order estimate. Only set when
+	// the recommendation suggests compacting could be worthwhile — the
+	// field is the answer to "how much does it cost to act on this?"
+	CompactCostCWTokens float64 `json:"compact_cost_cw_tokens,omitempty"`
+	CompactCostPct      float64 `json:"compact_cost_pct,omitempty"`
+
+	// ColdResumeCostCWTokens / ColdResumeCostPct estimate the cost of
+	// replaying the conversation prefix when the cache has gone cold —
+	// i.e. the floor on what continuing this session will cost if you
+	// walked away past the cache TTL. We can't know the next prompt or
+	// response size, but the prefix itself is fixed; everything in it has
+	// to be re-cached at the cache_create rate. Computed off the most
+	// recent turn's view of the context.
+	ColdResumeCostCWTokens float64 `json:"cold_resume_cost_cw_tokens,omitempty"`
+	ColdResumeCostPct      float64 `json:"cold_resume_cost_pct,omitempty"`
 
 	// TokensPerPctCW echoes the latest median used for the % conversions
 	// above. Lets the UI render "(at ≈X tok/1%)" without a second call.
@@ -318,6 +329,16 @@ const cwExpr = `(input_tokens
                  + cache_create_1h * 2.0)`
 const rawExpr = `(input_tokens + output_tokens + cache_read + cache_create_5m + cache_create_1h)`
 
+// coldPrefixCWExpr is the cost-weighted price of replaying the
+// conversation prefix when the cache has gone cold. Bounds the lower
+// estimate of "what would resuming this session cost" — we can't predict
+// the new prompt or response size, but the prefix itself is fixed and
+// must be re-paid as cache creation (assumes the 5m TTL Claude Code uses
+// by default; sessions on 1h would skew higher). The prefix at turn N is
+// approximated by what the model saw as input + what it produced as
+// output during that turn.
+const coldPrefixCWExpr = `((input_tokens + cache_read + cache_create_5m + cache_create_1h + output_tokens) * 1.25)`
+
 // queryRecentSessionInsights returns sessions whose last turn falls
 // inside [now-windowS, now], each fully decorated with per-turn insights.
 // A hard cap of recentSessionsMax keeps the panel from blowing up on days
@@ -384,36 +405,38 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project string, 
 		return info
 	}
 	info.TurnCount = int(turnCount.Int64)
-	info.RawTokens = rawSum.Int64
-	info.CWTokens = round2(cwSum.Float64)
+	info.TotalRawTokens = rawSum.Int64
+	info.TotalCWTokens = round2(cwSum.Float64)
 	if info.TurnCount > 0 {
 		info.SessionAvgCWTokens = round2(cwSum.Float64 / float64(info.TurnCount))
 	}
 
 	if rows, err := s.Store.DB.QueryContext(ctx, `
-		SELECT `+rawExpr+`, `+cwExpr+`
+		SELECT `+rawExpr+`, `+cwExpr+`, `+coldPrefixCWExpr+`
 		FROM turns WHERE session_uuid = ?
 		ORDER BY turn_idx DESC LIMIT 3
 	`, uuid); err == nil {
 		defer rows.Close()
 		var lastRaw int64
-		var lastCW, sumCW float64
+		var lastCW, lastColdPrefix, sumCW float64
 		var n int
 		for rows.Next() {
 			var r int64
-			var c float64
-			if err := rows.Scan(&r, &c); err != nil {
+			var c, cp float64
+			if err := rows.Scan(&r, &c, &cp); err != nil {
 				break
 			}
 			if n == 0 {
 				lastRaw = r
 				lastCW = c
+				lastColdPrefix = cp
 			}
 			sumCW += c
 			n++
 		}
 		info.LastTurnRawTokens = lastRaw
 		info.LastTurnCWTokens = round2(lastCW)
+		info.ColdResumeCostCWTokens = round2(lastColdPrefix)
 		if n > 0 {
 			info.Recent3AvgCWTokens = round2(sumCW / float64(n))
 		}
@@ -438,6 +461,7 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project string, 
 		info.LastTurnPct = round2(info.LastTurnCWTokens / tokensPerPct)
 		info.SessionAvgPct = round2(info.SessionAvgCWTokens / tokensPerPct)
 		info.Recent3AvgPct = round2(info.Recent3AvgCWTokens / tokensPerPct)
+		info.ColdResumeCostPct = round2(info.ColdResumeCostCWTokens / tokensPerPct)
 	}
 
 	if info.SessionAvgCWTokens > 0 && info.TurnCount >= 5 && info.Recent3AvgCWTokens > 0 {
@@ -454,7 +478,8 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project string, 
 		}
 	}
 
-	if (info.Recommendation == "compact" || info.Recommendation == "watch") && info.Recent3AvgPct > 0 {
+	if (info.Recommendation == "compact" || info.Recommendation == "watch") && info.Recent3AvgCWTokens > 0 {
+		info.CompactCostCWTokens = info.Recent3AvgCWTokens
 		info.CompactCostPct = info.Recent3AvgPct
 	}
 	return info
