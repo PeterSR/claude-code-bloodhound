@@ -15,7 +15,7 @@ Bloodhound watches the JSONL session logs Claude Code already writes to your dis
 
 ## Status
 
-Pre-1.0, actively developed. The data model and the daily-driver UI are in place:
+**v0.1 alpha — usable, but expect rough edges.** The data model and the daily-driver UI are in place:
 
 - `Now` — gauges for session and week, time to natural reset, burn-rate projection (only when actionable), and an "On extra usage" badge once you blow past 100%.
 - `History` — `/usage` % over time, the calibration trend (tokens per 1%), and a weekday × hour heatmap of when you spend.
@@ -53,7 +53,19 @@ Bloodhound is local-first. Your data stays on your machine. The future opt-in **
 
 ## Install
 
-Pre-built binaries are not yet published. Build from source:
+### Pre-built binary
+
+Grab a binary from the [Releases page](https://github.com/PeterSR/claude-code-bloodhound/releases), unpack, and put `bloodhound` somewhere on your `$PATH`. Linux and macOS, amd64 and arm64.
+
+```bash
+bloodhound doctor
+bloodhound daemon &
+bloodhound serve
+```
+
+### From source
+
+Requires Go 1.25+ and Node 20+:
 
 ```bash
 git clone https://github.com/PeterSR/claude-code-bloodhound

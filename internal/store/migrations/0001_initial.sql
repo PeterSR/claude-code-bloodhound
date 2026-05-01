@@ -1,8 +1,11 @@
--- 0001_initial.sql — full v1 schema in one migration.
+-- 0001_initial.sql — full v0.1 schema in one migration.
 --
--- Pre-1.0 we'd rather wipe the DB than carry incremental migrations for an
--- unstable schema. Once we ship a tagged release this file freezes and any
--- further changes land as 0002_*.sql, 0003_*.sql, etc.
+-- Pre-1.0 we squash. Once we ship a tagged release this file freezes and
+-- any further schema changes land as 0002_*.sql, 0003_*.sql, etc.
+--
+-- Existing DBs that were migrated through pre-0.1 incrementals (0001..0005)
+-- already have schema_migrations rows up to 5; the runner skips any version
+-- <= the current max, so re-running this against such a DB is a no-op.
 
 CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
@@ -56,6 +59,13 @@ CREATE INDEX idx_compactions_ts_unix_ms ON compactions (ts_unix_ms);
 CREATE INDEX idx_compactions_session ON compactions (session_uuid);
 
 -- One row per /usage scrape.
+--
+-- Saturation flags: when a bucket hits its cap (>=99) and the user goes
+-- onto Anthropic's "Extra usage" tier, pct stops moving even though tokens
+-- keep being spent. Tokens-per-1% calibration must exclude those rows or
+-- the ratio explodes; we tag at write time so calibration queries stay simple.
+-- 99 (not 100) because Anthropic's panel rounds: 99.4% renders as 99 but
+-- already behaves like a hit cap.
 CREATE TABLE usage_observations (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts                       TEXT    NOT NULL,
@@ -69,6 +79,8 @@ CREATE TABLE usage_observations (
     raw_dump_id              INTEGER,
     session_reset_detected   INTEGER NOT NULL DEFAULT 0,
     week_reset_detected      INTEGER NOT NULL DEFAULT 0,
+    session_saturated        INTEGER NOT NULL DEFAULT 0,
+    week_saturated           INTEGER NOT NULL DEFAULT 0,
     elapsed_s                REAL,             -- how long the scrape took
     parse_ok                 INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (raw_dump_id) REFERENCES raw_dumps (id) ON DELETE SET NULL
@@ -134,3 +146,36 @@ CREATE TABLE ingested_files (
     turn_count       INTEGER NOT NULL DEFAULT 0,
     compaction_count INTEGER NOT NULL DEFAULT 0
 );
+
+-- Tokens-per-1% calibration points.
+--
+-- Each row pairs two adjacent /usage observations within the same bucket
+-- (no reset between, neither saturated) and divides the cost-weighted
+-- tokens spent in that gap by the percentage points the bucket moved.
+-- That ratio is "tokens per 1% of the bucket" — the closest thing we have
+-- to translating Anthropic's opaque /usage percentage into raw tokens.
+--
+-- A separate table (rather than computing on read) because the join is
+-- moderately expensive, the history of ratio drift is itself useful, and
+-- the aggregator already wipes-and-rebuilds derived tables.
+CREATE TABLE calibration_points (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    bucket                   TEXT    NOT NULL,    -- 'session' | 'week'
+    a_obs_id                 INTEGER NOT NULL,    -- earlier observation
+    b_obs_id                 INTEGER NOT NULL,    -- later observation
+    a_ts_unix_ms             INTEGER NOT NULL,
+    b_ts_unix_ms             INTEGER NOT NULL,
+    a_pct                    INTEGER NOT NULL,
+    b_pct                    INTEGER NOT NULL,
+    delta_pct                INTEGER NOT NULL,    -- b_pct - a_pct, always > 0
+    raw_tokens               INTEGER NOT NULL,
+    cost_weighted_tokens     REAL    NOT NULL,
+    output_tokens            INTEGER NOT NULL,
+    turn_count               INTEGER NOT NULL,
+    gap_s                    REAL    NOT NULL,
+    tokens_per_pct_raw       REAL    NOT NULL,    -- raw_tokens / delta_pct
+    tokens_per_pct_cw        REAL    NOT NULL,    -- cost_weighted / delta_pct
+    UNIQUE (bucket, a_obs_id, b_obs_id)
+);
+
+CREATE INDEX idx_cal_bucket_ts ON calibration_points (bucket, b_ts_unix_ms);
