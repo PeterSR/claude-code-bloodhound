@@ -90,6 +90,14 @@ Bloodhound follows XDG conventions on Linux and the platform conventions on macO
 | Config | `$XDG_CONFIG_HOME/bloodhound/config.json` | `~/Library/Application Support/bloodhound/` | `%LOCALAPPDATA%\bloodhound\` |
 | State (extractors, daemon log) | `$XDG_STATE_HOME/bloodhound/` | `~/Library/Application Support/bloodhound/` | `%LOCALAPPDATA%\bloodhound\` |
 
+## Disclaimer
+
+This is a tool for monitoring Claude Code, and — fittingly — Claude Code has been used to build it. The Go and TypeScript here are vetted by a human, but parts of the implementation, scaffolding, and copy were drafted with AI assistance.
+
+It's also **alpha software**. Expect rough edges: things may misclassify, the schema may change, your local DB may need to be wiped between releases, and the bundled `/usage` extractor will break the next time Anthropic redesigns the panel (`bloodhound poll --rebootstrap` will get you going again). It does not modify your Claude Code installation, your JSONL session files, or anything outside its own state directory — but treat the numbers as informational, not as a substitute for Anthropic's own billing.
+
+Bloodhound is not affiliated with or endorsed by Anthropic.
+
 ## License
 
 MIT.
