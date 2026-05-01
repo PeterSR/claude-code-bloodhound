@@ -112,6 +112,7 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 			Project:     fr.Project,
 			Turns:       toStoreTurns(fr.Turns),
 			Compactions: toStoreCompactions(fr.Compactions),
+			UserPrompts: toStoreUserPrompts(fr.UserPrompts),
 		}); err != nil {
 			st.Errors = append(st.Errors, fmt.Sprintf("persist %s: %v", p, err))
 			continue
@@ -166,6 +167,18 @@ func toStoreTurns(in []Turn) []store.TurnRow {
 			PostCompact:    t.PostCompact,
 			Project:        t.Project,
 			SourcePathHash: t.SourcePathHash,
+		}
+	}
+	return out
+}
+
+func toStoreUserPrompts(in []UserPrompt) []store.UserPromptRow {
+	out := make([]store.UserPromptRow, len(in))
+	for i, p := range in {
+		out[i] = store.UserPromptRow{
+			SessionUUID: p.SessionUUID,
+			TSUnixMS:    p.TSUnixMS,
+			TextPreview: p.TextPreview,
 		}
 	}
 	return out

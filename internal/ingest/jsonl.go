@@ -15,13 +15,17 @@ import (
 
 // rawRecord is the small set of JSONL fields we care about.
 type rawRecord struct {
-	Type             string          `json:"type"`
-	Subtype          string          `json:"subtype,omitempty"`
-	Timestamp        string          `json:"timestamp,omitempty"`
-	Cwd              string          `json:"cwd,omitempty"`
-	IsMeta           bool            `json:"isMeta,omitempty"`
-	IsCompactSummary bool            `json:"isCompactSummary,omitempty"`
-	Message          json.RawMessage `json:"message,omitempty"`
+	Type                    string          `json:"type"`
+	Subtype                 string          `json:"subtype,omitempty"`
+	Timestamp               string          `json:"timestamp,omitempty"`
+	Cwd                     string          `json:"cwd,omitempty"`
+	IsMeta                  bool            `json:"isMeta,omitempty"`
+	IsCompactSummary        bool            `json:"isCompactSummary,omitempty"`
+	IsSidechain             bool            `json:"isSidechain,omitempty"`
+	UserType                string          `json:"userType,omitempty"`
+	ToolUseResult           json.RawMessage `json:"toolUseResult,omitempty"`
+	SourceToolAssistantUUID string          `json:"sourceToolAssistantUUID,omitempty"`
+	Message                 json.RawMessage `json:"message,omitempty"`
 }
 
 type rawMessage struct {
@@ -62,6 +66,14 @@ type Turn struct {
 	SourcePathHash string
 }
 
+// UserPrompt is the persisted form of a single human-typed user message.
+// We keep only a short text preview for disambiguating session cards.
+type UserPrompt struct {
+	SessionUUID string
+	TSUnixMS    int64
+	TextPreview string
+}
+
 // Compaction is the persisted form of a /compact event.
 type Compaction struct {
 	SessionUUID       string
@@ -82,6 +94,7 @@ type FileResult struct {
 	Project      string
 	Turns        []Turn
 	Compactions  []Compaction
+	UserPrompts  []UserPrompt
 	PathHash     string
 }
 
@@ -166,6 +179,24 @@ func parseFile(path string) (FileResult, error) {
 				}
 				pendingGapToPrev = &gap
 				pendingCacheState = stateFromGap(gap)
+			}
+
+		case rec.Type == "user" && !rec.IsMeta && !rec.IsCompactSummary &&
+			!rec.IsSidechain && len(rec.ToolUseResult) == 0 &&
+			rec.SourceToolAssistantUUID == "" && rec.UserType == "external":
+			// Plain human-typed prompt. Tool results, sidechain (sub-agent)
+			// turns, and meta-injected messages all share type=="user", so
+			// the filter list above is necessary. Slash-command stdout
+			// blobs (e.g. /usage output) re-enter as user messages too —
+			// we strip those out via the preview extractor.
+			if preview := extractUserPromptPreview(rec.Message); preview != "" {
+				if tsMS := parseTSMS(rec.Timestamp); tsMS > 0 {
+					res.UserPrompts = append(res.UserPrompts, UserPrompt{
+						SessionUUID: sessionUUID,
+						TSUnixMS:    tsMS,
+						TextPreview: preview,
+					})
+				}
 			}
 
 		case rec.Type == "user" && rec.IsCompactSummary:
@@ -290,6 +321,97 @@ func parseFile(path string) (FileResult, error) {
 	}
 
 	return res, nil
+}
+
+// extractUserPromptPreview pulls a single-line, length-capped preview out of
+// a user-message body. Returns "" for messages we want to skip:
+//   - tool_result blocks (handled by ToolUseResult filter upstream, but
+//     also belt-and-braces here)
+//   - slash-command stdout / system-reminder blobs which re-enter as
+//     user messages and would otherwise leak noise into the preview
+//   - empty content
+const userPromptPreviewMax = 240
+
+func extractUserPromptPreview(msg json.RawMessage) string {
+	var probe struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(msg, &probe); err != nil || len(probe.Content) == 0 {
+		return ""
+	}
+	var raw string
+	// Either content is a plain string, or a list of {type, text} blocks.
+	if err := json.Unmarshal(probe.Content, &raw); err != nil {
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(probe.Content, &blocks); err != nil {
+			return ""
+		}
+		var b strings.Builder
+		for _, blk := range blocks {
+			if blk.Type == "text" {
+				if b.Len() > 0 {
+					b.WriteByte(' ')
+				}
+				b.WriteString(blk.Text)
+			}
+		}
+		raw = b.String()
+	}
+	return cleanPromptPreview(raw)
+}
+
+// cleanPromptPreview strips slash-command wrappers and system-reminder XML,
+// collapses whitespace, and truncates. The wrappers Claude Code injects
+// (e.g. <command-name>/usage</command-name><local-command-stdout>...) are
+// not user intent; if a message is *only* such wrappers we return "".
+func cleanPromptPreview(s string) string {
+	s = stripTagBlock(s, "system-reminder")
+	s = stripTagBlock(s, "local-command-stdout")
+	s = stripTagBlock(s, "local-command-stderr")
+	s = stripTagBlock(s, "command-name")
+	s = stripTagBlock(s, "command-message")
+	s = stripTagBlock(s, "command-args")
+	// Collapse whitespace.
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	if len([]rune(s)) > userPromptPreviewMax {
+		r := []rune(s)
+		s = strings.TrimRight(string(r[:userPromptPreviewMax]), " ") + "…"
+	}
+	return s
+}
+
+// stripTagBlock removes every <tag>…</tag> region (and lone <tag/>). The
+// JSONL prompt envelopes are not arbitrary HTML, so a regex-free scan is
+// safe and avoids dependencies.
+func stripTagBlock(s, tag string) string {
+	openTok := "<" + tag
+	closeTok := "</" + tag + ">"
+	for {
+		i := strings.Index(s, openTok)
+		if i < 0 {
+			break
+		}
+		// Find the end of the open tag.
+		gt := strings.Index(s[i:], ">")
+		if gt < 0 {
+			s = s[:i]
+			break
+		}
+		end := strings.Index(s[i+gt:], closeTok)
+		if end < 0 {
+			// Unbalanced; drop to end of input.
+			s = s[:i]
+			break
+		}
+		s = s[:i] + s[i+gt+end+len(closeTok):]
+	}
+	return s
 }
 
 func extractSummaryText(msg json.RawMessage) string {

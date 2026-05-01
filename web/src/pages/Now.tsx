@@ -65,6 +65,7 @@ type SessionInsight = {
   cold_resume_cost_pct?: number;
   recommendation?: 'ok' | 'watch' | 'compact';
   recommendation_reason?: string;
+  last_user_prompt?: string;
 };
 
 type NowResponse = {
@@ -208,6 +209,14 @@ function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
           >
             {stripProject(s.project)}
           </Link>
+          {s.last_user_prompt && (
+            <div
+              className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate italic mt-0.5"
+              title={s.last_user_prompt}
+            >
+              "{s.last_user_prompt}"
+            </div>
+          )}
         </div>
         <Link
           to={`/sessions/${s.session_uuid}`}

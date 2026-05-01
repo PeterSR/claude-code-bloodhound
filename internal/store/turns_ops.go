@@ -40,12 +40,20 @@ type CompactionRow struct {
 	Project          string
 }
 
+// UserPromptRow mirrors the `user_prompts` table.
+type UserPromptRow struct {
+	SessionUUID string
+	TSUnixMS    int64
+	TextPreview string
+}
+
 // SessionPersist bundles the data ingested for a single session_uuid.
 type SessionPersist struct {
 	SessionUUID string
 	Project     string
 	Turns       []TurnRow
 	Compactions []CompactionRow
+	UserPrompts []UserPromptRow
 }
 
 // IngestedFileRecord tracks per-file mtime so we can skip unchanged files
@@ -77,6 +85,11 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM compactions WHERE session_uuid = ?`, sp.SessionUUID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM user_prompts WHERE session_uuid = ?`, sp.SessionUUID,
 	); err != nil {
 		return err
 	}
@@ -140,6 +153,22 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 				gap, c.CacheState,
 				conf, c.ConfirmReason, c.Project,
 			); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(sp.UserPrompts) > 0 {
+		ps, err := tx.PrepareContext(ctx, `
+			INSERT OR IGNORE INTO user_prompts (session_uuid, ts_unix_ms, text_preview)
+			VALUES (?,?,?)
+		`)
+		if err != nil {
+			return err
+		}
+		defer ps.Close()
+		for _, p := range sp.UserPrompts {
+			if _, err := ps.ExecContext(ctx, p.SessionUUID, p.TSUnixMS, p.TextPreview); err != nil {
 				return err
 			}
 		}

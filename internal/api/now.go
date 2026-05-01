@@ -107,6 +107,11 @@ type sessionInsight struct {
 	// why for the UI tooltip.
 	Recommendation       string `json:"recommendation,omitempty"`
 	RecommendationReason string `json:"recommendation_reason,omitempty"`
+
+	// LastUserPrompt is a short preview (≤240 chars) of the most recent
+	// human-typed prompt in this session. Disambiguates cards that share
+	// a project name; also doubles as a "where did I leave off" hint.
+	LastUserPrompt string `json:"last_user_prompt,omitempty"`
 }
 
 // nowHistoryPoint is one observation slimmed for the in-window chart.
@@ -380,10 +385,26 @@ func (s *Server) queryRecentSessionInsights(ctx context.Context, now time.Time, 
 	for _, h := range heads {
 		insight := s.buildSessionInsight(ctx, h.uuid, h.project, h.cacheTTL, h.lastMS, now, tokensPerPct, hasCal)
 		if insight != nil {
+			insight.LastUserPrompt = s.queryLastUserPrompt(ctx, h.uuid)
 			out = append(out, *insight)
 		}
 	}
 	return out
+}
+
+// queryLastUserPrompt returns the most recent user-prompt preview stored for
+// a session, or "" if none was captured. Failures collapse to "" so a missing
+// prompt never breaks the card.
+func (s *Server) queryLastUserPrompt(ctx context.Context, uuid string) string {
+	var preview sql.NullString
+	if err := s.Store.DB.QueryRowContext(ctx, `
+		SELECT text_preview FROM user_prompts
+		WHERE session_uuid = ?
+		ORDER BY ts_unix_ms DESC LIMIT 1
+	`, uuid).Scan(&preview); err != nil {
+		return ""
+	}
+	return preview.String
 }
 
 // buildSessionInsight populates one sessionInsight from the per-turn data
