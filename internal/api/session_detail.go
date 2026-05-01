@@ -56,6 +56,8 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	// Header from the materialized sessions table.
 	var resp SessionDetailResponse
 	resp.SessionUUID = uuid
+	resp.Turns = []TurnItem{}
+	resp.Compactions = []CompactionItem{}
 	var firstMS, lastMS int64
 	err := s.Store.DB.QueryRowContext(ctx, `
 		SELECT project, first_ts_unix_ms, last_ts_unix_ms,
