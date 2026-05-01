@@ -242,6 +242,27 @@ function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
           </span>
         </div>
       )}
+      {s.cold_resume_cost_pct != null && s.cold_resume_cost_pct > 0 && (
+        <div
+          className="rounded-md border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 px-2.5 py-1 text-xs flex items-center gap-1.5 mb-3"
+          title="The cache has expired. Resuming this session means re-paying for the entire prefix at cache_create rates. Doesn't include the next prompt or response."
+        >
+          <Clock className="size-3 shrink-0" />
+          <span>
+            <strong>
+              {s.cache_ttl_s === 3600 ? '1h' : s.cache_ttl_s === 300 ? '5m' : ''} cache
+            </strong>{' '}
+            expired{' '}
+            {s.cache_ttl_s != null && s.cache_ttl_s > 0 && (
+              <strong className="tabular-nums">
+                {fmtRemainShort(s.age_s - s.cache_ttl_s)} ago
+              </strong>
+            )}
+            {' · '}cold resume{' '}
+            <strong className="tabular-nums">≈{s.cold_resume_cost_pct.toFixed(2)}%</strong>
+          </span>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-3 mb-3">
         <Stat label="Turns" value={fmtNumber(s.turn_count)} />
@@ -266,14 +287,6 @@ function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
           {ratio != null && (
             <span className="ml-1 text-zinc-500">
               ({ratio < 1 ? ratio.toFixed(2) : ratio.toFixed(1)}×)
-            </span>
-          )}
-          {s.cold_resume_cost_pct != null && s.cold_resume_cost_pct > 0 && (
-            <span title="Estimated cost of replaying the conversation prefix now that the cache has expired. Doesn't include the next prompt or response.">
-              {' · '}cold resume cost{' '}
-              <span className="text-zinc-800 dark:text-zinc-200 tabular-nums">
-                ≈{s.cold_resume_cost_pct.toFixed(2)}%
-              </span>
             </span>
           )}
         </div>
