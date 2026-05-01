@@ -244,8 +244,8 @@ function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
             </span>
           )}
           {s.cold_resume_cost_pct != null && s.cold_resume_cost_pct > 0 && (
-            <span title="Estimated cost of replaying the conversation prefix when the cache has gone cold (5m TTL). Doesn't include the next prompt or response.">
-              {' · '}cold resume{' '}
+            <span title="Estimated cost of replaying the conversation prefix now that the cache has expired. Doesn't include the next prompt or response.">
+              {' · '}cold resume cost{' '}
               <span className="text-zinc-800 dark:text-zinc-200 tabular-nums">
                 ≈{s.cold_resume_cost_pct.toFixed(2)}%
               </span>

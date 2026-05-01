@@ -89,11 +89,13 @@ type sessionInsight struct {
 
 	// ColdResumeCostCWTokens / ColdResumeCostPct estimate the cost of
 	// replaying the conversation prefix when the cache has gone cold —
-	// i.e. the floor on what continuing this session will cost if you
-	// walked away past the cache TTL. We can't know the next prompt or
-	// response size, but the prefix itself is fixed; everything in it has
-	// to be re-cached at the cache_create rate. Computed off the most
-	// recent turn's view of the context.
+	// the floor on what continuing this session will cost. We can't know
+	// the next prompt or response size, but the prefix itself is fixed;
+	// everything in it has to be re-cached at the cache_create rate.
+	// Computed off the most recent turn's view of the context. Only set
+	// when the session's age has actually crossed its cache TTL (5m
+	// default, 1h for 1h-TTL sessions); within the TTL the cache is still
+	// warm and showing this cost would be misleading.
 	ColdResumeCostCWTokens float64 `json:"cold_resume_cost_cw_tokens,omitempty"`
 	ColdResumeCostPct      float64 `json:"cold_resume_cost_pct,omitempty"`
 
@@ -347,7 +349,7 @@ func (s *Server) queryRecentSessionInsights(ctx context.Context, now time.Time, 
 	const recentSessionsMax = 10
 	cutoffMS := now.UnixMilli() - int64(windowS)*1000
 	rows, err := s.Store.DB.QueryContext(ctx, `
-		SELECT session_uuid, project, last_ts_unix_ms
+		SELECT session_uuid, project, last_ts_unix_ms, cache_ttl
 		FROM sessions
 		WHERE last_ts_unix_ms >= ?
 		ORDER BY last_ts_unix_ms DESC LIMIT ?
@@ -357,14 +359,15 @@ func (s *Server) queryRecentSessionInsights(ctx context.Context, now time.Time, 
 	}
 	defer rows.Close()
 	type head struct {
-		uuid    string
-		project string
-		lastMS  int64
+		uuid     string
+		project  string
+		lastMS   int64
+		cacheTTL string
 	}
 	var heads []head
 	for rows.Next() {
 		var h head
-		if err := rows.Scan(&h.uuid, &h.project, &h.lastMS); err != nil {
+		if err := rows.Scan(&h.uuid, &h.project, &h.lastMS, &h.cacheTTL); err != nil {
 			return nil
 		}
 		heads = append(heads, h)
@@ -375,7 +378,7 @@ func (s *Server) queryRecentSessionInsights(ctx context.Context, now time.Time, 
 
 	out := make([]sessionInsight, 0, len(heads))
 	for _, h := range heads {
-		insight := s.buildSessionInsight(ctx, h.uuid, h.project, h.lastMS, now, tokensPerPct, hasCal)
+		insight := s.buildSessionInsight(ctx, h.uuid, h.project, h.cacheTTL, h.lastMS, now, tokensPerPct, hasCal)
 		if insight != nil {
 			out = append(out, *insight)
 		}
@@ -386,7 +389,7 @@ func (s *Server) queryRecentSessionInsights(ctx context.Context, now time.Time, 
 // buildSessionInsight populates one sessionInsight from the per-turn data
 // for a single session. Returns nil only on a hard query failure — partial
 // data still produces a card.
-func (s *Server) buildSessionInsight(ctx context.Context, uuid, project string, lastMS int64, now time.Time, tokensPerPct float64, hasCal bool) *sessionInsight {
+func (s *Server) buildSessionInsight(ctx context.Context, uuid, project, cacheTTL string, lastMS int64, now time.Time, tokensPerPct float64, hasCal bool) *sessionInsight {
 	info := &sessionInsight{
 		SessionUUID:  uuid,
 		Project:      project,
@@ -436,7 +439,17 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project string, 
 		}
 		info.LastTurnRawTokens = lastRaw
 		info.LastTurnCWTokens = round2(lastCW)
-		info.ColdResumeCostCWTokens = round2(lastColdPrefix)
+		// Cold-resume cost only applies if the cache has actually expired.
+		// Sessions on 1h TTL stay warm longer; everything else (5m, mix,
+		// none, unknown) defaults to the 5m boundary. Within TTL the cache
+		// is still warm and showing a cold cost would be misleading.
+		var coldThresholdS int64 = 300
+		if cacheTTL == "1h" {
+			coldThresholdS = 3600
+		}
+		if info.AgeS >= coldThresholdS {
+			info.ColdResumeCostCWTokens = round2(lastColdPrefix)
+		}
 		if n > 0 {
 			info.Recent3AvgCWTokens = round2(sumCW / float64(n))
 		}
@@ -461,7 +474,9 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project string, 
 		info.LastTurnPct = round2(info.LastTurnCWTokens / tokensPerPct)
 		info.SessionAvgPct = round2(info.SessionAvgCWTokens / tokensPerPct)
 		info.Recent3AvgPct = round2(info.Recent3AvgCWTokens / tokensPerPct)
-		info.ColdResumeCostPct = round2(info.ColdResumeCostCWTokens / tokensPerPct)
+		if info.ColdResumeCostCWTokens > 0 {
+			info.ColdResumeCostPct = round2(info.ColdResumeCostCWTokens / tokensPerPct)
+		}
 	}
 
 	if info.SessionAvgCWTokens > 0 && info.TurnCount >= 5 && info.Recent3AvgCWTokens > 0 {
