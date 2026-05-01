@@ -82,17 +82,24 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		}
 	}
 
-	// Reset detection: compare to most-recent prior observation's
-	// percentages. Real resets drop the bucket from near-100 to near-0.
-	// A 1-2 point dip between adjacent polls is just noise from
-	// Anthropic's rolling-window accounting; require a substantial drop
-	// before flagging.
+	// Reset detection: two complementary heuristics against the most
+	// recent prior observation.
+	//   1. Drop heuristic — pct fell by ≥30pp between adjacent polls.
+	//      Catches the typical rotation where prev was near-cap.
+	//   2. Boundary heuristic — current observation is at or past the
+	//      previous observation's stored reset_ts. Catches long gaps
+	//      where the daemon was idle across a rotation and post-reset
+	//      accumulation makes the pct delta too small to trip (1).
+	// A 1-2 point dip between adjacent polls is noise from Anthropic's
+	// rolling-window accounting; the 30pp threshold filters it out.
 	const resetDropThresholdPP = 30
 	var prevSessionPct, prevWeekPct sql.NullInt64
+	var prevSessionResetTS, prevWeekResetTS sql.NullString
 	row := tx.QueryRowContext(ctx,
-		`SELECT session_pct, week_pct FROM usage_observations ORDER BY ts_unix_ms DESC LIMIT 1`,
+		`SELECT session_pct, week_pct, session_reset_ts, week_reset_ts
+		   FROM usage_observations ORDER BY ts_unix_ms DESC LIMIT 1`,
 	)
-	_ = row.Scan(&prevSessionPct, &prevWeekPct)
+	_ = row.Scan(&prevSessionPct, &prevWeekPct, &prevSessionResetTS, &prevWeekResetTS)
 	sessionResetDetected := 0
 	weekResetDetected := 0
 	if prevSessionPct.Valid && sessionPct.Valid &&
@@ -102,6 +109,18 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 	if prevWeekPct.Valid && weekPct.Valid &&
 		prevWeekPct.Int64-weekPct.Int64 >= resetDropThresholdPP {
 		weekResetDetected = 1
+	}
+	if sessionResetDetected == 0 && prevSessionPct.Valid && sessionPct.Valid && prevSessionResetTS.Valid {
+		if t, err := time.Parse(time.RFC3339, prevSessionResetTS.String); err == nil &&
+			!res.FetchedAt.Before(t) {
+			sessionResetDetected = 1
+		}
+	}
+	if weekResetDetected == 0 && prevWeekPct.Valid && weekPct.Valid && prevWeekResetTS.Valid {
+		if t, err := time.Parse(time.RFC3339, prevWeekResetTS.String); err == nil &&
+			!res.FetchedAt.Before(t) {
+			weekResetDetected = 1
+		}
 	}
 
 	parseOK := 0

@@ -14,6 +14,8 @@ type Config = {
   claude_binary: string;
   statusline_prefix: string;
   stale_after_s: number;
+  active_session_threshold_s: number;
+  recent_session_window_s: number;
 };
 
 type Snippets = {
@@ -138,6 +140,24 @@ export default function Settings() {
                   onChange={(e) => setDraft({ ...draft, stale_after_s: parseInt(e.target.value || '0', 10) })} />
               </Field>
             </FieldRow>
+          </Card>
+
+          <Card title="Now page (seconds)">
+            <FieldRow>
+              <Field label="Active session threshold">
+                <input type="number" className="text-input w-28" value={draft.active_session_threshold_s}
+                  onChange={(e) => setDraft({ ...draft, active_session_threshold_s: parseInt(e.target.value || '0', 10) })} />
+              </Field>
+              <Field label="Recent session window">
+                <input type="number" className="text-input w-28" value={draft.recent_session_window_s}
+                  onChange={(e) => setDraft({ ...draft, recent_session_window_s: parseInt(e.target.value || '0', 10) })} />
+              </Field>
+            </FieldRow>
+            <p className="text-xs text-zinc-500 mt-3">
+              Active threshold: a session whose last turn is within this many seconds gets the
+              <strong> Active</strong> badge. Recent window: only sessions touched within this many
+              seconds are listed at all.
+            </p>
           </Card>
 
           <Card title="Statusline">

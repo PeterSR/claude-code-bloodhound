@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"time"
 
@@ -22,11 +23,69 @@ type NowResponse struct {
 	PollIntervalS int `json:"poll_interval_s,omitempty"`
 	StaleAfterS   int `json:"stale_after_s,omitempty"`
 
+	// ActiveSessionThresholdS is the cutoff (seconds) below which a
+	// session's age earns the Active badge on the Now page. Forwarded
+	// from config so the UI doesn't need to call /api/settings.
+	ActiveSessionThresholdS int `json:"active_session_threshold_s,omitempty"`
+
+	// RecentSessionWindowS bounds which sessions are listed in the
+	// recent-sessions panel. Forwarded so the UI can label the section
+	// accurately ("Last 24h" etc.).
+	RecentSessionWindowS int `json:"recent_session_window_s,omitempty"`
+
 	// SessionHistory and WeekHistory are observation series within each
 	// current window — anchored to [window_start_ts, reset_ts]. Empty
 	// when the matching window is unknown (no parsed reset).
 	SessionHistory []nowHistoryPoint `json:"session_history,omitempty"`
 	WeekHistory    []nowHistoryPoint `json:"week_history,omitempty"`
+
+	// RecentSessions is up to 5 most-recent sessions, each with full
+	// per-turn insights (last-turn cost, recent-3 vs session-average,
+	// compaction recommendation). Trailing entries that are far older
+	// than the cluster are dropped so a stale list doesn't pad out the
+	// panel.
+	RecentSessions []sessionInsight `json:"recent_sessions,omitempty"`
+}
+
+// sessionInsight is a per-session summary with everything the Now page
+// needs to render an insight card: identity + headline counts + per-turn
+// cost trend + a /compact recommendation. All token figures are computed
+// by SQL aggregation over the `turns` table.
+type sessionInsight struct {
+	SessionUUID  string `json:"session_uuid"`
+	Project      string `json:"project"`
+	LastTSISO    string `json:"last_ts"`
+	LastTSUnixMS int64  `json:"last_ts_unix_ms"`
+	AgeS         int64  `json:"age_s"`
+
+	TurnCount int     `json:"turn_count"`
+	RawTokens int64   `json:"raw_tokens"`
+	CWTokens  float64 `json:"cw_tokens"`
+
+	// Last turn's actual cost.
+	LastTurnRawTokens int64   `json:"last_turn_raw_tokens"`
+	LastTurnCWTokens  float64 `json:"last_turn_cw_tokens"`
+	LastTurnPct       float64 `json:"last_turn_pct,omitempty"` // estimated using TokensPerPctCW
+
+	// Recent3AvgCWTokens averages the last min(3, turn_count) turns. The
+	// UI compares this to SessionAvgCWTokens to flag context bloat.
+	Recent3AvgCWTokens float64 `json:"recent3_avg_cw_tokens,omitempty"`
+	Recent3AvgPct      float64 `json:"recent3_avg_pct,omitempty"`
+	SessionAvgCWTokens float64 `json:"session_avg_cw_tokens,omitempty"`
+	SessionAvgPct      float64 `json:"session_avg_pct,omitempty"`
+
+	// TurnsSinceCompact = turns since the most recent post_compact=1 turn,
+	// or TurnCount if this session has never been compacted.
+	TurnsSinceCompact int `json:"turns_since_compact,omitempty"`
+
+	// TokensPerPctCW echoes the latest median used for the % conversions
+	// above. Lets the UI render "(at ≈X tok/1%)" without a second call.
+	TokensPerPctCW float64 `json:"tokens_per_pct_cw,omitempty"`
+
+	// Recommendation is "" | "ok" | "watch" | "compact". Reason explains
+	// why for the UI tooltip.
+	Recommendation       string `json:"recommendation,omitempty"`
+	RecommendationReason string `json:"recommendation_reason,omitempty"`
 }
 
 // nowHistoryPoint is one observation slimmed for the in-window chart.
@@ -81,9 +140,15 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
 	out := NowResponse{NowMS: now.UnixMilli()}
+	recentWindowS := 86400
 	if cfg, err := config.Load(); err == nil {
 		out.PollIntervalS = cfg.PollIntervalS
 		out.StaleAfterS = cfg.StaleAfterS
+		out.ActiveSessionThresholdS = cfg.ActiveSessionThresholdS
+		out.RecentSessionWindowS = cfg.RecentSessionWindowS
+		if cfg.RecentSessionWindowS > 0 {
+			recentWindowS = cfg.RecentSessionWindowS
+		}
 	}
 
 	obs, err := s.Store.LatestUsage(ctx)
@@ -126,6 +191,12 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Per-turn-derived insights for up to 5 most-recent sessions.
+	// tokens_per_pct_cw drives the % estimates; pulled once and reused
+	// across cards for consistency.
+	tokensPerPct, _, _, hasCal, _ := s.Store.LatestCalibrationMedian(ctx, "session", 10)
+	out.RecentSessions = s.queryRecentSessionInsights(ctx, now, recentWindowS, tokensPerPct, hasCal)
 
 	writeJSON(w, http.StatusOK, out)
 }
@@ -227,4 +298,152 @@ func fillBurn(ctx context.Context, s storeIface, ws *windowState, pct int, isSes
 
 func round2(f float64) float64 {
 	return float64(int(f*100+0.5)) / 100
+}
+
+// cwExpr is the SQL fragment that converts a turn's raw token columns into
+// cost-weighted tokens, mirroring the calibrator's weighting (input ×1,
+// output ×5, cache_read ×0.1, cache_create_5m ×1.25, cache_create_1h ×2).
+const cwExpr = `(input_tokens
+                 + output_tokens * 5.0
+                 + cache_read * 0.1
+                 + cache_create_5m * 1.25
+                 + cache_create_1h * 2.0)`
+const rawExpr = `(input_tokens + output_tokens + cache_read + cache_create_5m + cache_create_1h)`
+
+// queryRecentSessionInsights returns sessions whose last turn falls
+// inside [now-windowS, now], each fully decorated with per-turn insights.
+// A hard cap of recentSessionsMax keeps the panel from blowing up on days
+// where the user has been jumping between many projects.
+func (s *Server) queryRecentSessionInsights(ctx context.Context, now time.Time, windowS int, tokensPerPct float64, hasCal bool) []sessionInsight {
+	const recentSessionsMax = 10
+	cutoffMS := now.UnixMilli() - int64(windowS)*1000
+	rows, err := s.Store.DB.QueryContext(ctx, `
+		SELECT session_uuid, project, last_ts_unix_ms
+		FROM sessions
+		WHERE last_ts_unix_ms >= ?
+		ORDER BY last_ts_unix_ms DESC LIMIT ?
+	`, cutoffMS, recentSessionsMax)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	type head struct {
+		uuid    string
+		project string
+		lastMS  int64
+	}
+	var heads []head
+	for rows.Next() {
+		var h head
+		if err := rows.Scan(&h.uuid, &h.project, &h.lastMS); err != nil {
+			return nil
+		}
+		heads = append(heads, h)
+	}
+	if len(heads) == 0 {
+		return nil
+	}
+
+	out := make([]sessionInsight, 0, len(heads))
+	for _, h := range heads {
+		insight := s.buildSessionInsight(ctx, h.uuid, h.project, h.lastMS, now, tokensPerPct, hasCal)
+		if insight != nil {
+			out = append(out, *insight)
+		}
+	}
+	return out
+}
+
+// buildSessionInsight populates one sessionInsight from the per-turn data
+// for a single session. Returns nil only on a hard query failure — partial
+// data still produces a card.
+func (s *Server) buildSessionInsight(ctx context.Context, uuid, project string, lastMS int64, now time.Time, tokensPerPct float64, hasCal bool) *sessionInsight {
+	info := &sessionInsight{
+		SessionUUID:  uuid,
+		Project:      project,
+		LastTSISO:    time.UnixMilli(lastMS).UTC().Format(time.RFC3339),
+		LastTSUnixMS: lastMS,
+		AgeS:         (now.UnixMilli() - lastMS) / 1000,
+	}
+
+	var rawSum sql.NullInt64
+	var cwSum sql.NullFloat64
+	var turnCount sql.NullInt64
+	if err := s.Store.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(`+rawExpr+`), 0), COALESCE(SUM(`+cwExpr+`), 0)
+		FROM turns WHERE session_uuid = ?
+	`, uuid).Scan(&turnCount, &rawSum, &cwSum); err != nil {
+		return info
+	}
+	info.TurnCount = int(turnCount.Int64)
+	info.RawTokens = rawSum.Int64
+	info.CWTokens = round2(cwSum.Float64)
+	if info.TurnCount > 0 {
+		info.SessionAvgCWTokens = round2(cwSum.Float64 / float64(info.TurnCount))
+	}
+
+	if rows, err := s.Store.DB.QueryContext(ctx, `
+		SELECT `+rawExpr+`, `+cwExpr+`
+		FROM turns WHERE session_uuid = ?
+		ORDER BY turn_idx DESC LIMIT 3
+	`, uuid); err == nil {
+		defer rows.Close()
+		var lastRaw int64
+		var lastCW, sumCW float64
+		var n int
+		for rows.Next() {
+			var r int64
+			var c float64
+			if err := rows.Scan(&r, &c); err != nil {
+				break
+			}
+			if n == 0 {
+				lastRaw = r
+				lastCW = c
+			}
+			sumCW += c
+			n++
+		}
+		info.LastTurnRawTokens = lastRaw
+		info.LastTurnCWTokens = round2(lastCW)
+		if n > 0 {
+			info.Recent3AvgCWTokens = round2(sumCW / float64(n))
+		}
+	}
+
+	var sinceCompact sql.NullInt64
+	if err := s.Store.DB.QueryRowContext(ctx, `
+		WITH last_compact AS (
+		    SELECT COALESCE(MAX(turn_idx), -1) AS idx
+		      FROM turns
+		     WHERE session_uuid = ? AND post_compact = 1
+		)
+		SELECT COUNT(*) FROM turns
+		 WHERE session_uuid = ?
+		   AND turn_idx > (SELECT idx FROM last_compact)
+	`, uuid, uuid).Scan(&sinceCompact); err == nil {
+		info.TurnsSinceCompact = int(sinceCompact.Int64)
+	}
+
+	if hasCal && tokensPerPct > 0 {
+		info.TokensPerPctCW = round2(tokensPerPct)
+		info.LastTurnPct = round2(info.LastTurnCWTokens / tokensPerPct)
+		info.SessionAvgPct = round2(info.SessionAvgCWTokens / tokensPerPct)
+		info.Recent3AvgPct = round2(info.Recent3AvgCWTokens / tokensPerPct)
+	}
+
+	if info.SessionAvgCWTokens > 0 && info.TurnCount >= 5 && info.Recent3AvgCWTokens > 0 {
+		ratio := info.Recent3AvgCWTokens / info.SessionAvgCWTokens
+		switch {
+		case ratio >= 2.0:
+			info.Recommendation = "compact"
+			info.RecommendationReason = "recent turns are >2× the session average — context has likely bloated"
+		case ratio >= 1.5:
+			info.Recommendation = "watch"
+			info.RecommendationReason = "recent turns are running heavier than the session average"
+		default:
+			info.Recommendation = "ok"
+		}
+	}
+	return info
 }

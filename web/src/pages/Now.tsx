@@ -1,8 +1,18 @@
 import { useMemo } from 'react';
-import { Activity, AlertCircle, AlertTriangle, RefreshCw, Zap } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import {
+  Activity,
+  AlertCircle,
+  AlertTriangle,
+  ChevronRight,
+  MessageSquare,
+  RefreshCw,
+  Sparkles,
+  Zap,
+} from 'lucide-react';
 import Spark from '../components/Spark';
 import { useApi } from '../hooks/useApi';
-import { fmtAbs, fmtDuration, fmtRel, pctColor } from '../lib/format';
+import { fmtAbs, fmtDuration, fmtNumber, fmtRel, pctColor } from '../lib/format';
 
 type WindowState = {
   pct: number;
@@ -31,6 +41,28 @@ type LastPoll = {
   elapsed_s: number;
 };
 
+type SessionInsight = {
+  session_uuid: string;
+  project: string;
+  last_ts: string;
+  last_ts_unix_ms: number;
+  age_s: number;
+  turn_count: number;
+  raw_tokens: number;
+  cw_tokens: number;
+  last_turn_raw_tokens: number;
+  last_turn_cw_tokens: number;
+  last_turn_pct?: number;
+  recent3_avg_cw_tokens?: number;
+  recent3_avg_pct?: number;
+  session_avg_cw_tokens?: number;
+  session_avg_pct?: number;
+  turns_since_compact?: number;
+  tokens_per_pct_cw?: number;
+  recommendation?: 'ok' | 'watch' | 'compact';
+  recommendation_reason?: string;
+};
+
 type NowResponse = {
   ok: boolean;
   session: WindowState | null;
@@ -39,8 +71,11 @@ type NowResponse = {
   server_now_ms: number;
   poll_interval_s?: number;
   stale_after_s?: number;
+  active_session_threshold_s?: number;
+  recent_session_window_s?: number;
   session_history?: HistoryPoint[];
   week_history?: HistoryPoint[];
+  recent_sessions?: SessionInsight[];
 };
 
 export default function Now() {
@@ -99,10 +134,167 @@ export default function Now() {
               pollIntervalS={data.poll_interval_s}
             />
           </div>
+
+          {data.recent_sessions && data.recent_sessions.length > 0 && (
+            <div className="mt-5">
+              <div className="flex items-center gap-2 mb-3">
+                <MessageSquare className="size-4 text-zinc-500" />
+                <span className="text-xs uppercase tracking-wider text-zinc-500">
+                  Recent sessions
+                </span>
+                {data.recent_session_window_s ? (
+                  <span className="text-[11px] text-zinc-500">
+                    · last {fmtWindowLabel(data.recent_session_window_s)}
+                  </span>
+                ) : null}
+              </div>
+              <div className="grid gap-5 grid-cols-1 xl:grid-cols-2">
+                {data.recent_sessions.map((s) => (
+                  <SessionCard
+                    key={s.session_uuid}
+                    s={s}
+                    active={
+                      data.active_session_threshold_s !== undefined &&
+                      s.age_s <= data.active_session_threshold_s
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
   );
+}
+
+function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
+  const ratio =
+    s.recent3_avg_cw_tokens && s.session_avg_cw_tokens
+      ? s.recent3_avg_cw_tokens / s.session_avg_cw_tokens
+      : null;
+  const sev =
+    s.recommendation === 'compact' ? 'rose' :
+    s.recommendation === 'watch'   ? 'amber' :
+    'zinc';
+  const sevColors: Record<string, string> = {
+    rose:  'border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300',
+    amber: 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300',
+    zinc:  'border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400',
+  };
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 mb-0.5">
+            {active && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 text-rose-700 dark:text-rose-300 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider">
+                <Activity className="size-2.5" />
+                Active
+              </span>
+            )}
+            <span className="text-[11px] text-zinc-500" title={fmtAbs(s.last_ts)}>
+              {fmtRel(s.age_s)}
+            </span>
+          </div>
+          <Link
+            to={`/sessions/${s.session_uuid}`}
+            className="text-sm font-medium hover:text-rose-500 truncate block"
+            title={s.project}
+          >
+            {stripProject(s.project)}
+          </Link>
+        </div>
+        <Link
+          to={`/sessions/${s.session_uuid}`}
+          className="text-zinc-400 hover:text-rose-500 shrink-0"
+          title="Open session"
+        >
+          <ChevronRight className="size-4" />
+        </Link>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <Stat label="Turns" value={fmtNumber(s.turn_count)} />
+        <Stat label="Tokens (cw)" value={fmtNumber(s.cw_tokens)} hint={`${fmtNumber(s.raw_tokens)} raw`} />
+        <Stat
+          label="Last turn"
+          value={s.last_turn_pct ? `${s.last_turn_pct.toFixed(2)}%` : '—'}
+          hint={`${fmtNumber(s.last_turn_cw_tokens)} cw`}
+        />
+      </div>
+
+      {(s.recent3_avg_pct != null || s.session_avg_pct != null) && (
+        <div className="text-[11px] text-zinc-500 mb-3">
+          recent 3{' '}
+          <span className="text-zinc-800 dark:text-zinc-200 tabular-nums font-medium">
+            {s.recent3_avg_pct?.toFixed(2) ?? '—'}%
+          </span>
+          {' · '}avg{' '}
+          <span className="text-zinc-800 dark:text-zinc-200 tabular-nums">
+            {s.session_avg_pct?.toFixed(2) ?? '—'}%
+          </span>
+          {ratio != null && (
+            <span className="ml-1 text-zinc-500">
+              ({ratio < 1 ? ratio.toFixed(2) : ratio.toFixed(1)}×)
+            </span>
+          )}
+        </div>
+      )}
+
+      <div className={`rounded-md border px-2.5 py-1.5 text-xs flex items-start gap-2 ${sevColors[sev]}`}>
+        <Sparkles className="size-3 shrink-0 mt-0.5" />
+        <div className="flex-1">
+          {s.recommendation === 'compact' && (
+            <span>
+              <strong>Consider /compact.</strong>{' '}
+              {s.recommendation_reason ?? 'Recent turns are running heavier than the session average.'}
+            </span>
+          )}
+          {s.recommendation === 'watch' && (
+            <span>
+              {s.recommendation_reason ?? 'Recent turns are running heavier than the session average.'}
+            </span>
+          )}
+          {s.recommendation === 'ok' && (
+            <span>Recent turns are in line with this session's average.</span>
+          )}
+          {!s.recommendation && (
+            <span>Need more turns before context bloat can be flagged.</span>
+          )}
+          {s.turns_since_compact != null && s.turns_since_compact > 0 && (
+            <span className="text-zinc-500 dark:text-zinc-500">
+              {' '}· {s.turns_since_compact} turns since /compact
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-0.5">{label}</div>
+      <div className="text-base font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">{value}</div>
+      {hint && <div className="text-[11px] text-zinc-500 tabular-nums">{hint}</div>}
+    </div>
+  );
+}
+
+function stripProject(p: string): string {
+  return p.replace(/^-?home-[^-]+-dev-/, '').replace(/^-+/, '');
+}
+
+function fmtWindowLabel(s: number): string {
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) {
+    const h = s / 3600;
+    return Number.isInteger(h) ? `${h}h` : `${h.toFixed(1)}h`;
+  }
+  const d = s / 86400;
+  return Number.isInteger(d) ? `${d}d` : `${d.toFixed(1)}d`;
 }
 
 function WindowCard({
@@ -406,6 +598,13 @@ function WindowCard({
               recent {fmtFitSpan(chart.fit.toS - chart.fit.fromS)} ({chart.fit.n} obs) ·{' '}
               {chart.fit.slopePctPerH >= 0 ? '+' : ''}
               {chart.fit.slopePctPerH.toFixed(1)}%/h
+              {limitETAMS !== undefined && limitETAMS > 0 && (
+                <>
+                  {' · hits 100% in '}
+                  {fmtDuration(limitETAMS)}
+                  {limitETATS && <> ({fmtAbs(limitETATS)})</>}
+                </>
+              )}
             </span>
           </div>
         )}

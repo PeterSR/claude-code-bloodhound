@@ -57,17 +57,46 @@ export default function History() {
     60_000,
   );
 
-  const usageSeries = useMemo(() => {
-    if (!data) return null;
-    const ts = data.observations.map((o) => o.ts_unix_ms / 1000);
-    const sess = data.observations.map((o) =>
-      o.session_pct === undefined || o.session_pct === null ? null : o.session_pct,
-    );
-    const week = data.observations.map((o) =>
-      o.week_pct === undefined || o.week_pct === null ? null : o.week_pct,
-    );
-    return { ts, sess, week };
-  }, [data]);
+  const sessionUsage = useMemo(
+    () =>
+      data
+        ? breakAtResets(
+            data.observations,
+            (o) => o.session_pct,
+            (o) => o.session_reset_detected,
+          )
+        : null,
+    [data],
+  );
+  const weekUsage = useMemo(
+    () =>
+      data
+        ? breakAtResets(
+            data.observations,
+            (o) => o.week_pct,
+            (o) => o.week_reset_detected,
+          )
+        : null,
+    [data],
+  );
+  const sessionResetTS = useMemo(
+    () =>
+      data
+        ? data.observations
+            .filter((o) => o.session_reset_detected)
+            .map((o) => o.ts_unix_ms / 1000)
+        : [],
+    [data],
+  );
+  const weekResetTS = useMemo(
+    () =>
+      data
+        ? data.observations
+            .filter((o) => o.week_reset_detected)
+            .map((o) => o.ts_unix_ms / 1000)
+        : [],
+    [data],
+  );
 
   return (
     <div>
@@ -123,15 +152,17 @@ export default function History() {
             <div className="grid gap-5 grid-cols-1 xl:grid-cols-2">
               <UsageCard
                 label="Session (5h)"
-                ts={usageSeries?.ts ?? []}
-                values={usageSeries?.sess ?? []}
+                ts={sessionUsage?.ts ?? []}
+                values={sessionUsage?.values ?? []}
                 color={SESSION_COLOR}
+                resetTS={sessionResetTS}
               />
               <UsageCard
                 label="Week"
-                ts={usageSeries?.ts ?? []}
-                values={usageSeries?.week ?? []}
+                ts={weekUsage?.ts ?? []}
+                values={weekUsage?.values ?? []}
                 color={WEEK_COLOR}
+                resetTS={weekResetTS}
               />
             </div>
           </Section>
@@ -166,6 +197,7 @@ export default function History() {
                 medianN={data.latest_session_median_n}
                 color={SESSION_COLOR}
                 colorFaint={SESSION_FAINT}
+                resetTS={sessionResetTS}
               />
               <CalCard
                 label="Week"
@@ -174,6 +206,7 @@ export default function History() {
                 medianN={data.latest_week_median_n}
                 color={WEEK_COLOR}
                 colorFaint={WEEK_FAINT}
+                resetTS={weekResetTS}
               />
             </div>
           </Section>
@@ -238,13 +271,20 @@ function UsageCard({
   ts,
   values,
   color,
+  resetTS,
 }: {
   label: string;
   ts: number[];
   values: (number | null)[];
   color: string;
+  resetTS?: number[];
 }) {
   const hasData = ts.length > 1 && values.some((v) => v !== null);
+  const vLines = resetTS?.map((x) => ({
+    x,
+    color: 'rgba(113,113,122,0.45)',
+    dash: [2, 4],
+  }));
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
       <div className="text-xs uppercase tracking-wider text-zinc-500 mb-3">{label}</div>
@@ -255,6 +295,7 @@ function UsageCard({
           ySuffix="%"
           height={200}
           series={[{ label: '%', values, color, width: 1.5 }]}
+          vLines={vLines}
         />
       ) : (
         <Empty />
@@ -270,6 +311,7 @@ function CalCard({
   medianN,
   color,
   colorFaint,
+  resetTS,
 }: {
   label: string;
   points: CalibrationPoint[];
@@ -277,6 +319,7 @@ function CalCard({
   medianN: number;
   color: string;
   colorFaint: string;
+  resetTS?: number[];
 }) {
   const data = useMemo(() => {
     if (points.length === 0) return null;
@@ -336,12 +379,43 @@ function CalCard({
                 ]
               : undefined
           }
+          vLines={resetTS?.map((x) => ({
+            x,
+            color: 'rgba(113,113,122,0.45)',
+            dash: [2, 4],
+          }))}
         />
       ) : (
         <Empty hint="Need 2+ adjacent non-saturated observations in this bucket before this fills in." />
       )}
     </div>
   );
+}
+
+/** Insert a synthetic null between any pair of points where the second is
+ *  flagged as a reset. uPlot stops drawing across nulls (spanGaps=false),
+ *  so the chart no longer connects the pre-reset peak to the post-reset
+ *  near-zero with a misleading downward diagonal. */
+function breakAtResets(
+  obs: ObservationPoint[],
+  pickValue: (o: ObservationPoint) => number | null | undefined,
+  isReset: (o: ObservationPoint) => boolean,
+): { ts: number[]; values: (number | null)[] } {
+  const ts: number[] = [];
+  const values: (number | null)[] = [];
+  for (let i = 0; i < obs.length; i++) {
+    const o = obs[i];
+    if (i > 0 && isReset(o)) {
+      const prevTS = obs[i - 1].ts_unix_ms / 1000;
+      const thisTS = o.ts_unix_ms / 1000;
+      ts.push((prevTS + thisTS) / 2);
+      values.push(null);
+    }
+    ts.push(o.ts_unix_ms / 1000);
+    const v = pickValue(o);
+    values.push(v == null ? null : v);
+  }
+  return { ts, values };
 }
 
 /** Centered rolling median. Window=5 by default; emits null until at least

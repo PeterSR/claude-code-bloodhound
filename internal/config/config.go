@@ -63,6 +63,18 @@ type Config struct {
 	// the statusline's STALE indicator. Defaults to 600 (10 min) — twice
 	// the default poll cadence.
 	StaleAfterS int `json:"stale_after_s"`
+
+	// ActiveSessionThresholdS is the cutoff for marking a recent session
+	// as "active" on the Now page. Sessions whose last turn is within
+	// this many seconds get the Active badge. Multiple sessions can
+	// qualify simultaneously — matches the workflow where a user has
+	// several Claude Code windows open at once.
+	ActiveSessionThresholdS int `json:"active_session_threshold_s"`
+
+	// RecentSessionWindowS is how far back the Now page's recent-sessions
+	// panel looks. Sessions whose last turn is older than this are
+	// excluded entirely. Defaults to 24h.
+	RecentSessionWindowS int `json:"recent_session_window_s"`
 }
 
 // Default returns the baseline config. New installs start here.
@@ -76,8 +88,10 @@ func Default() Config {
 		PlanTier:           PlanUnknown,
 		JoinThePack:        false,
 		ClaudeBinary:       "",
-		StatuslinePrefix:   "🩸",
-		StaleAfterS:        600,
+		StatuslinePrefix:        "🩸",
+		StaleAfterS:             600,
+		ActiveSessionThresholdS: 1800,
+		RecentSessionWindowS:    86400,
 	}
 }
 
