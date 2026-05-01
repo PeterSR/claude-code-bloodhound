@@ -5,6 +5,7 @@ import {
   AlertCircle,
   AlertTriangle,
   ChevronRight,
+  Clock,
   MessageSquare,
   RefreshCw,
   Sparkles,
@@ -66,6 +67,8 @@ type SessionInsight = {
   recommendation?: 'ok' | 'watch' | 'compact';
   recommendation_reason?: string;
   last_user_prompt?: string;
+  cache_ttl_s?: number;
+  cache_expires_in_s?: number;
 };
 
 type NowResponse = {
@@ -227,6 +230,19 @@ function SessionCard({ s, active }: { s: SessionInsight; active: boolean }) {
         </Link>
       </div>
 
+      {s.cache_expires_in_s != null && s.cache_expires_in_s > 0 && (
+        <div
+          className="rounded-md border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 px-2.5 py-1 text-xs flex items-center gap-1.5 mb-3"
+          title="Send a turn before this hits zero or you'll pay the cold-resume cost above to recreate the prefix."
+        >
+          <Clock className="size-3 shrink-0" />
+          <span>
+            <strong>{s.cache_ttl_s === 3600 ? '1h' : '5m'} cache</strong> expires in{' '}
+            <strong className="tabular-nums">{fmtRemainShort(s.cache_expires_in_s)}</strong>
+          </span>
+        </div>
+      )}
+
       <div className="grid grid-cols-3 gap-3 mb-3">
         <Stat label="Turns" value={fmtNumber(s.turn_count)} />
         <Stat label="Tokens (cw)" value={fmtNumber(s.total_cw_tokens)} hint={`${fmtNumber(s.total_raw_tokens)} raw`} />
@@ -311,6 +327,12 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 
 function stripProject(p: string): string {
   return p.replace(/^-?home-[^-]+-dev-/, '').replace(/^-+/, '');
+}
+
+function fmtRemainShort(s: number): string {
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
 }
 
 function fmtWindowLabel(s: number): string {

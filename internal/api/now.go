@@ -112,6 +112,18 @@ type sessionInsight struct {
 	// human-typed prompt in this session. Disambiguates cards that share
 	// a project name; also doubles as a "where did I leave off" hint.
 	LastUserPrompt string `json:"last_user_prompt,omitempty"`
+
+	// CacheTTLS is the detected TTL (seconds) of the cache the most recent
+	// turn wrote — 300 for 5m, 3600 for 1h, or 0 when we couldn't infer
+	// it from per-turn cache_create columns or the session aggregate.
+	CacheTTLS int64 `json:"cache_ttl_s,omitempty"`
+
+	// CacheExpiresInS is positive when the cache is still warm but within
+	// the last 20% of its TTL window — i.e. about to expire. Populated only
+	// in that warning band; otherwise omitted (already-expired sessions
+	// surface ColdResumeCost instead, fully-warm sessions need no
+	// nudging).
+	CacheExpiresInS int64 `json:"cache_expires_in_s,omitempty"`
 }
 
 // nowHistoryPoint is one observation slimmed for the in-window chart.
@@ -462,24 +474,32 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project, cacheTT
 		}
 		info.LastTurnRawTokens = lastRaw
 		info.LastTurnCWTokens = round2(lastCW)
-		// Cold-resume cost only applies once the cache has actually
-		// expired. The right threshold is the TTL of the *last turn's*
-		// cache, not the session-level cache_ttl summary — a 'mix' session
-		// you're actively in cached the most-recent prefix at whatever the
-		// last turn used (typically 1h, the Claude Code default). Decide
-		// per-turn: 1h if the last turn cached at 1h, else 5m if it cached
-		// at 5m, else fall back to the session aggregate.
-		var coldThresholdS int64 = 300
+		// Cache TTL of the *last turn's* cache — not the session-level
+		// cache_ttl summary. A 'mix' session you're actively in cached the
+		// most-recent prefix at whatever the last turn used (typically 1h,
+		// the Claude Code default). Decide per-turn: 1h if the last turn
+		// cached at 1h, else 5m if it cached at 5m, else fall back to the
+		// session aggregate. ttlS == 0 means we couldn't infer it (last
+		// turn was cache_read-only and the session has no cache_create
+		// history) — neither cold-resume nor expiry warning applies.
+		var ttlS int64 = 0
 		switch {
 		case lastCC1h > 0:
-			coldThresholdS = 3600
+			ttlS = 3600
 		case lastCC5m > 0:
-			coldThresholdS = 300
+			ttlS = 300
 		case cacheTTL == "1h":
-			coldThresholdS = 3600
+			ttlS = 3600
+		case cacheTTL == "5m":
+			ttlS = 300
 		}
-		if info.AgeS >= coldThresholdS {
-			info.ColdResumeCostCWTokens = round2(lastColdPrefix)
+		if ttlS > 0 {
+			info.CacheTTLS = ttlS
+			if info.AgeS >= ttlS {
+				info.ColdResumeCostCWTokens = round2(lastColdPrefix)
+			} else if remain := ttlS - info.AgeS; remain <= ttlS/5 {
+				info.CacheExpiresInS = remain
+			}
 		}
 		if n > 0 {
 			info.Recent3AvgCWTokens = round2(sumCW / float64(n))
