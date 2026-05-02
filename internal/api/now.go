@@ -544,7 +544,7 @@ func (s *Server) buildSessionInsight(ctx context.Context, uuid, project, cacheTT
 		}
 	}
 
-	if (info.Recommendation == "compact" || info.Recommendation == "watch") && info.Recent3AvgCWTokens > 0 {
+	if info.Recent3AvgCWTokens > 0 {
 		info.CompactCostCWTokens = info.Recent3AvgCWTokens
 		info.CompactCostPct = info.Recent3AvgPct
 	}
