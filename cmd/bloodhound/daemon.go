@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/aggregate"
+	"github.com/PeterSR/claude-code-bloodhound/internal/api"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
@@ -28,6 +29,7 @@ var (
 	daemonRunOnce            bool
 	daemonLogFile            string
 	daemonNoLogFile          bool
+	daemonNoAPI              bool
 )
 
 var daemonCmd = &cobra.Command{
@@ -38,6 +40,11 @@ long-running process that drives polling, ingestion, and aggregation on
 configured intervals (defaults from config.json: poll 5m, ingest 5m,
 aggregate 15m). All jobs run sequentially against the shared store, so
 SQLite writes never collide.
+
+The daemon also serves the HTTP API + web UI (the same surface that
+` + "`bloodhound serve`" + ` exposed) on cfg.Host:cfg.Port (default
+127.0.0.1:7777). One process, one API endpoint, one source of truth.
+Pass --no-api to skip the HTTP server (collection only).
 
 By default, daemon output is mirrored to both stdout and a log file at
 $XDG_STATE_HOME/bloodhound/daemon.log (or the per-OS state directory on
@@ -139,6 +146,18 @@ For one-shot CI-style execution that does each job once and exits, pass
 		schedule("ingest", ingestIvl, func() { runIngestOnce(ctx, s, w) })
 		schedule("aggregate", aggIvl, func() { runAggregateOnce(ctx, s, w) })
 
+		if !daemonNoAPI {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+				fmt.Fprintf(w, "[daemon] api: listening on http://%s/\n", addr)
+				if err := api.Run(ctx, cfg.Host, cfg.Port, &api.Server{Store: s}); err != nil {
+					fmt.Fprintf(w, "[daemon] api: %v\n", err)
+				}
+			}()
+		}
+
 		<-ctx.Done()
 		fmt.Fprintln(w, "[daemon] waiting for in-flight jobs")
 		wg.Wait()
@@ -225,5 +244,7 @@ func init() {
 		"file to mirror daemon output to (default $XDG_STATE_HOME/bloodhound/daemon.log)")
 	daemonCmd.Flags().BoolVar(&daemonNoLogFile, "no-log-file", false,
 		"don't write a log file (stdout only)")
+	daemonCmd.Flags().BoolVar(&daemonNoAPI, "no-api", false,
+		"don't start the HTTP API + web UI server (collection only)")
 	rootCmd.AddCommand(daemonCmd)
 }

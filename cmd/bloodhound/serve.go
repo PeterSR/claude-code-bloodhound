@@ -21,12 +21,21 @@ var (
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Run the web UI and JSON API server",
+	Short: "Run the web UI and JSON API server (deprecated — use 'bloodhound daemon')",
 	Long: `Reads from the local SQLite database and serves the web UI plus its
-backing API on the configured host:port (default 127.0.0.1:7777).`,
+backing API on the configured host:port (default 127.0.0.1:7777).
+
+Deprecated: 'bloodhound daemon' now runs the same HTTP API alongside its
+collection loop, so a separate 'serve' process is no longer needed. This
+subcommand still works (useful for "API without polling" setups) but will
+likely be removed in a future release.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+
+		fmt.Fprintln(cmd.ErrOrStderr(),
+			"[serve] note: 'bloodhound daemon' now serves the API too; "+
+				"prefer that unless you specifically want API-without-polling.")
 
 		cfg, err := config.Load()
 		if err != nil {
