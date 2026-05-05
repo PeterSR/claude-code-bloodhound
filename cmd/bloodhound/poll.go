@@ -27,7 +27,12 @@ extractor, and persists the result to the local store.
 
 Pass --rebootstrap to ask the local claude to design a fresh extractor from
 the captured panel snapshot. Useful when the TUI changes shape and the
-default extractor stops matching.`,
+default extractor stops matching.
+
+For ongoing observation, prefer ` + "`bloodhound daemon`" + ` — it polls /usage
+on its own cadence (default every 5 minutes). This subcommand is for
+one-off scrapes (typically with --rebootstrap) and for users who don't
+run the daemon.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(
 			context.Background(),

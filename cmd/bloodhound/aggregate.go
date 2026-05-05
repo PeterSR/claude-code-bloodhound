@@ -19,7 +19,11 @@ var aggregateCmd = &cobra.Command{
 	Short: "Recompute rolling metrics and materialized views",
 	Long: `Rebuilds the sessions and buckets tables from the raw turns +
 compactions data. Idempotent and cheap (~50k turns runs in well under a
-second). Run on a slower cadence than ingest itself.`,
+second). Run on a slower cadence than ingest itself.
+
+Mostly useful when you're not running ` + "`bloodhound daemon`" + ` — the daemon
+runs aggregation on its own cadence (default every 15 minutes). Running
+this alongside the daemon is harmless but redundant.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()

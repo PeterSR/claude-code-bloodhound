@@ -23,7 +23,11 @@ var ingestCmd = &cobra.Command{
 	Short: "Walk Claude Code's session JSONL files and update the local database",
 	Long: `Scans ~/.claude/projects/*/*.jsonl, parses each assistant turn and
 compaction event, and upserts them into the local store. Files whose mtime
-hasn't changed since the last ingest are skipped (use --force to re-process).`,
+hasn't changed since the last ingest are skipped (use --force to re-process).
+
+Mostly useful when you're not running ` + "`bloodhound daemon`" + ` — the daemon
+performs ingest on its own cadence (default every 5 minutes). Running this
+alongside the daemon is harmless (the store serializes writes) but redundant.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
