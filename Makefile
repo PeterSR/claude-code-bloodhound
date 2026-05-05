@@ -65,7 +65,7 @@ tidy:
 	$(GO) mod tidy
 
 clean:
-	rm -f $(BIN)
+	rm -f $(BIN) $(GUI_BIN)
 	rm -rf web/dist
 
 # `make dev` runs the Go server without the prod tag, so the placeholder

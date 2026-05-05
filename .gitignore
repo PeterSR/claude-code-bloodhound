@@ -4,6 +4,8 @@
 # Go build artifacts
 /bloodhound
 /bloodhound.exe
+/bloodhound-gui
+/bloodhound-gui.exe
 /dist/
 /vendor/
 
