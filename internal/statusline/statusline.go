@@ -1,16 +1,19 @@
 // Package statusline renders the one-line summary that `bloodhound status`
-// prints. Designed to be invoked by Claude Code's statusline command, which
-// runs the binary on every keystroke — so this code MUST be fast (DB read +
-// formatting, no I/O beyond that).
+// prints. Designed to be invoked by Claude Code's statusline command — it
+// reruns on every conversation-state change (each prompt + each assistant
+// response), so this code MUST be fast (DB reads + formatting, no I/O
+// beyond that).
 package statusline
 
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
+	"github.com/PeterSR/claude-code-bloodhound/internal/sessioninsight"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
@@ -22,7 +25,14 @@ import (
 // until the bucket's natural reset (parsed from /usage). When the burn-rate
 // projection says we'd hit 100% before that reset, a "⚠100% in 26m" warning
 // is inserted: "🩸 72%/5h ⚠100% in 26m (3h12m) · …".
-func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Time) string {
+//
+// When the most-recent session is still active, one compact per-session
+// alert is appended (cold cache, cache about to expire, /compact
+// recommended, or "running heavy"). sessionUUID is an optional hint —
+// Claude Code pipes its session_id into the statusline command, and
+// passing it lets us target the current session exactly instead of just
+// "most recent". Empty string falls back to most-recent-active.
+func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Time, sessionUUID string) string {
 	prefix := cfg.StatuslinePrefix
 	if prefix != "" {
 		prefix += " "
@@ -59,10 +69,99 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 			obs.WeekResetTSISO, weekPts, now))
 	}
 
+	if seg := formatActiveSession(ctx, cfg, s, now, sessionUUID); seg != "" {
+		parts = append(parts, seg)
+	}
+
 	if len(parts) == 0 {
 		return prefix + "no data"
 	}
 	return prefix + strings.Join(parts, " · ")
+}
+
+// formatActiveSession returns a single compact alert about the
+// most-recent active session, or "" when nothing is worth surfacing.
+// If sessionUUID is non-empty and present in the local store, that
+// session is preferred; otherwise we fall back to the most-recent
+// session within cfg.ActiveSessionThresholdS.
+func formatActiveSession(ctx context.Context, cfg config.Config, s *store.Store, now time.Time, sessionUUID string) string {
+	threshold := cfg.ActiveSessionThresholdS
+	if threshold <= 0 {
+		threshold = 1800
+	}
+
+	var ref *sessioninsight.SessionRef
+	if sessionUUID != "" {
+		ref, _ = sessioninsight.BySessionUUID(ctx, s.DB, sessionUUID)
+	}
+	if ref == nil {
+		ref, _ = sessioninsight.MostRecentActive(ctx, s.DB, now, threshold)
+	}
+	if ref == nil {
+		return ""
+	}
+
+	// Even when sessionUUID matched, gate alerts on activity — a stale
+	// session matched by id is still stale, and "cold cache" on a
+	// session you walked away from hours ago is just noise.
+	ageS := (now.UnixMilli() - ref.LastMS) / 1000
+	if ageS > int64(threshold) {
+		return ""
+	}
+
+	tokensPerPct, _, _, hasCal, _ := s.LatestCalibrationMedian(ctx, "session", 10)
+	ins := sessioninsight.ForSession(ctx, s.DB, *ref, now, tokensPerPct, hasCal)
+	return formatActiveSegment(ins)
+}
+
+// formatActiveSegment picks one alert from an Insight in priority order.
+// Pure function for testing — no DB or context dependencies.
+//
+// Priority (highest first):
+//
+//   - cold cache  → "❄ cold +5%"     (or "❄ cold" without calibration)
+//   - expiring    → "⏱ 47s"
+//   - /compact    → "⚠ /compact +12%" (or "⚠ /compact" without calibration)
+//   - watch       → "↗ 1.7×"
+//
+// Cache state outranks bloat state because cold-resume is an immediate
+// cost the next turn pays — /compact can wait a turn or two.
+func formatActiveSegment(ins *sessioninsight.Insight) string {
+	if ins == nil {
+		return ""
+	}
+	if ins.ColdResumeCostCWTokens > 0 {
+		if pct := renderPct(ins.ColdResumeCostPct); pct != "" {
+			return "❄ cold +" + pct + "%"
+		}
+		return "❄ cold"
+	}
+	if ins.CacheExpiresInS > 0 {
+		return "⏱ " + fmtDur(time.Duration(ins.CacheExpiresInS)*time.Second)
+	}
+	if ins.Recommendation == "compact" {
+		if pct := renderPct(ins.CompactCostPct); pct != "" {
+			return "⚠ /compact +" + pct + "%"
+		}
+		return "⚠ /compact"
+	}
+	if ins.Recommendation == "watch" && ins.SessionAvgCWTokens > 0 {
+		ratio := ins.Recent3AvgCWTokens / ins.SessionAvgCWTokens
+		return fmt.Sprintf("↗ %.1f×", ratio)
+	}
+	return ""
+}
+
+// renderPct renders a small percentage as a short integer ("5"), or
+// "<1" when sub-percent. Empty string when v ≤ 0 (no calibration).
+func renderPct(v float64) string {
+	if v <= 0 {
+		return ""
+	}
+	if v < 1 {
+		return "<1"
+	}
+	return strconv.Itoa(int(v + 0.5))
 }
 
 // formatBucket builds one bucket's segment. Anchors on the parsed reset_ts
