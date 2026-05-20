@@ -1,6 +1,6 @@
-// Package api wires the HTTP routes for `bloodhound serve`. The web UI is
-// served as a single-page app from an embedded bundle (see package web);
-// API routes live under /api.
+// Package api wires the HTTP routes for the daemon. The API is JSON-only;
+// the React bundle is served separately by the bloodhound-gui binary,
+// which proxies /api/* back here.
 package api
 
 import (
@@ -8,31 +8,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"mime"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/version"
-	"github.com/PeterSR/claude-code-bloodhound/web"
 )
-
-func init() {
-	// Go's mime package doesn't know .webmanifest by default; register it
-	// so http.FileServer serves the PWA manifest with the spec-correct
-	// content type rather than application/octet-stream.
-	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
-}
 
 // Server bundles the deps the HTTP handlers need.
 type Server struct {
 	Store *store.Store
 }
 
-// Handler returns the root http.Handler, with /api/* routed to JSON
-// handlers and everything else served from the embedded SPA bundle.
+// Handler returns the root http.Handler. Anything outside /api/* is 404 —
+// the daemon does not serve a UI.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -46,9 +35,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/compactions", s.handleCompactions)
 	mux.HandleFunc("/api/leaks", s.handleLeaks)
 	mux.HandleFunc("/api/settings", s.handleSettings)
-
-	staticHandler := s.staticHandler()
-	mux.Handle("/", staticHandler)
 
 	return logger(mux)
 }
@@ -83,50 +69,6 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 		"schema_version": v,
 		"device_id":      id,
 		"db_path":        s.Store.Path,
-		"web_bundled":    web.Has(),
-	})
-}
-
-// staticHandler serves the embedded SPA bundle. Unknown non-/api paths
-// fall through to index.html so client-side routing works on hard reload.
-// If the bundle is missing (fresh checkout, no `make web` yet) we render a
-// helpful placeholder.
-func (s *Server) staticHandler() http.Handler {
-	if !web.Has() {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/api/") {
-				http.NotFound(w, r)
-				return
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(placeholderHTML))
-		})
-	}
-	sub, err := web.FS()
-	if err != nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, fmt.Sprintf("web: %v", err), http.StatusInternalServerError)
-		})
-	}
-	fileServer := http.FileServer(http.FS(sub))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.NotFound(w, r)
-			return
-		}
-		// SPA fallback: anything that isn't a real file becomes index.html.
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		if _, err := fs.Stat(sub, path); errors.Is(err, fs.ErrNotExist) {
-			r2 := *r
-			r2.URL.Path = "/"
-			fileServer.ServeHTTP(w, &r2)
-			return
-		}
-		fileServer.ServeHTTP(w, r)
 	})
 }
 
@@ -156,7 +98,7 @@ func Run(ctx context.Context, host string, port int, s *Server) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stderr(), "[serve] http://%s/\n", addr)
+		fmt.Fprintf(stderr(), "[api] http://%s/\n", addr)
 		err := srv.ListenAndServe()
 		if !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -175,27 +117,3 @@ func Run(ctx context.Context, host string, port int, s *Server) error {
 		return err
 	}
 }
-
-const placeholderHTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Bloodhound — UI not built</title>
-<style>
-  body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-         background:#0c0c0c; color:#e6e6e6; margin:0; padding:48px;
-         line-height:1.5; }
-  h1 { font-size: 22px; margin: 0 0 8px; }
-  p { color:#a0a0a0; max-width: 640px; }
-  code { background:#222; padding:2px 6px; border-radius:4px; font-size: 13px; }
-  a { color:#79c0ff; }
-</style>
-</head>
-<body>
-  <h1>Bloodhound</h1>
-  <p>The Go binary is running, but no built frontend is bundled in.</p>
-  <p>Build it with <code>make web</code> (or <code>cd web && npm install && npm run build</code>),
-  then re-run <code>bloodhound serve</code>.</p>
-  <p>If you just want to poke the API: <code>curl http://localhost:7777/api/health</code></p>
-</body>
-</html>`

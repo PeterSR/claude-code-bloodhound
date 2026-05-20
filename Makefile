@@ -4,8 +4,10 @@ GO       ?= go
 BIN      ?= bloodhound
 GUI_BIN  ?= bloodhound-gui
 LDFLAGS  ?= -X github.com/PeterSR/claude-code-bloodhound/internal/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-TAGS     ?= prod
-GUI_TAGS ?= gui
+# The GUI embeds the React bundle via //go:embed which is guarded by the
+# `prod` build tag (see web/embed_prod.go). The daemon no longer imports
+# the web package, so its build is tag-independent.
+GUI_TAGS ?= prod
 
 # Where install-gui drops the desktop entry + icons. Default = per-user
 # XDG. Override with `make install-gui PREFIX=/usr` for a system install.
@@ -13,24 +15,22 @@ PREFIX        ?= $(HOME)/.local
 DESKTOP_DIR   ?= $(PREFIX)/share/applications
 ICON_BASE_DIR ?= $(PREFIX)/share/icons/hicolor
 
-# `make build` is the canonical, production-shaped build: ensure the React
-# bundle is present, then compile the Go binary with the `prod` build tag so
-# //go:embed picks it up.
-build: web
-	$(GO) build -tags '$(TAGS)' -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/bloodhound
+# `make build` compiles the daemon. No bundle inside — the daemon is the
+# JSON API only; the GUI binary carries the React app.
+build:
+	$(GO) build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/bloodhound
 
-install: web
-	$(GO) install -tags '$(TAGS)' -ldflags '$(LDFLAGS)' ./cmd/bloodhound
+install:
+	$(GO) install -ldflags '$(LDFLAGS)' ./cmd/bloodhound
 	@dest=$$($(GO) env GOBIN); \
 	  if [ -z "$$dest" ]; then dest=$$($(GO) env GOPATH)/bin; fi; \
 	  echo "installed: $$dest/$(BIN)"
 
-# `make build-gui` builds the native window binary. Linux-only for now;
-# requires gtk+-3.0 and webkit2gtk-4.1 dev packages on PATH (Fedora:
-# `webkit2gtk4.1-devel`, Ubuntu 24.04+: `libwebkit2gtk-4.1-dev`).
-# The web bundle is served by the daemon, not embedded in this binary,
-# so no `make web` dependency.
-build-gui:
+# `make build-gui` builds the Wails-based native window binary. Linux-only
+# for now; requires gtk+-3.0 and webkit2gtk-4.1 dev packages on PATH
+# (Fedora: `webkit2gtk4.1-devel`, Ubuntu 24.04+: `libwebkit2gtk-4.1-dev`).
+# Depends on `make web` because the bundle is embedded into this binary.
+build-gui: web
 	$(GO) build -tags '$(GUI_TAGS)' -ldflags '$(LDFLAGS)' -o $(GUI_BIN) ./cmd/bloodhound-gui
 
 # `make install-gui` installs the gui binary, desktop entry, and icons
@@ -68,11 +68,10 @@ clean:
 	rm -f $(BIN) $(GUI_BIN)
 	rm -rf web/dist
 
-# `make dev` runs the Go server without the prod tag, so the placeholder
-# page is served. Run `cd web && npm run dev` separately for the full
-# UI in dev (Vite proxies /api -> :7777).
+# `make dev` runs the daemon (API only — the GUI carries the UI now).
+# For UI dev, `cd web && npm run dev` and Vite proxies /api -> :7777.
 dev:
-	$(GO) run ./cmd/bloodhound serve
+	$(GO) run ./cmd/bloodhound daemon
 
 doctor:
 	$(GO) run ./cmd/bloodhound doctor

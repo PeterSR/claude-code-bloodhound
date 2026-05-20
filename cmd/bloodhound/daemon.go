@@ -34,17 +34,17 @@ var (
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
-	Short: "Run an in-process scheduler for poll/ingest/aggregate",
+	Short: "Run the collection scheduler + HTTP API",
 	Long: `An alternative to wiring up systemd / launchd / scheduled tasks: a single
 long-running process that drives polling, ingestion, and aggregation on
 configured intervals (defaults from config.json: poll 5m, ingest 5m,
 aggregate 15m). All jobs run sequentially against the shared store, so
 SQLite writes never collide.
 
-The daemon also serves the HTTP API + web UI (the same surface that
-` + "`bloodhound serve`" + ` exposed) on cfg.Host:cfg.Port (default
-127.0.0.1:7777). One process, one API endpoint, one source of truth.
-Pass --no-api to skip the HTTP server (collection only).
+The daemon exposes a JSON HTTP API on cfg.Host:cfg.Port (default
+127.0.0.1:7777). The bloodhound-gui binary loads the dashboard and
+proxies its requests back to this API. Pass --no-api to run collection
+only (no HTTP surface).
 
 By default, daemon output is mirrored to both stdout and a log file at
 $XDG_STATE_HOME/bloodhound/daemon.log (or the per-OS state directory on
@@ -245,6 +245,6 @@ func init() {
 	daemonCmd.Flags().BoolVar(&daemonNoLogFile, "no-log-file", false,
 		"don't write a log file (stdout only)")
 	daemonCmd.Flags().BoolVar(&daemonNoAPI, "no-api", false,
-		"don't start the HTTP API + web UI server (collection only)")
+		"don't start the HTTP API server (collection only)")
 	rootCmd.AddCommand(daemonCmd)
 }
