@@ -4,10 +4,14 @@ GO       ?= go
 BIN      ?= bloodhound
 GUI_BIN  ?= bloodhound-gui
 LDFLAGS  ?= -X github.com/PeterSR/claude-code-bloodhound/internal/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-# The GUI embeds the React bundle via //go:embed which is guarded by the
-# `prod` build tag (see web/embed_prod.go). The daemon no longer imports
-# the web package, so its build is tag-independent.
-GUI_TAGS ?= prod
+# Build tags for the GUI:
+#   prod        — gates //go:embed of web/dist (see web/embed_prod.go)
+#   production  — Wails compiles its real Run() implementation; without
+#                 this tag wails.Run() is a no-op stub
+#   desktop     — selects Wails' desktop frontend (vs. bindings generation)
+#   webkit2_41  — link against webkit2gtk-4.1 instead of the default 4.0
+#                 (Fedora 43+ and Ubuntu 24.04+ only ship 4.1)
+GUI_TAGS ?= prod production desktop webkit2_41
 
 # Where install-gui drops the desktop entry + icons. Default = per-user
 # XDG. Override with `make install-gui PREFIX=/usr` for a system install.
