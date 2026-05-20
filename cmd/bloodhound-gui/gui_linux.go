@@ -38,6 +38,9 @@ static void bh_create_window(const char *title, int w, int h, const char *icon_n
     }
     g_signal_connect(bh_window, "destroy", G_CALLBACK(bh_destroy_cb), NULL);
     bh_view = WEBKIT_WEB_VIEW(webkit_web_view_new());
+    WebKitSettings *settings = webkit_web_view_get_settings(bh_view);
+    webkit_settings_set_enable_smooth_scrolling(settings, TRUE);
+    webkit_settings_set_hardware_acceleration_policy(settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS);
     gtk_container_add(GTK_CONTAINER(bh_window), GTK_WIDGET(bh_view));
     gtk_widget_show_all(bh_window);
 }

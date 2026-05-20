@@ -30,13 +30,13 @@ const NAV: NavItem[] = [
 
 export default function Layout() {
   return (
-    <div className="flex min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div className="flex h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <aside className="w-56 shrink-0 border-r border-zinc-200 dark:border-zinc-800 p-4 flex flex-col">
-        <div className="flex items-center gap-2 mb-8">
+        <div className="flex items-center gap-2 mb-8 shrink-0">
           <Dog className="size-5 text-rose-500" />
           <span className="font-semibold tracking-tight">Bloodhound</span>
         </div>
-        <nav className="flex-1 space-y-0.5">
+        <nav className="flex-1 min-h-0 overflow-y-auto space-y-0.5">
           {NAV.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
