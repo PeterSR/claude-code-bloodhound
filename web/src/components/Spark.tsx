@@ -76,12 +76,12 @@ function trimZero(s: string): string {
 }
 
 /**
- * Spark wraps uPlot in a React component. Re-creates the chart whenever
- * the data shape changes; on resize we just reflow the existing instance.
- *
- * Theme: uPlot's CSS doesn't follow our Tailwind dark mode, so we read
- * the document's resolved color and pass it through to the axes/grid.
- * That keeps the chart legible on both themes.
+ * Spark wraps uPlot in a React component. On data refresh we call
+ * `setData()` in place rather than destroying the chart — this prevents
+ * the layout flash that polling caused before. The chart only rebuilds
+ * when the shape (series count/labels) or height actually changes.
+ * Annotations are read through a ref so the live-update path picks them
+ * up too.
  */
 export default function Spark({
   ts,
@@ -96,27 +96,36 @@ export default function Spark({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
+  const shapeKeyRef = useRef<string>('');
+  const annoRef = useRef<{ vLines?: VLine[]; hLines?: HLine[]; xBands?: XBand[] }>({});
 
   useEffect(() => {
     if (!containerRef.current) return;
+
+    const data: uPlot.AlignedData = [ts, ...series.map((s) => s.values)] as uPlot.AlignedData;
+    const shapeKey = `${series.length}|${series.map((s) => `${s.label}:${s.color}`).join(',')}|${height}|${ySuffix}|${yRange?.join(',') ?? ''}`;
+
+    // Fast path: same shape and chart already exists — push new data and
+    // refresh annotation refs. uPlot redraws and our draw hook will read
+    // the latest annotations from annoRef.
+    annoRef.current = { vLines, hLines, xBands };
+    if (plotRef.current && shapeKeyRef.current === shapeKey) {
+      plotRef.current.setData(data);
+      return;
+    }
+
     if (plotRef.current) {
       plotRef.current.destroy();
       plotRef.current = null;
     }
-
-    const data: uPlot.AlignedData = [ts, ...series.map((s) => s.values)] as uPlot.AlignedData;
+    shapeKeyRef.current = shapeKey;
 
     const isDark = document.documentElement.classList.contains('dark');
-    // Subtle grid: at default zinc-800 (#27272a) it overpowered the data
-    // strokes on the dark cards. rgba avoids that on either theme.
     const grid = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)';
     const axisColor = isDark ? '#a1a1aa' : '#71717a';
 
-    // Annotation hooks: x-bands first (background), then vlines and hlines
-    // on top of the series. uPlot exposes `valToPos` to convert data
-    // coordinates to canvas pixels — the chart is already drawn at this
-    // point in the `draw` hook.
     const drawAnnotations = (u: uPlot) => {
+      const { vLines: vs, hLines: hs, xBands: bs } = annoRef.current;
       const ctx = u.ctx;
       const { left, top, width, height: plotH } = u.bbox;
       ctx.save();
@@ -124,8 +133,8 @@ export default function Spark({
       ctx.rect(left, top, width, plotH);
       ctx.clip();
 
-      if (xBands?.length) {
-        for (const b of xBands) {
+      if (bs?.length) {
+        for (const b of bs) {
           const x0 = u.valToPos(b.from, 'x', true);
           const x1 = u.valToPos(b.to, 'x', true);
           if (!Number.isFinite(x0) || !Number.isFinite(x1)) continue;
@@ -138,8 +147,8 @@ export default function Spark({
         ctx.setLineDash(dash ?? []);
       };
 
-      if (hLines?.length) {
-        for (const h of hLines) {
+      if (hs?.length) {
+        for (const h of hs) {
           const y = u.valToPos(h.value, 'y', true);
           if (!Number.isFinite(y)) continue;
           ctx.strokeStyle = h.color;
@@ -160,8 +169,8 @@ export default function Spark({
         }
       }
 
-      if (vLines?.length) {
-        for (const v of vLines) {
+      if (vs?.length) {
+        for (const v of vs) {
           const x = u.valToPos(v.x, 'x', true);
           if (!Number.isFinite(x)) continue;
           ctx.strokeStyle = v.color;
@@ -234,8 +243,11 @@ export default function Spark({
       ro.disconnect();
       plotRef.current?.destroy();
       plotRef.current = null;
+      shapeKeyRef.current = '';
     };
   }, [ts, series, height, ySuffix, yRange, yFormatter, vLines, hLines, xBands]);
 
-  return <div ref={containerRef} className="w-full" />;
+  // Reserve the chart's vertical space so the surrounding layout doesn't
+  // jump during the brief moment between destroy() and new uPlot().
+  return <div ref={containerRef} className="w-full" style={{ minHeight: height }} />;
 }

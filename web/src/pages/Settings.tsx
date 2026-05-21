@@ -216,7 +216,7 @@ export default function Settings() {
             </label>
           </Card>
 
-          <div className="flex items-center gap-3 sticky bottom-2 bg-zinc-50/80 dark:bg-zinc-950/80 backdrop-blur rounded-md py-2">
+          <div className="sticky bottom-0 z-10 flex items-center gap-3 rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 shadow-md">
             <button
               onClick={save}
               disabled={saving}

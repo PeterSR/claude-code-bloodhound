@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Outlet, NavLink } from 'react-router-dom';
 import {
   Activity,
@@ -29,6 +30,53 @@ const NAV: NavItem[] = [
 ];
 
 export default function Layout() {
+  useEffect(() => {
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button === 3) {
+        e.preventDefault();
+        window.history.back();
+      } else if (e.button === 4) {
+        e.preventDefault();
+        window.history.forward();
+      }
+    };
+    window.addEventListener('mousedown', onMouseDown);
+    return () => window.removeEventListener('mousedown', onMouseDown);
+  }, []);
+
+  // WebKit2GTK clamps single-frame wheel scrolls to make its easing
+  // animation pretty — measured ~50% slower peak velocity than Chrome on
+  // the same hi-res wheel. Bypass it: intercept wheel events and apply
+  // the delta straight to scrollTop. Wails-only (Chrome dev runs fine
+  // with native behavior).
+  useEffect(() => {
+    if (!navigator.userAgent.includes('wails.io')) return;
+
+    const onWheel = (e: WheelEvent) => {
+      let el = e.target as HTMLElement | null;
+      while (el && el !== document.body) {
+        const style = getComputedStyle(el);
+        if (
+          (style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+          el.scrollHeight > el.clientHeight
+        ) {
+          break;
+        }
+        el = el.parentElement;
+      }
+      if (!el || el === document.body) return;
+
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) dy *= 16;
+      else if (e.deltaMode === 2) dy *= el.clientHeight;
+
+      el.scrollTop += dy;
+      e.preventDefault();
+    };
+    window.addEventListener('wheel', onWheel, { passive: false });
+    return () => window.removeEventListener('wheel', onWheel);
+  }, []);
+
   return (
     <div className="flex h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <aside className="w-56 shrink-0 border-r border-zinc-200 dark:border-zinc-800 p-4 flex flex-col">

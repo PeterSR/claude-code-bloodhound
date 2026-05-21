@@ -7,11 +7,11 @@ import {
   ChevronRight,
   Clock,
   MessageSquare,
-  RefreshCw,
   Sparkles,
   Zap,
 } from 'lucide-react';
 import Spark from '../components/Spark';
+import ReloadButton from '../components/ReloadButton';
 import { useApi } from '../hooks/useApi';
 import { fmtAbs, fmtDuration, fmtNumber, fmtRel, pctColor } from '../lib/format';
 
@@ -87,7 +87,7 @@ type NowResponse = {
 };
 
 export default function Now() {
-  const { data, error, loading, refresh } = useApi<NowResponse>('/now', 30_000);
+  const { data, error, loading, refreshing, refresh } = useApi<NowResponse>('/now', 30_000);
 
   return (
     <div>
@@ -96,15 +96,7 @@ export default function Now() {
           <Activity className="size-5 text-rose-500" />
           <h1 className="text-2xl font-semibold tracking-tight">Now</h1>
         </div>
-        <button
-          onClick={refresh}
-          disabled={loading}
-          className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition disabled:opacity-60"
-          title="Refresh"
-        >
-          <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <ReloadButton refreshing={refreshing} onClick={refresh} />
       </div>
       <p className="text-zinc-600 dark:text-zinc-400 max-w-2xl mb-6">
         Where you stand right now. Windows are anchored to the actual reset

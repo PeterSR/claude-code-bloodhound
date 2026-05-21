@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import { History as HistoryIcon, RefreshCw } from 'lucide-react';
+import { History as HistoryIcon } from 'lucide-react';
 import Spark from '../components/Spark';
+import ReloadButton from '../components/ReloadButton';
 import { useApi } from '../hooks/useApi';
 import { fmtNumber } from '../lib/format';
 
@@ -52,7 +53,7 @@ const WEEK_FAINT = 'rgba(14,165,233,0.35)';
 
 export default function History() {
   const [days, setDays] = useState(7);
-  const { data, error, loading, refresh } = useApi<HistoryResponse>(
+  const { data, error, loading, refreshing, refresh } = useApi<HistoryResponse>(
     `/history?window_days=${days}`,
     60_000,
   );
@@ -122,14 +123,7 @@ export default function History() {
               </button>
             ))}
           </div>
-          <button
-            onClick={refresh}
-            disabled={loading}
-            className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition disabled:opacity-60"
-          >
-            <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
+          <ReloadButton refreshing={refreshing} onClick={refresh} />
         </div>
       </div>
       <p className="text-zinc-600 dark:text-zinc-400 max-w-2xl mb-6">

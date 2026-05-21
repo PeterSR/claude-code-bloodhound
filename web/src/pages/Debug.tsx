@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Bug, RefreshCw, Wand2, Loader2, Check, X } from 'lucide-react';
+import { Bug, Wand2, Loader2, Check, X } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+import ReloadButton from '../components/ReloadButton';
 import { fmtAbs, fmtRel, fmtNumber } from '../lib/format';
 
 type DebugResponse = {
@@ -49,7 +50,7 @@ type DebugResponse = {
 };
 
 export default function Debug() {
-  const { data, error, loading, refresh } = useApi<DebugResponse>('/debug', 60_000);
+  const { data, error, loading, refreshing, refresh } = useApi<DebugResponse>('/debug', 60_000);
 
   return (
     <div>
@@ -58,13 +59,7 @@ export default function Debug() {
           <Bug className="size-5 text-amber-500" />
           <h1 className="text-2xl font-semibold tracking-tight">Debug</h1>
         </div>
-        <button
-          onClick={refresh}
-          className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition"
-        >
-          <RefreshCw className="size-3.5" />
-          Refresh
-        </button>
+        <ReloadButton refreshing={refreshing} onClick={refresh} />
       </div>
       <p className="text-zinc-600 dark:text-zinc-400 max-w-2xl mb-6">
         Internal state. Useful when something looks wrong — the raw <code className="font-mono text-xs">/usage</code> dump,

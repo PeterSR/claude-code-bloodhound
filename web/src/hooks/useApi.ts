@@ -4,31 +4,31 @@ import { apiGet, ApiError } from '../api/client';
 type ApiState<T> = {
   data: T | null;
   error: Error | null;
+  /** True only when there's no data yet (initial load). Use this to gate
+   *  first-render placeholders — never flips back to true once data
+   *  arrives, so polls and filter changes don't unmount the page. */
   loading: boolean;
+  /** True whenever a fetch is in-flight (initial, polled, or manual).
+   *  Drives the ReloadButton spin so users can see auto-refreshes happen. */
+  refreshing: boolean;
   refresh: () => void;
 };
 
-/**
- * useApi fetches `path` (relative to /api) on mount, optionally polls on an
- * interval, and exposes a `refresh()` for manual reloads. StrictMode-safe:
- * an in-flight request from an unmounted hook is ignored.
- */
 export function useApi<T>(path: string, refreshIntervalMs?: number): ApiState<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(true);
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
 
-    // Flip loading=true on every fetch the effect kicks off (initial
-    // mount + manual refresh). Background polling re-uses run() through
-    // setInterval, which doesn't update loading — the user shouldn't see
-    // a spinner for those.
-    setLoading(true);
-
-    const run = async (showSpinner: boolean) => {
+    const run = async () => {
+      // Floor the spinner-visible time at ~300ms so users can see polls
+      // happen even when the unix-socket round-trip completes in <16ms.
+      const MIN_SPIN_MS = 300;
+      const started = Date.now();
+      if (!cancelled) setRefreshing(true);
       try {
         const json = await apiGet<T>(path);
         if (!cancelled) {
@@ -40,15 +40,17 @@ export function useApi<T>(path: string, refreshIntervalMs?: number): ApiState<T>
           setError(e instanceof ApiError ? e : (e as Error));
         }
       } finally {
-        if (!cancelled && showSpinner) setLoading(false);
+        const left = MIN_SPIN_MS - (Date.now() - started);
+        if (left > 0) await new Promise((r) => setTimeout(r, left));
+        if (!cancelled) setRefreshing(false);
       }
     };
 
-    run(true);
+    run();
 
     let interval: number | undefined;
     if (refreshIntervalMs && refreshIntervalMs > 0) {
-      interval = window.setInterval(() => run(false), refreshIntervalMs);
+      interval = window.setInterval(run, refreshIntervalMs);
     }
     return () => {
       cancelled = true;
@@ -59,7 +61,8 @@ export function useApi<T>(path: string, refreshIntervalMs?: number): ApiState<T>
   return {
     data,
     error,
-    loading,
+    loading: data === null && error === null,
+    refreshing,
     refresh: () => setTick((t) => t + 1),
   };
 }
