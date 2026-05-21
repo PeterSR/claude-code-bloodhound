@@ -59,7 +59,11 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 	t0 := time.Now()
 	rawBytes, driveErr := drive(ctx, opts)
 	elapsed := time.Since(t0).Seconds()
-	cleaned := stripANSI(rawBytes)
+	// Render the raw pty stream through a virtual terminal grid. This
+	// preserves visual spacing (claude positions chars via ANSI cursor
+	// moves rather than literal spaces) and drops stale text that was
+	// overdrawn during the capture.
+	cleaned := renderVT(rawBytes)
 
 	res := Result{
 		FetchedAt: time.Now().UTC(),

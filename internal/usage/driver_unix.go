@@ -11,26 +11,32 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/creack/pty"
 )
 
-// flattenForMatch strips whitespace and lowercases, for substring matching
-// against terminal output whose characters arrive separated only by ANSI
-// cursor-move codes (so post-stripANSI the words have no spaces).
-func flattenForMatch(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
-		}
-		return unicode.ToLower(r)
-	}, s)
-}
+// promptChar is the cursor character claude renders at the start of any
+// interactive row — both the main input box and modal menu options.
+// Distinguishing the two from a raw byte stream is unreliable; the
+// VT-grid path in hasInputPrompt does it row-shape-aware.
+const promptChar = "❯"
 
-// promptByte is the prompt character the Claude Code TUI prints when the
-// input box is ready to accept keystrokes.
-const promptByte = "\xe2\x9d\xaf" // ❯
+// hasInputPrompt reports whether the rendered grid contains a row that
+// looks like claude's main input prompt: a "❯" followed by either
+// nothing else or just a placeholder suggestion (Try "..."). Menu rows
+// like "❯ 1. Yes, I trust this folder" don't match.
+func hasInputPrompt(screen string) bool {
+	for _, line := range strings.Split(screen, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == promptChar {
+			return true
+		}
+		if strings.HasPrefix(trimmed, promptChar+" Try ") {
+			return true
+		}
+	}
+	return false
+}
 
 // drive spawns claude in a pty, types /usage, lets the panel render, and
 // returns the captured raw bytes. Mirrors the Python POC's state machine
@@ -134,16 +140,14 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 		curBytes, sinceLast := snapshot()
 
 		if !trustHandled {
-			// claude's TUI positions characters via ANSI cursor moves, so
-			// after stripANSI words appear without their separating
-			// spaces ("trustthisfolder"). Flatten whitespace before
-			// substring-matching so the marker copy stays human-readable
-			// in code.
-			flat := flattenForMatch(stripANSI(curBytes))
-			hasTrustModal := strings.Contains(flat, "trustthisfolder")
-			welcomeReady := strings.Contains(flat, "tipsforgetting") ||
-				strings.Contains(flat, "claudecodev") ||
-				strings.Contains(flat, "what'snew")
+			// Render the current capture through the VT grid so visual
+			// spacing is preserved and overdrawn text is dropped. Match
+			// against natural human-readable markers.
+			screen := strings.ToLower(renderVT(curBytes))
+			hasTrustModal := strings.Contains(screen, "trust this folder")
+			welcomeReady := strings.Contains(screen, "tips for getting") ||
+				strings.Contains(screen, "claude code v") ||
+				strings.Contains(screen, "what's new")
 
 			if hasTrustModal && sinceLast >= settleAfterReady {
 				time.Sleep(300 * time.Millisecond)
@@ -173,9 +177,12 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 		}
 
 		if !typed {
-			ready := bytes.Contains(curBytes, []byte(promptByte)) ||
-				bytes.Contains(curBytes, []byte("Welcome")) ||
-				bytes.Contains(curBytes, []byte("Tip"))
+			// Use the VT grid to detect the input prompt structurally:
+			// claude's main input row ends in "❯ <cursor>" and otherwise
+			// has nothing past it. Menu cursors (the ❯ in trust prompts
+			// etc.) are followed by their option text, so don't match.
+			screen := renderVT(curBytes)
+			ready := hasInputPrompt(screen)
 			if ready && sinceLast >= settleAfterReady {
 				time.Sleep(500 * time.Millisecond)
 				_, _ = ptyFile.Write([]byte("/usage\r"))
@@ -191,12 +198,12 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 		}
 
 		if !sentExit {
-			// Strip ANSI before scanning: raw bytes can have escape sequences
-			// between any two characters, so a literal substring check is
-			// unreliable. Cleaned text consistently shows "%used" or "% used".
-			cleanedSoFar := stripANSI(curBytes)
-			panelRendered := strings.Contains(cleanedSoFar, "% used") ||
-				strings.Contains(cleanedSoFar, "%used")
+			// Render the VT grid before scanning: raw bytes have escape
+			// sequences between any two characters, and the grid drops
+			// stale overdrawn text that could falsely match. The /usage
+			// panel always shows "% used" with a real space.
+			screen := renderVT(curBytes)
+			panelRendered := strings.Contains(screen, "% used")
 			if time.Since(typedAt) > minRenderAfterType && panelRendered {
 				time.Sleep(700 * time.Millisecond)
 				_, _ = ptyFile.Write([]byte{0x03, 0x03})

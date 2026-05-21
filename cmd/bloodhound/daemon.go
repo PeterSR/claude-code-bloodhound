@@ -196,6 +196,26 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	pollCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	res, fetchErr := usage.Fetch(pollCtx, usage.Options{ClaudeBinary: cfg.ClaudeBinary})
+
+	// Self-heal: if extraction missed required fields but the capture
+	// is otherwise intact, ask `claude -p` to study the panel and emit
+	// a refreshed extractor. Gated by config so users who want manual
+	// control (or who don't want bootstrap consuming usage on their
+	// account) can flip it off.
+	if cfg.ExtractorSelfHeal && fetchErr == nil && !res.OK && res.RawFull != "" {
+		info, bErr := usage.Bootstrap(pollCtx, usage.BootstrapOptions{
+			ClaudeBinary: cfg.ClaudeBinary,
+			Panel:        res.RawFull,
+		})
+		if bErr != nil {
+			fmt.Fprintf(w, "[daemon] poll: self-heal failed (%v)\n", bErr)
+		} else {
+			res = usage.Reapply(res, info.Extractor)
+			fmt.Fprintf(w, "[daemon] poll: self-heal ok in %.1fs (fields: %d)\n",
+				info.ElapsedS, len(info.Extractor.Fields))
+		}
+	}
+
 	obs, err := s.RecordUsage(pollCtx, res, fetchErr)
 	switch {
 	case err != nil:

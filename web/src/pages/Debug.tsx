@@ -1,4 +1,5 @@
-import { Bug, RefreshCw } from 'lucide-react';
+import { useState } from 'react';
+import { Bug, RefreshCw, Wand2, Loader2, Check, X } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { fmtAbs, fmtRel, fmtNumber } from '../lib/format';
 
@@ -95,6 +96,8 @@ export default function Debug() {
             <KV k="field count" v={String(data.extractor.field_count)} />
           </Section>
 
+          <RetrainCard onDone={refresh} />
+
           <Section title="Last poll">
             {data.last_poll ? (
               <>
@@ -160,6 +163,90 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
         {children}
       </div>
+    </div>
+  );
+}
+
+type RetrainResult = {
+  ok: boolean;
+  elapsed_s?: number;
+  fields?: number;
+  saved_at?: string;
+  applied?: boolean;
+  missing?: string[];
+  error?: string;
+};
+
+function RetrainCard({ onDone }: { onDone: () => void }) {
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<RetrainResult | null>(null);
+
+  const run = async () => {
+    setRunning(true);
+    setResult(null);
+    try {
+      const res = await fetch('/api/extractor/retrain', { method: 'POST' });
+      const body = (await res.json()) as RetrainResult;
+      setResult(body);
+      if (body.ok) onDone();
+    } catch (e) {
+      setResult({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+      <div className="text-xs uppercase tracking-wider text-zinc-500 mb-3">Retrain extractor</div>
+      <div className="text-sm text-zinc-600 dark:text-zinc-400 mb-3 max-w-2xl">
+        Captures a fresh <code className="font-mono text-xs">/usage</code> panel and asks the local <code className="font-mono text-xs">claude -p</code> to
+        generate new extractor rules. Use when the daemon keeps reporting "extraction failed" and
+        you don't want to wait for the next automatic self-heal (or you've turned auto self-heal off).
+        Consumes one <code className="font-mono text-xs">claude -p</code> turn against your account; budget ~30–60s.
+      </div>
+      <div className="flex items-center gap-3">
+        <button
+          onClick={run}
+          disabled={running}
+          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-zinc-300 dark:border-zinc-700 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-900 transition disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {running ? <Loader2 className="size-4 animate-spin" /> : <Wand2 className="size-4" />}
+          {running ? 'Retraining…' : 'Retrain now'}
+        </button>
+        {result && !running && (
+          <RetrainStatus result={result} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RetrainStatus({ result }: { result: RetrainResult }) {
+  if (!result.ok) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
+        <X className="size-4" />
+        <span>Failed: {result.error ?? 'unknown error'}</span>
+      </div>
+    );
+  }
+  if (result.applied) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400">
+        <Check className="size-4" />
+        <span>
+          Done in {result.elapsed_s?.toFixed(1)}s · {result.fields} fields · all required fields extracted
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400">
+      <Check className="size-4" />
+      <span>
+        Saved in {result.elapsed_s?.toFixed(1)}s · {result.fields} fields · still missing: {result.missing?.join(', ') ?? '—'}
+      </span>
     </div>
   );
 }

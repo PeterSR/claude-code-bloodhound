@@ -72,6 +72,15 @@ type Config struct {
 	// panel looks. Sessions whose last turn is older than this are
 	// excluded entirely. Defaults to 24h.
 	RecentSessionWindowS int `json:"recent_session_window_s"`
+
+	// ExtractorSelfHeal toggles automatic re-learning of /usage extractor
+	// rules when a poll's required fields go missing. With it on, the
+	// daemon spawns `claude -p` to study the captured panel and emit a
+	// fresh extractor JSON. With it off, the extractor stays as-is and
+	// the user can either edit extractors.json by hand or hit the
+	// "retrain" button in the Debug page to trigger a one-shot relearn.
+	// Default true.
+	ExtractorSelfHeal bool `json:"extractor_self_heal"`
 }
 
 // Default returns the baseline config. New installs start here.
@@ -87,6 +96,7 @@ func Default() Config {
 		StaleAfterS:             600,
 		ActiveSessionThresholdS: 1800,
 		RecentSessionWindowS:    86400,
+		ExtractorSelfHeal:       true,
 	}
 }
 

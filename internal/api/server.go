@@ -36,6 +36,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/compactions", s.handleCompactions)
 	mux.HandleFunc("/api/leaks", s.handleLeaks)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/extractor/retrain", s.handleExtractorRetrain)
 
 	return logger(mux)
 }

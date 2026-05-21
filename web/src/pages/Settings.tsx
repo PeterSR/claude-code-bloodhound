@@ -14,6 +14,7 @@ type Config = {
   stale_after_s: number;
   active_session_threshold_s: number;
   recent_session_window_s: number;
+  extractor_self_heal: boolean;
 };
 
 type Snippets = {
@@ -136,6 +137,26 @@ export default function Settings() {
               <strong> Active</strong> badge. Recent window: only sessions touched within this many
               seconds are listed at all.
             </p>
+          </Card>
+
+          <Card title="Extractor">
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={draft.extractor_self_heal}
+                onChange={(e) => setDraft({ ...draft, extractor_self_heal: e.target.checked })}
+              />
+              <div>
+                <div>Self-heal on extraction failure</div>
+                <div className="text-xs text-zinc-500 mt-0.5 max-w-xl">
+                  When a poll fails to parse the <code className="font-mono text-xs">/usage</code> panel,
+                  spawn <code className="font-mono text-xs">claude -p</code> to study the captured panel and
+                  generate fresh extractor rules. Turn off if you prefer manual control — you can still
+                  trigger a one-shot retrain from the Debug page.
+                </div>
+              </div>
+            </label>
           </Card>
 
           <Card title="Statusline">
