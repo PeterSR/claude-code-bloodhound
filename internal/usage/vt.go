@@ -37,6 +37,7 @@ const (
 //     can produce false regex matches. The grid only keeps the latest
 //     content at each cell, so the extractor sees what was actually on
 //     screen at the end of the capture.
+//
 // renderVT is the unexported entry point in-package callers use; same
 // behaviour as the exported RenderVT below.
 func renderVT(raw []byte) string { return RenderVT(raw) }

@@ -55,7 +55,7 @@ type Turn struct {
 	TSUnixMS       int64
 	Model          string
 	InputTokens    int
-	OutputTokens  int
+	OutputTokens   int
 	CacheRead      int
 	CacheCreate5m  int
 	CacheCreate1h  int
@@ -76,26 +76,26 @@ type UserPrompt struct {
 
 // Compaction is the persisted form of a /compact event.
 type Compaction struct {
-	SessionUUID       string
-	TS                string
-	TSUnixMS          int64
-	PrefixTokensEst   int
-	SummaryTokensEst  int
-	GapToPrevS        *float64
-	CacheState        string // cold | warm_1h | warm_5m | unknown
-	Confirmed         bool
-	ConfirmReason     string
-	Project           string
+	SessionUUID      string
+	TS               string
+	TSUnixMS         int64
+	PrefixTokensEst  int
+	SummaryTokensEst int
+	GapToPrevS       *float64
+	CacheState       string // cold | warm_1h | warm_5m | unknown
+	Confirmed        bool
+	ConfirmReason    string
+	Project          string
 }
 
 // FileResult is the parsed output of one JSONL file.
 type FileResult struct {
-	SessionUUID  string
-	Project      string
-	Turns        []Turn
-	Compactions  []Compaction
-	UserPrompts  []UserPrompt
-	PathHash     string
+	SessionUUID string
+	Project     string
+	Turns       []Turn
+	Compactions []Compaction
+	UserPrompts []UserPrompt
+	PathHash    string
 }
 
 // parseFile streams one JSONL file and emits structured Turn + Compaction
@@ -129,12 +129,12 @@ func parseFile(path string) (FileResult, error) {
 		hasPrev                 = false
 
 		// pending compaction state
-		pendingBoundary     bool
-		pendingBoundaryTS   string
-		pendingBoundaryMS   int64
-		pendingPrefix       int
-		pendingGapToPrev    *float64
-		pendingCacheState   string
+		pendingBoundary   bool
+		pendingBoundaryTS string
+		pendingBoundaryMS int64
+		pendingPrefix     int
+		pendingGapToPrev  *float64
+		pendingCacheState string
 
 		pendingCompactReady bool
 		pendingCompact      Compaction

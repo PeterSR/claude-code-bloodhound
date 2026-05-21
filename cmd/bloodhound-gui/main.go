@@ -54,11 +54,11 @@ func main() {
 	}
 
 	var (
-		showVersion   = flag.Bool("version", false, "print version and exit")
-		socketFlag    = flag.String("daemon-socket", "", "override daemon unix-socket path (default: $XDG_RUNTIME_DIR/bloodhound/api.sock)")
-		width         = flag.Int("width", 1280, "initial window width")
-		height        = flag.Int("height", 800, "initial window height")
-		_             = flag.String("xdg-activation-token", "", "internal: Wayland activation token threaded through to the primary instance")
+		showVersion = flag.Bool("version", false, "print version and exit")
+		socketFlag  = flag.String("daemon-socket", "", "override daemon unix-socket path (default: $XDG_RUNTIME_DIR/bloodhound/api.sock)")
+		width       = flag.Int("width", 1280, "initial window width")
+		height      = flag.Int("height", 800, "initial window height")
+		_           = flag.String("xdg-activation-token", "", "internal: Wayland activation token threaded through to the primary instance")
 	)
 	flag.Parse()
 

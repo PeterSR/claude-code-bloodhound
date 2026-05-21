@@ -14,10 +14,10 @@ import (
 
 // Stats summarises one Run.
 type Stats struct {
-	SessionsRefreshed     int     `json:"sessions_refreshed"`
-	BucketsRebuilt        int     `json:"buckets_rebuilt"`
-	CalibrationPointsBuilt int    `json:"calibration_points_built"`
-	ElapsedS              float64 `json:"elapsed_s"`
+	SessionsRefreshed      int     `json:"sessions_refreshed"`
+	BucketsRebuilt         int     `json:"buckets_rebuilt"`
+	CalibrationPointsBuilt int     `json:"calibration_points_built"`
+	ElapsedS               float64 `json:"elapsed_s"`
 }
 
 // Options configures Run.

@@ -32,10 +32,10 @@ type BridgeResponse struct {
 // Tool names. Single source of truth so subcommand + daemon can't
 // drift on string spelling.
 const (
-	ToolReadPTY        = "read_pty"
-	ToolSendKeys       = "send_keys"
-	ToolTestRegex      = "test_regex"
-	ToolSaveExtractor  = "save_extractor"
+	ToolReadPTY       = "read_pty"
+	ToolSendKeys      = "send_keys"
+	ToolTestRegex     = "test_regex"
+	ToolSaveExtractor = "save_extractor"
 )
 
 // BridgeServer accepts connections from a single MCP subcommand and

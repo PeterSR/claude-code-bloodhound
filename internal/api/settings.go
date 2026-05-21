@@ -22,11 +22,11 @@ type SettingsResponse struct {
 // Keeping them server-side means we can adjust the snippet shape without
 // shipping a frontend update.
 type snippets struct {
-	Statusline       string `json:"statusline"`
-	StopHook         string `json:"stop_hook"`
-	UserPromptHook   string `json:"user_prompt_hook"`
-	SystemdUnit      string `json:"systemd_user_unit"`
-	SystemdTimer     string `json:"systemd_user_timer"`
+	Statusline     string `json:"statusline"`
+	StopHook       string `json:"stop_hook"`
+	UserPromptHook string `json:"user_prompt_hook"`
+	SystemdUnit    string `json:"systemd_user_unit"`
+	SystemdTimer   string `json:"systemd_user_timer"`
 }
 
 const (

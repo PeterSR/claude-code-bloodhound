@@ -8,15 +8,15 @@ import (
 
 // gate enforces two invariants across all callers of Run:
 //
-//   1. **Mutex**: at most one self-heal in flight. The daemon's
-//      runPollOnce and the /api/extractor/retrain handler can both call
-//      Run; without serialisation they'd race on claude -p + the
-//      extractor file.
+//  1. **Mutex**: at most one self-heal in flight. The daemon's
+//     runPollOnce and the /api/extractor/retrain handler can both call
+//     Run; without serialisation they'd race on claude -p + the
+//     extractor file.
 //
-//   2. **Cool-down**: after several failed heals back-to-back, skip
-//      automatic heals for a stretch instead of burning a turn on
-//      every polling cycle. Manual retrains via the API still bypass
-//      the cool-down — the user explicitly asked.
+//  2. **Cool-down**: after several failed heals back-to-back, skip
+//     automatic heals for a stretch instead of burning a turn on
+//     every polling cycle. Manual retrains via the API still bypass
+//     the cool-down — the user explicitly asked.
 var gate = &healGate{
 	maxConsecutiveFails: 3,
 	cooldown:            15 * time.Minute,

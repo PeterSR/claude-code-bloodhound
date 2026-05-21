@@ -85,12 +85,12 @@ type Config struct {
 // Default returns the baseline config. New installs start here.
 func Default() Config {
 	return Config{
-		PollIntervalS:      300,  // 5 min
-		IngestIntervalS:    300,  // 5 min
-		AggregateIntervalS: 900,  // 15 min
-		PlanTier:           PlanUnknown,
-		JoinThePack:        false,
-		ClaudeBinary:       "",
+		PollIntervalS:           300, // 5 min
+		IngestIntervalS:         300, // 5 min
+		AggregateIntervalS:      900, // 15 min
+		PlanTier:                PlanUnknown,
+		JoinThePack:             false,
+		ClaudeBinary:            "",
 		StatuslinePrefix:        "🩸",
 		StaleAfterS:             600,
 		ActiveSessionThresholdS: 1800,

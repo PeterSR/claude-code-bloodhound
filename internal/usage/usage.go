@@ -25,8 +25,8 @@ type Result struct {
 	OK              bool      `json:"ok"`
 	FetchedAt       time.Time `json:"fetched_at"`
 	ElapsedS        float64   `json:"elapsed_s"`
-	Raw             string    `json:"raw"` // tail of the cleaned terminal output (debug)
-	RawFull         string    `json:"-"`   // full cleaned output (kept in-memory for bootstrap; not serialised)
+	Raw             string    `json:"raw"`              // tail of the cleaned terminal output (debug)
+	RawFull         string    `json:"-"`                // full cleaned output (kept in-memory for bootstrap; not serialised)
 	ExtractorOrigin string    `json:"extractor_origin"` // "user" | "default"
 
 	SessionPct      *int   `json:"session_pct,omitempty"`
@@ -107,14 +107,14 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 }
 
 var ansiRe = regexp.MustCompile(strings.Join([]string{
-	`\x1b\[[0-?]*[ -/]*[@-~]`,    // CSI sequences
-	`\x1b\][^\x07]*\x07`,         // OSC ending in BEL
-	`\x1b[PX^_].*?\x1b\\`,        // DCS/SOS/PM/APC ending in ST
-	`\x1b[()][AB012]`,            // charset designation
-	`\x1b[=>]`,                   // app keypad mode
-	`\x1b[78]`,                   // save / restore cursor (ESC 7, ESC 8)
-	`\x1bM`,                      // reverse index
-	`\x1b\[\?[0-9;]*[a-zA-Z]`,    // private mode
+	`\x1b\[[0-?]*[ -/]*[@-~]`, // CSI sequences
+	`\x1b\][^\x07]*\x07`,      // OSC ending in BEL
+	`\x1b[PX^_].*?\x1b\\`,     // DCS/SOS/PM/APC ending in ST
+	`\x1b[()][AB012]`,         // charset designation
+	`\x1b[=>]`,                // app keypad mode
+	`\x1b[78]`,                // save / restore cursor (ESC 7, ESC 8)
+	`\x1bM`,                   // reverse index
+	`\x1b\[\?[0-9;]*[a-zA-Z]`, // private mode
 }, "|"))
 
 func stripANSI(b []byte) string {

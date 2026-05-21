@@ -67,12 +67,12 @@ type Result struct {
 // CostInfo summarises what one heal cost. Lets the UI show the user
 // what they paid for the convenience.
 type CostInfo struct {
-	NumTurns                  int     `json:"num_turns"`
-	TotalCostUSD              float64 `json:"total_cost_usd"`
-	InputTokens               int     `json:"input_tokens"`
-	OutputTokens              int     `json:"output_tokens"`
-	CacheReadInputTokens      int     `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens  int     `json:"cache_creation_input_tokens"`
+	NumTurns                 int     `json:"num_turns"`
+	TotalCostUSD             float64 `json:"total_cost_usd"`
+	InputTokens              int     `json:"input_tokens"`
+	OutputTokens             int     `json:"output_tokens"`
+	CacheReadInputTokens     int     `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int     `json:"cache_creation_input_tokens"`
 }
 
 // defaultRequired matches bootstrap.go's prompt expectations.
@@ -86,11 +86,11 @@ var defaultRequired = []string{
 }
 
 // Run executes one self-heal attempt end-to-end:
-//   1. spawn the inner claude in a pty (the one being scraped)
-//   2. wrap that pty in a Session + start a BridgeServer
-//   3. spawn claude -p as orchestrator with --mcp-config wiring the
-//      bridge subcommand to the BridgeServer
-//   4. watchdog: kill everything when Timeout elapses
+//  1. spawn the inner claude in a pty (the one being scraped)
+//  2. wrap that pty in a Session + start a BridgeServer
+//  3. spawn claude -p as orchestrator with --mcp-config wiring the
+//     bridge subcommand to the BridgeServer
+//  4. watchdog: kill everything when Timeout elapses
 //
 // Returns when the orchestrator exits, with the persisted extractor
 // info or a typed error.
@@ -348,11 +348,11 @@ func buildMCPConfig(bridgeSock string) string {
 // readable reason.
 func parseAPIErrorFromOrchestratorOutput(stdout []byte) string {
 	var raw struct {
-		IsError         bool   `json:"is_error"`
-		Subtype         string `json:"subtype"`
-		Result          string `json:"result"`
-		APIErrorStatus  any    `json:"api_error_status"`
-		TerminalReason  string `json:"terminal_reason"`
+		IsError        bool   `json:"is_error"`
+		Subtype        string `json:"subtype"`
+		Result         string `json:"result"`
+		APIErrorStatus any    `json:"api_error_status"`
+		TerminalReason string `json:"terminal_reason"`
 	}
 	if err := json.Unmarshal(stdout, &raw); err != nil {
 		return ""

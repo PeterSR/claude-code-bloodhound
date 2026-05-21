@@ -10,12 +10,13 @@
 // reads what's on screen and acts.
 //
 // File layout:
-//   types.go    — shared request/result types for the four tools
-//   session.go  — Session: live pty + frozen target extractor schema
-//                 + the four tool implementations.
-//   server.go   — wires the Session to an MCP server (stdio bridge)
-//   run.go      — Run: entry point. spawns inner claude, starts the
-//                 bridge, launches the orchestrator, watchdogs.
+//
+//	types.go    — shared request/result types for the four tools
+//	session.go  — Session: live pty + frozen target extractor schema
+//	              + the four tool implementations.
+//	server.go   — wires the Session to an MCP server (stdio bridge)
+//	run.go      — Run: entry point. spawns inner claude, starts the
+//	              bridge, launches the orchestrator, watchdogs.
 package selfheal
 
 // ReadPTYRequest controls how long read_pty waits for the pty to be

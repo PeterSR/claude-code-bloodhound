@@ -83,10 +83,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	for rows.Next() {
 		var (
-			tsMS                                    int64
-			spct, wpct                              *int
-			ssat, wsat, sreset, wreset              int
-			sNull, wNull                            interface{}
+			tsMS                       int64
+			spct, wpct                 *int
+			ssat, wsat, sreset, wreset int
+			sNull, wNull               interface{}
 		)
 		if err := rows.Scan(&tsMS, &sNull, &wNull, &ssat, &wsat, &sreset, &wreset); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
