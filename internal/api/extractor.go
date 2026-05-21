@@ -1,18 +1,20 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
-	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
+	"github.com/PeterSR/claude-code-bloodhound/internal/usage/selfheal"
 )
 
-// handleExtractorRetrain runs a one-shot self-heal cycle: fetch the current
-// /usage panel and ask `claude -p` to generate a fresh extractor JSON, then
-// persist it. Available regardless of the extractor_self_heal config flag,
-// since this is an explicit user-driven action from the Debug page.
+// handleExtractorRetrain triggers one orchestrator-driven self-heal:
+// daemon spawns an inner claude in a pty and lets an orchestrator
+// claude -p drive it via MCP tools until a fresh extractor is saved.
+// Always available regardless of the extractor_self_heal config flag —
+// this is an explicit user-driven action from the Debug page.
 func (s *Server) handleExtractorRetrain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -25,48 +27,38 @@ func (s *Server) handleExtractorRetrain(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Generous budget — bootstrap runs `claude -p` which itself can take
-	// 30+ seconds on a cold start. Frontend should show a long-running
-	// indicator.
+	// Generous budget — the orchestrator runs claude -p which can take
+	// 30-60s on a cold start, plus a fresh inner claude session.
 	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 	defer cancel()
 
-	res, fetchErr := usage.Fetch(ctx, usage.Options{ClaudeBinary: cfg.ClaudeBinary})
-	if fetchErr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"ok":    false,
-			"error": "capture: " + fetchErr.Error(),
-		})
-		return
-	}
-	if res.RawFull == "" {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"ok":    false,
-			"error": "captured panel is empty; nothing to learn from",
-		})
-		return
-	}
-
-	info, bErr := usage.Bootstrap(ctx, usage.BootstrapOptions{
+	stderr := &bytes.Buffer{}
+	heal := selfheal.Run(ctx, selfheal.Options{
 		ClaudeBinary: cfg.ClaudeBinary,
-		Panel:        res.RawFull,
+		Timeout:      150 * time.Second,
+		Stderr:       stderr,
 	})
-	if bErr != nil {
+
+	if !heal.OK {
+		errMsg := "self-heal failed"
+		if heal.Err != nil {
+			errMsg = heal.Err.Error()
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"ok":    false,
-			"error": "bootstrap: " + bErr.Error(),
+			"ok":          false,
+			"error":       errMsg,
+			"stderr_tail": heal.StderrTail,
+			"total_ms":    heal.TotalMs,
 		})
 		return
 	}
 
-	res = usage.Reapply(res, info.Extractor)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":               true,
-		"elapsed_s":        info.ElapsedS,
-		"fields":           len(info.Extractor.Fields),
-		"saved_at":         info.SavedAt,
-		"extractor_origin": res.ExtractorOrigin,
-		"applied":          res.OK,
-		"missing":          res.Extracted.Missing,
+		"ok":              true,
+		"saved_at":        heal.SavedAt,
+		"orchestrator_ms": heal.OrchestratorMs,
+		"total_ms":        heal.TotalMs,
+		"stderr_tail":     heal.StderrTail,
+		"applied":         true,
 	})
 }

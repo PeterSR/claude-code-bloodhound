@@ -20,6 +20,7 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
+	"github.com/PeterSR/claude-code-bloodhound/internal/usage/selfheal"
 )
 
 var (
@@ -193,26 +194,41 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	pollCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// The self-heal path can take ~30-60s on top of the regular ~8s
+	// fetch, so size the poll context generously when it's enabled.
+	pollBudget := 60 * time.Second
+	if cfg.ExtractorSelfHeal {
+		pollBudget = 150 * time.Second
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, pollBudget)
 	defer cancel()
 	res, fetchErr := usage.Fetch(pollCtx, usage.Options{ClaudeBinary: cfg.ClaudeBinary})
 
-	// Self-heal: if extraction missed required fields but the capture
-	// is otherwise intact, ask `claude -p` to study the panel and emit
-	// a refreshed extractor. Gated by config so users who want manual
-	// control (or who don't want bootstrap consuming usage on their
-	// account) can flip it off.
-	if cfg.ExtractorSelfHeal && fetchErr == nil && !res.OK && res.RawFull != "" {
-		info, bErr := usage.Bootstrap(pollCtx, usage.BootstrapOptions{
+	// Self-heal: if extraction missed required fields, hand the heal
+	// off to selfheal.Run — which spawns its own inner claude in a pty
+	// and lets an orchestrator claude -p drive it via MCP tools (read_pty,
+	// send_keys, test_regex, save_extractor) until the new extractor is
+	// validated and persisted. Gated by config so users who want manual
+	// control (or who don't want self-heal consuming usage on their
+	// account) can flip it off and use the Debug page's manual retrain.
+	if cfg.ExtractorSelfHeal && fetchErr == nil && !res.OK {
+		fmt.Fprintf(w, "[daemon] poll: extraction missed, starting orchestrator self-heal\n")
+		heal := selfheal.Run(pollCtx, selfheal.Options{
 			ClaudeBinary: cfg.ClaudeBinary,
-			Panel:        res.RawFull,
+			Timeout:      120 * time.Second,
 		})
-		if bErr != nil {
-			fmt.Fprintf(w, "[daemon] poll: self-heal failed (%v)\n", bErr)
+		if heal.OK {
+			fmt.Fprintf(w, "[daemon] poll: self-heal saved a fresh extractor in %dms (saved=%s)\n",
+				heal.TotalMs, heal.SavedAt)
+			// Re-apply against the originally captured panel; if the
+			// new regexes still miss (panels differ between heal session
+			// and this poll), leave res.OK=false and next poll picks it
+			// up naturally.
+			if newExt, _, loadErr := usage.LoadExtractor(); loadErr == nil {
+				res = usage.Reapply(res, newExt)
+			}
 		} else {
-			res = usage.Reapply(res, info.Extractor)
-			fmt.Fprintf(w, "[daemon] poll: self-heal ok in %.1fs (fields: %d)\n",
-				info.ElapsedS, len(info.Extractor.Fields))
+			fmt.Fprintf(w, "[daemon] poll: self-heal failed (%v) — next poll will retry; manual retrain available from the Debug page\n", heal.Err)
 		}
 	}
 
