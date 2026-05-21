@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -51,7 +53,10 @@ func (s *Server) handleExtractorRetrain(w http.ResponseWriter, r *http.Request) 
 		Timeout:      150 * time.Second,
 		Stderr:       stderr,
 		Trace:        traceFile,
+		Force:        true, // manual retrains bypass the cool-down
 	})
+
+	traceEntries := readTrace(tracePath)
 
 	if !heal.OK {
 		errMsg := "self-heal failed"
@@ -64,6 +69,7 @@ func (s *Server) handleExtractorRetrain(w http.ResponseWriter, r *http.Request) 
 			"stderr_tail": heal.StderrTail,
 			"total_ms":    heal.TotalMs,
 			"trace_path":  tracePath,
+			"trace":       traceEntries,
 		})
 		return
 	}
@@ -75,6 +81,31 @@ func (s *Server) handleExtractorRetrain(w http.ResponseWriter, r *http.Request) 
 		"total_ms":        heal.TotalMs,
 		"stderr_tail":     heal.StderrTail,
 		"trace_path":      tracePath,
+		"trace":           traceEntries,
+		"cost":            heal.Cost,
 		"applied":         true,
 	})
+}
+
+// readTrace parses the JSONL trace file into a slice of trace entries.
+// Returns an empty slice if the file is unreadable or empty — the trace
+// is informational so we don't want a missing file to fail the
+// response.
+func readTrace(path string) []map[string]any {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var entries []map[string]any
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var entry map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries
 }

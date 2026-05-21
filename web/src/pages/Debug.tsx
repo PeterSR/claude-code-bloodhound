@@ -167,14 +167,34 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+type TraceEntry = {
+  t_ms: number;
+  tool: string;
+  args?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  err?: string;
+};
+
+type CostInfo = {
+  num_turns?: number;
+  total_cost_usd?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+};
+
 type RetrainResult = {
   ok: boolean;
-  elapsed_s?: number;
-  fields?: number;
   saved_at?: string;
+  orchestrator_ms?: number;
+  total_ms?: number;
   applied?: boolean;
   missing?: string[];
   error?: string;
+  trace?: TraceEntry[];
+  stderr_tail?: string;
+  cost?: CostInfo;
 };
 
 function RetrainCard({ onDone }: { onDone: () => void }) {
@@ -200,10 +220,11 @@ function RetrainCard({ onDone }: { onDone: () => void }) {
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
       <div className="text-xs uppercase tracking-wider text-zinc-500 mb-3">Retrain extractor</div>
       <div className="text-sm text-zinc-600 dark:text-zinc-400 mb-3 max-w-2xl">
-        Captures a fresh <code className="font-mono text-xs">/usage</code> panel and asks the local <code className="font-mono text-xs">claude -p</code> to
-        generate new extractor rules. Use when the daemon keeps reporting "extraction failed" and
-        you don't want to wait for the next automatic self-heal (or you've turned auto self-heal off).
-        Consumes one <code className="font-mono text-xs">claude -p</code> turn against your account; budget ~30–60s.
+        Spawns a fresh <code className="font-mono text-xs">claude -p</code> as an orchestrator and lets it drive a live pty via MCP
+        tools (<code className="font-mono text-xs">read_pty</code>, <code className="font-mono text-xs">send_keys</code>, <code className="font-mono text-xs">test_regex</code>, <code className="font-mono text-xs">save_extractor</code>) until it has
+        verified each required field and persisted a working extractor. Use when extraction keeps
+        failing and you don't want to wait for the next automatic self-heal. Consumes one orchestrator
+        <code className="font-mono text-xs"> claude -p</code> turn against your account; usually 30–90 seconds.
       </div>
       <div className="flex items-center gap-3">
         <button
@@ -214,41 +235,99 @@ function RetrainCard({ onDone }: { onDone: () => void }) {
           {running ? <Loader2 className="size-4 animate-spin" /> : <Wand2 className="size-4" />}
           {running ? 'Retraining…' : 'Retrain now'}
         </button>
-        {result && !running && (
-          <RetrainStatus result={result} />
-        )}
+        {result && !running && <RetrainStatus result={result} />}
       </div>
+      {result && !running && result.trace && result.trace.length > 0 && (
+        <details className="mt-4">
+          <summary className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 select-none">
+            {result.trace.length} tool calls — show step-by-step
+          </summary>
+          <TraceList trace={result.trace} />
+        </details>
+      )}
     </div>
   );
 }
 
 function RetrainStatus({ result }: { result: RetrainResult }) {
+  const ms = result.total_ms ?? 0;
+  const secs = (ms / 1000).toFixed(1);
   if (!result.ok) {
     return (
       <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
         <X className="size-4" />
-        <span>Failed: {result.error ?? 'unknown error'}</span>
-      </div>
-    );
-  }
-  if (result.applied) {
-    return (
-      <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400">
-        <Check className="size-4" />
-        <span>
-          Done in {result.elapsed_s?.toFixed(1)}s · {result.fields} fields · all required fields extracted
-        </span>
+        <span>Failed in {secs}s: {result.error ?? 'unknown error'}</span>
       </div>
     );
   }
   return (
-    <div className="flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400">
+    <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400">
       <Check className="size-4" />
       <span>
-        Saved in {result.elapsed_s?.toFixed(1)}s · {result.fields} fields · still missing: {result.missing?.join(', ') ?? '—'}
+        Saved in {secs}s
+        {result.cost && result.cost.total_cost_usd != null && (
+          <>
+            {' · '}
+            <span className="text-zinc-500 dark:text-zinc-400">
+              ${result.cost.total_cost_usd.toFixed(3)} ·{' '}
+              {(result.cost.input_tokens ?? 0).toLocaleString()} in /{' '}
+              {(result.cost.output_tokens ?? 0).toLocaleString()} out tokens
+            </span>
+          </>
+        )}
       </span>
     </div>
   );
+}
+
+function TraceList({ trace }: { trace: TraceEntry[] }) {
+  return (
+    <div className="mt-3 space-y-1.5 max-w-3xl">
+      {trace.map((e, i) => (
+        <TraceRow key={i} index={i + 1} entry={e} />
+      ))}
+    </div>
+  );
+}
+
+function TraceRow({ index, entry }: { index: number; entry: TraceEntry }) {
+  const t = (entry.t_ms / 1000).toFixed(1);
+  const tone = entry.err
+    ? 'text-red-600 dark:text-red-400'
+    : 'text-zinc-700 dark:text-zinc-300';
+  return (
+    <div className="font-mono text-xs">
+      <div className={['flex items-baseline gap-2', tone].join(' ')}>
+        <span className="text-zinc-400 w-12 shrink-0 text-right">t+{t}s</span>
+        <span className="text-zinc-400 w-6 shrink-0">#{index}</span>
+        <span className="font-medium">{entry.tool}</span>
+        <span className="text-zinc-500 truncate">{summariseEntry(entry)}</span>
+      </div>
+    </div>
+  );
+}
+
+function summariseEntry(entry: TraceEntry): string {
+  if (entry.err) return `× ${entry.err}`;
+  const a = entry.args ?? {};
+  const r = entry.result ?? {};
+  switch (entry.tool) {
+    case 'read_pty':
+      return `settle ${a.settle_ms}ms → ${r.quiet ? 'quiet' : 'still rendering'}`;
+    case 'send_keys':
+      return `${JSON.stringify(a.text)} → ${r.bytes} bytes`;
+    case 'test_regex':
+      if (r.matched) return `${a.field} → "${r.value}" ✓`;
+      return `${a.field} → no match`;
+    case 'save_extractor':
+      if (r.ok) {
+        const fields = Array.isArray(a.fields) ? a.fields.length : 0;
+        return `${fields} fields → saved ✓`;
+      }
+      return `missing: ${(r.missing as string[] | undefined)?.join(', ') ?? ''}`;
+    default:
+      return '';
+  }
 }
 
 function KV({ k, v, mono, status }: { k: string; v: string | number; mono?: boolean; status?: 'ok' | 'fail' }) {

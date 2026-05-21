@@ -3,6 +3,7 @@ package selfheal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,11 @@ import (
 type Options struct {
 	// ClaudeBinary path. Empty = "claude" on PATH.
 	ClaudeBinary string
+
+	// Force bypasses the cool-down state — used by the manual retrain
+	// endpoint where the user explicitly asked. The concurrency mutex
+	// still applies (only one heal at a time).
+	Force bool
 
 	// Required field names the orchestrator must produce. Defaults to
 	// session_pct, session_reset, session_reset_tz, week_pct,
@@ -46,11 +52,27 @@ type Options struct {
 // persisted) or Err is set with a typed-ish reason.
 type Result struct {
 	OK             bool
-	SavedAt        string        // where extractors.json was written
-	OrchestratorMs int64         // wall time spent in claude -p
-	TotalMs        int64         // total Run wall time
+	SavedAt        string // where extractors.json was written
+	OrchestratorMs int64  // wall time spent in claude -p
+	TotalMs        int64  // total Run wall time
 	Err            error
-	StderrTail     string        // last few KB of claude -p's stderr
+	StderrTail     string // last few KB of claude -p's stderr
+
+	// Cost is the orchestrator's resource consumption parsed out of
+	// claude -p's JSON output. Zero values mean "couldn't parse" — we
+	// don't fail the heal just because the cost block was unexpected.
+	Cost CostInfo
+}
+
+// CostInfo summarises what one heal cost. Lets the UI show the user
+// what they paid for the convenience.
+type CostInfo struct {
+	NumTurns                  int     `json:"num_turns"`
+	TotalCostUSD              float64 `json:"total_cost_usd"`
+	InputTokens               int     `json:"input_tokens"`
+	OutputTokens              int     `json:"output_tokens"`
+	CacheReadInputTokens      int     `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens  int     `json:"cache_creation_input_tokens"`
 }
 
 // defaultRequired matches bootstrap.go's prompt expectations.
@@ -74,6 +96,15 @@ var defaultRequired = []string{
 // info or a typed error.
 func Run(ctx context.Context, opts Options) Result {
 	t0 := time.Now()
+
+	// Serialise: no concurrent heals, and respect the cool-down for
+	// automatic callers. Manual retrains pass Force=true.
+	if err := gate.tryAcquire(opts.Force); err != nil {
+		return Result{Err: err, TotalMs: ms(time.Since(t0))}
+	}
+	healOK := false
+	defer func() { gate.release(healOK) }()
+
 	if opts.ClaudeBinary == "" {
 		opts.ClaudeBinary = "claude"
 	}
@@ -158,6 +189,9 @@ func Run(ctx context.Context, opts Options) Result {
 		"--append-system-prompt", systemPrompt,
 		"--max-turns", fmt.Sprintf("%d", opts.MaxTurns),
 		"--allowedTools", strings.Join(allowedToolList(), ","),
+		// JSON output gives us the cost / token info to surface back
+		// to the user — they're paying for this turn.
+		"--output-format", "json",
 	)
 	// Pass the bridge socket path to the subcommand via env.
 	orchCmd.Env = append(os.Environ(),
@@ -174,6 +208,8 @@ func Run(ctx context.Context, opts Options) Result {
 	runErr := orchCmd.Run()
 	orchMs := ms(time.Since(orchT0))
 
+	cost := parseCostFromOrchestratorOutput(stdout.Bytes())
+
 	// Heuristic for success: did SaveExtractor persist? Check whether
 	// the on-disk extractor was bumped recently AND its generated_by is
 	// "claude". Cheap to read; avoids having to parse claude's final
@@ -185,6 +221,7 @@ func Run(ctx context.Context, opts Options) Result {
 		OrchestratorMs: orchMs,
 		TotalMs:        ms(time.Since(t0)),
 		StderrTail:     tailString(opts.Stderr.String(), 4000),
+		Cost:           cost,
 	}
 	if !saved {
 		if runErr != nil {
@@ -193,6 +230,7 @@ func Run(ctx context.Context, opts Options) Result {
 			res.Err = errors.New("orchestrator exited without saving an extractor")
 		}
 	}
+	healOK = saved
 	return res
 }
 
@@ -294,6 +332,33 @@ func buildMCPConfig(bridgeSock string) string {
     }
   }
 }`, exe, bridgeSock)
+}
+
+// parseCostFromOrchestratorOutput pulls the cost/token fields from
+// claude -p's --output-format=json blob. Best-effort: if the format
+// changes, we just return a zero CostInfo and don't fail the heal.
+func parseCostFromOrchestratorOutput(stdout []byte) CostInfo {
+	var raw struct {
+		NumTurns     int     `json:"num_turns"`
+		TotalCostUSD float64 `json:"total_cost_usd"`
+		Usage        struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(stdout, &raw); err != nil {
+		return CostInfo{}
+	}
+	return CostInfo{
+		NumTurns:                 raw.NumTurns,
+		TotalCostUSD:             raw.TotalCostUSD,
+		InputTokens:              raw.Usage.InputTokens,
+		OutputTokens:             raw.Usage.OutputTokens,
+		CacheReadInputTokens:     raw.Usage.CacheReadInputTokens,
+		CacheCreationInputTokens: raw.Usage.CacheCreationInputTokens,
+	}
 }
 
 func writeTempMCPConfig(content string) (string, error) {
