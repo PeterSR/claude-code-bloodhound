@@ -13,25 +13,25 @@ import (
 // transaction wipes + reinserts. This is cheap (~50k turns ≪ MB of state).
 func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 	type sessAcc struct {
-		project       string
-		firstTSMS     int64
-		lastTSMS      int64
-		turnCount     int
-		rawTokens     int64
-		outputTokens  int64
-		idleMiss      int
-		rotation      int
-		restructure   int
-		modelsSeen    map[string]bool
+		project      string
+		firstTSMS    int64
+		lastTSMS     int64
+		turnCount    int
+		rawTokens    int64
+		outputTokens int64
+		idleMiss     int
+		rotation     int
+		restructure  int
+		modelsSeen   map[string]bool
 		// 5h-rolling
-		weights        []int64
-		times          []int64
+		weights []int64
+		times   []int64
 		// cache TTL classification
 		cw5mTotal int64
 		cw1hTotal int64
 		// compactions filled in second pass
-		compactionCount      int
-		coldCompactionCount  int
+		compactionCount     int
+		coldCompactionCount int
 	}
 	acc := map[string]*sessAcc{}
 

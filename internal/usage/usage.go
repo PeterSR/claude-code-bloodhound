@@ -1,11 +1,13 @@
-// Package usage drives Claude Code's /usage TUI panel in a pty, captures the
-// rendered output, strips ANSI, and applies a configurable Extractor to pull
-// out the session and week percentages plus reset hints.
+// Package usage drives Claude Code's /usage TUI panel in a pty, renders
+// the captured output through a virtual terminal grid, and applies a
+// configurable Extractor to pull out the session and week percentages
+// plus reset hints.
 //
 // The extractor is data-driven (regex DSL persisted to $XDG_STATE_HOME) so
-// we can tolerate Anthropic redesigning the panel: an extraction failure
-// is loud, and `bloodhound poll --rebootstrap` regenerates the rules by
-// asking the local Claude Code to study a fresh panel snapshot.
+// we can tolerate Anthropic redesigning the panel: extraction failures
+// trigger the daemon's self-heal (internal/usage/selfheal), which hands
+// the live pty to an orchestrator claude -p over MCP tools and lets it
+// re-learn the field positions from a fresh capture.
 package usage
 
 import (
@@ -23,8 +25,8 @@ type Result struct {
 	OK              bool      `json:"ok"`
 	FetchedAt       time.Time `json:"fetched_at"`
 	ElapsedS        float64   `json:"elapsed_s"`
-	Raw             string    `json:"raw"` // tail of the cleaned terminal output (debug)
-	RawFull         string    `json:"-"`   // full cleaned output (kept in-memory for bootstrap; not serialised)
+	Raw             string    `json:"raw"`              // tail of the cleaned terminal output (debug)
+	RawFull         string    `json:"-"`                // full cleaned output (kept in-memory for bootstrap; not serialised)
 	ExtractorOrigin string    `json:"extractor_origin"` // "user" | "default"
 
 	SessionPct      *int   `json:"session_pct,omitempty"`
@@ -59,7 +61,11 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 	t0 := time.Now()
 	rawBytes, driveErr := drive(ctx, opts)
 	elapsed := time.Since(t0).Seconds()
-	cleaned := stripANSI(rawBytes)
+	// Render the raw pty stream through a virtual terminal grid. This
+	// preserves visual spacing (claude positions chars via ANSI cursor
+	// moves rather than literal spaces) and drops stale text that was
+	// overdrawn during the capture.
+	cleaned := renderVT(rawBytes)
 
 	res := Result{
 		FetchedAt: time.Now().UTC(),
@@ -101,14 +107,14 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 }
 
 var ansiRe = regexp.MustCompile(strings.Join([]string{
-	`\x1b\[[0-?]*[ -/]*[@-~]`,    // CSI sequences
-	`\x1b\][^\x07]*\x07`,         // OSC ending in BEL
-	`\x1b[PX^_].*?\x1b\\`,        // DCS/SOS/PM/APC ending in ST
-	`\x1b[()][AB012]`,            // charset designation
-	`\x1b[=>]`,                   // app keypad mode
-	`\x1b[78]`,                   // save / restore cursor (ESC 7, ESC 8)
-	`\x1bM`,                      // reverse index
-	`\x1b\[\?[0-9;]*[a-zA-Z]`,    // private mode
+	`\x1b\[[0-?]*[ -/]*[@-~]`, // CSI sequences
+	`\x1b\][^\x07]*\x07`,      // OSC ending in BEL
+	`\x1b[PX^_].*?\x1b\\`,     // DCS/SOS/PM/APC ending in ST
+	`\x1b[()][AB012]`,         // charset designation
+	`\x1b[=>]`,                // app keypad mode
+	`\x1b[78]`,                // save / restore cursor (ESC 7, ESC 8)
+	`\x1bM`,                   // reverse index
+	`\x1b\[\?[0-9;]*[a-zA-Z]`, // private mode
 }, "|"))
 
 func stripANSI(b []byte) string {

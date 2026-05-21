@@ -11,16 +11,16 @@ import (
 
 // DebugResponse is the kitchen-sink "is this thing on" payload.
 type DebugResponse struct {
-	Build      buildInfo      `json:"build"`
-	Paths      pathsInfo      `json:"paths"`
-	DeviceID   string         `json:"device_id"`
-	Schema     int            `json:"schema_version"`
-	Extractor  extractorInfo  `json:"extractor"`
-	Ingest     ingestInfo     `json:"ingest"`
-	LastPoll   *lastPollInfo  `json:"last_poll,omitempty"`
-	RawDump    *rawDumpInfo   `json:"raw_dump,omitempty"`
-	Aggregate  aggregateInfo  `json:"aggregate"`
-	ServerNow  string         `json:"server_now"`
+	Build     buildInfo     `json:"build"`
+	Paths     pathsInfo     `json:"paths"`
+	DeviceID  string        `json:"device_id"`
+	Schema    int           `json:"schema_version"`
+	Extractor extractorInfo `json:"extractor"`
+	Ingest    ingestInfo    `json:"ingest"`
+	LastPoll  *lastPollInfo `json:"last_poll,omitempty"`
+	RawDump   *rawDumpInfo  `json:"raw_dump,omitempty"`
+	Aggregate aggregateInfo `json:"aggregate"`
+	ServerNow string        `json:"server_now"`
 }
 
 type buildInfo struct {
@@ -30,14 +30,14 @@ type buildInfo struct {
 }
 
 type pathsInfo struct {
-	DataDir          string `json:"data_dir"`
-	StateDir         string `json:"state_dir"`
-	ConfigDir        string `json:"config_dir"`
-	ConfigFile       string `json:"config_file"`
-	ClaudeProjects   string `json:"claude_projects"`
-	ExtractorFile    string `json:"extractor_file"`
-	ExtractorSnap    string `json:"extractor_snapshot"`
-	DBPath           string `json:"db_path"`
+	DataDir        string `json:"data_dir"`
+	StateDir       string `json:"state_dir"`
+	ConfigDir      string `json:"config_dir"`
+	ConfigFile     string `json:"config_file"`
+	ClaudeProjects string `json:"claude_projects"`
+	ExtractorFile  string `json:"extractor_file"`
+	ExtractorSnap  string `json:"extractor_snapshot"`
+	DBPath         string `json:"db_path"`
 }
 
 type extractorInfo struct {
@@ -73,19 +73,19 @@ type rawDumpInfo struct {
 }
 
 type aggregateInfo struct {
-	BucketCount   int `json:"bucket_count"`
-	SessionCount  int `json:"session_count"`
-	LatestBucket  *bucketSummary `json:"latest_bucket,omitempty"`
+	BucketCount  int            `json:"bucket_count"`
+	SessionCount int            `json:"session_count"`
+	LatestBucket *bucketSummary `json:"latest_bucket,omitempty"`
 }
 
 type bucketSummary struct {
-	StartTS         string  `json:"start_ts"`
-	EndTS           string  `json:"end_ts"`
-	ResetInferred   bool    `json:"reset_inferred"`
-	RawTokens       int64   `json:"raw_tokens"`
-	CostWeighted    float64 `json:"cost_weighted_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	TurnCount       int     `json:"turn_count"`
+	StartTS       string  `json:"start_ts"`
+	EndTS         string  `json:"end_ts"`
+	ResetInferred bool    `json:"reset_inferred"`
+	RawTokens     int64   `json:"raw_tokens"`
+	CostWeighted  float64 `json:"cost_weighted_tokens"`
+	OutputTokens  int64   `json:"output_tokens"`
+	TurnCount     int     `json:"turn_count"`
 }
 
 func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
@@ -118,8 +118,8 @@ func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 			ExtractorSnap:  snapPath,
 			DBPath:         s.Store.Path,
 		},
-		DeviceID: device,
-		Schema:   schema,
+		DeviceID:  device,
+		Schema:    schema,
 		ServerNow: now.UTC().Format(time.RFC3339),
 	}
 

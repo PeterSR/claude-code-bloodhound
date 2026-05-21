@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Bloodhound
+GenericName=Claude Code usage dashboard
+Comment=Local dashboard for Claude Code's /usage panel and session ingest
+Exec=bloodhound-gui
+Icon=bloodhound
+Terminal=false
+Categories=Development;Utility;Monitor;
+Keywords=claude;usage;tokens;dashboard;
+StartupNotify=true
+StartupWMClass=bloodhound

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/api"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
@@ -46,7 +47,8 @@ var doctorCmd = &cobra.Command{
 		if err != nil {
 			fmt.Fprintf(w, "  load: ERROR — %v\n", err)
 		} else {
-			fmt.Fprintf(w, "  host:port:        %s:%d\n", cfg.Host, cfg.Port)
+			sockPath, sockErr := api.SocketPath()
+			fmt.Fprintf(w, "  api socket:       %s%s\n", sockPath, errSuffix(sockErr))
 			fmt.Fprintf(w, "  poll interval:    %ds\n", cfg.PollIntervalS)
 			fmt.Fprintf(w, "  ingest interval:  %ds\n", cfg.IngestIntervalS)
 			fmt.Fprintf(w, "  aggregate intvl:  %ds\n", cfg.AggregateIntervalS)

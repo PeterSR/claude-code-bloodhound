@@ -22,11 +22,11 @@ type SettingsResponse struct {
 // Keeping them server-side means we can adjust the snippet shape without
 // shipping a frontend update.
 type snippets struct {
-	Statusline       string `json:"statusline"`
-	StopHook         string `json:"stop_hook"`
-	UserPromptHook   string `json:"user_prompt_hook"`
-	SystemdUnit      string `json:"systemd_user_unit"`
-	SystemdTimer     string `json:"systemd_user_timer"`
+	Statusline     string `json:"statusline"`
+	StopHook       string `json:"stop_hook"`
+	UserPromptHook string `json:"user_prompt_hook"`
+	SystemdUnit    string `json:"systemd_user_unit"`
+	SystemdTimer   string `json:"systemd_user_timer"`
 }
 
 const (
@@ -122,11 +122,6 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var cfg config.Config
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	if cfg.Port == 0 {
-		// Refuse to wipe the port — we'd lock the user out of their own UI.
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "port must be > 0"})
 		return
 	}
 	if err := config.Save(cfg); err != nil {

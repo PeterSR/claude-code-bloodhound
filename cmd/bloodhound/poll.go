@@ -14,9 +14,8 @@ import (
 )
 
 var (
-	pollJSON        bool
-	pollTimeoutS    int
-	pollRebootstrap bool
+	pollJSON     bool
+	pollTimeoutS int
 )
 
 var pollCmd = &cobra.Command{
@@ -25,9 +24,14 @@ var pollCmd = &cobra.Command{
 	Long: `Spawns the claude binary in a pty, captures /usage, applies the active
 extractor, and persists the result to the local store.
 
-Pass --rebootstrap to ask the local claude to design a fresh extractor from
-the captured panel snapshot. Useful when the TUI changes shape and the
-default extractor stops matching.`,
+For ongoing observation, prefer ` + "`bloodhound daemon`" + ` — it polls
+/usage on its own cadence (default every 5 minutes) and auto-heals the
+extractor when the panel layout changes. This subcommand is for one-off
+scrapes and for users who don't run the daemon.
+
+If extraction misses required fields, hit the Retrain button on the
+Debug page (or POST to /api/extractor/retrain) to let the orchestrator
+re-learn the extractor against a fresh capture.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(
 			context.Background(),
@@ -51,24 +55,6 @@ default extractor stops matching.`,
 			Timeout:      time.Duration(pollTimeoutS-3) * time.Second,
 		})
 
-		// If --rebootstrap was passed (or extraction failed and we want to
-		// be explicit), regenerate the extractor from the captured panel.
-		var bootstrapInfo *usage.BootstrapInfo
-		if pollRebootstrap && res.RawFull != "" {
-			info, bErr := usage.Bootstrap(ctx, usage.BootstrapOptions{
-				ClaudeBinary: cfg.ClaudeBinary,
-				Panel:        res.RawFull,
-			})
-			if bErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "rebootstrap: %v\n", bErr)
-			} else {
-				bootstrapInfo = info
-				// Re-run extraction with the freshly minted rules so the
-				// observation we persist below benefits immediately.
-				res = usage.Reapply(res, info.Extractor)
-			}
-		}
-
 		obs, recErr := s.RecordUsage(ctx, res, fetchErr)
 		if recErr != nil {
 			return fmt.Errorf("record: %w", recErr)
@@ -77,27 +63,20 @@ default extractor stops matching.`,
 		w := cmd.OutOrStdout()
 		if pollJSON {
 			out := map[string]any{
-				"ok":               res.OK,
-				"elapsed_s":        res.ElapsedS,
-				"extractor_origin": res.ExtractorOrigin,
-				"session_pct":      res.SessionPct,
-				"week_pct":         res.WeekPct,
-				"session_reset":    res.SessionResetRaw,
-				"week_reset":       res.WeekResetRaw,
-				"missing":          res.Extracted.Missing,
-				"observation_id":   obs.ID,
+				"ok":                     res.OK,
+				"elapsed_s":              res.ElapsedS,
+				"extractor_origin":       res.ExtractorOrigin,
+				"session_pct":            res.SessionPct,
+				"week_pct":               res.WeekPct,
+				"session_reset":          res.SessionResetRaw,
+				"week_reset":             res.WeekResetRaw,
+				"missing":                res.Extracted.Missing,
+				"observation_id":         obs.ID,
 				"session_reset_detected": obs.SessionResetDetected,
 				"week_reset_detected":    obs.WeekResetDetected,
 			}
 			if fetchErr != nil {
 				out["error"] = fetchErr.Error()
-			}
-			if bootstrapInfo != nil {
-				out["rebootstrap"] = map[string]any{
-					"ok":             true,
-					"elapsed_s":      bootstrapInfo.ElapsedS,
-					"fields":         len(bootstrapInfo.Extractor.Fields),
-				}
 			}
 			b, _ := json.MarshalIndent(out, "", "  ")
 			fmt.Fprintln(w, string(b))
@@ -110,17 +89,13 @@ default extractor stops matching.`,
 		printPct(w, "week (all models)", res.WeekPct, res.WeekResetRaw)
 		if len(res.Extracted.Missing) > 0 {
 			fmt.Fprintf(w, "  ⚠  required fields missing: %v\n", res.Extracted.Missing)
-			fmt.Fprintf(w, "  hint: run `bloodhound poll --rebootstrap` to regenerate the extractor\n")
+			fmt.Fprintf(w, "  hint: trigger a retrain from the Debug page or `curl -X POST --unix-socket $XDG_RUNTIME_DIR/bloodhound/api.sock http://bh/api/extractor/retrain`\n")
 		}
 		if obs.SessionResetDetected {
 			fmt.Fprintln(w, "  session bucket reset detected since last poll")
 		}
 		if obs.WeekResetDetected {
 			fmt.Fprintln(w, "  weekly bucket reset detected since last poll")
-		}
-		if bootstrapInfo != nil {
-			fmt.Fprintf(w, "rebootstrap: ok in %.1fs (fields: %d, persisted to %s)\n",
-				bootstrapInfo.ElapsedS, len(bootstrapInfo.Extractor.Fields), bootstrapInfo.SavedAt)
 		}
 		if !res.OK {
 			return fmt.Errorf("scrape failed extraction")
@@ -154,8 +129,6 @@ func asWriter(w writerOnly) writerOnly { return w }
 
 func init() {
 	pollCmd.Flags().BoolVar(&pollJSON, "json", false, "emit JSON instead of human text")
-	pollCmd.Flags().IntVar(&pollTimeoutS, "timeout", 30, "overall timeout in seconds (raise for --rebootstrap)")
-	pollCmd.Flags().BoolVar(&pollRebootstrap, "rebootstrap", false,
-		"regenerate the /usage extractor by asking claude -p to study the captured panel")
+	pollCmd.Flags().IntVar(&pollTimeoutS, "timeout", 30, "overall timeout in seconds")
 	rootCmd.AddCommand(pollCmd)
 }

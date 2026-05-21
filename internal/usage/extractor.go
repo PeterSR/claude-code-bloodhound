@@ -18,7 +18,7 @@ var ErrExtractorVersionMismatch = errors.New("extractor version mismatch")
 // ExtractorVersion is the on-disk schema version. Bump when the DSL grows
 // new primitives or when a new field becomes load-bearing; older extractors
 // are refused on load (LoadExtractor falls back to the bundled default and
-// emits a re-bootstrap hint).
+// emits a self-heal hint).
 //
 // Bump history:
 //
@@ -35,17 +35,17 @@ const ExtractorVersion = 2
 // needed for the TUI's cursor-positioned text.
 type FieldRule struct {
 	Name     string `json:"name"`
-	Type     string `json:"type"`     // "int" | "string"
+	Type     string `json:"type"` // "int" | "string"
 	Regex    string `json:"regex"`
-	Group    int    `json:"group"`    // 0 = whole match, 1 = first capture, ...
+	Group    int    `json:"group"` // 0 = whole match, 1 = first capture, ...
 	Required bool   `json:"required"`
 }
 
 // Extractor is a complete ruleset for parsing a /usage panel dump.
 type Extractor struct {
-	Version     int         `json:"version"`
-	GeneratedAt string      `json:"generated_at,omitempty"`
-	GeneratedBy string      `json:"generated_by,omitempty"` // "default" | "claude"
+	Version     int    `json:"version"`
+	GeneratedAt string `json:"generated_at,omitempty"`
+	GeneratedBy string `json:"generated_by,omitempty"` // "default" | "claude"
 
 	Fields []FieldRule `json:"fields"`
 

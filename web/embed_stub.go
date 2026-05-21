@@ -4,11 +4,11 @@
 // detect the missing bundle and render a "run make build" placeholder.
 //
 // Two reasons this exists:
-//   1. //go:embed requires its target directory to exist with at least one
-//      file at compile time. We don't track web/dist, so a plain `go build`
-//      from a fresh checkout would otherwise fail.
-//   2. During day-to-day Go-only iteration we don't need the React bundle
-//      bundled in; Vite's dev server proxies /api on its own.
+//  1. //go:embed requires its target directory to exist with at least one
+//     file at compile time. We don't track web/dist, so a plain `go build`
+//     from a fresh checkout would otherwise fail.
+//  2. During day-to-day Go-only iteration we don't need the React bundle
+//     bundled in; Vite's dev server proxies /api on its own.
 package web
 
 import (

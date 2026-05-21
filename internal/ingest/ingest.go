@@ -96,12 +96,12 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 		if len(fr.Turns) == 0 && len(fr.Compactions) == 0 {
 			// Nothing useful; record mtime so we skip next time.
 			_ = s.RecordIngestedFile(ctx, store.IngestedFileRecord{
-				PathHash:         hash,
-				Path:             p,
-				MTimeUnix:        info.ModTime().Unix(),
-				LastIngestedTS:   time.Now().UTC().Format(time.RFC3339),
-				TurnCount:        0,
-				CompactionCount:  0,
+				PathHash:        hash,
+				Path:            p,
+				MTimeUnix:       info.ModTime().Unix(),
+				LastIngestedTS:  time.Now().UTC().Format(time.RFC3339),
+				TurnCount:       0,
+				CompactionCount: 0,
 			})
 			st.FilesParsed++
 			continue

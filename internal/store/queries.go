@@ -40,12 +40,12 @@ func (s *Store) LatestUsage(ctx context.Context) (*LatestObservation, error) {
 		ORDER BY ts_unix_ms DESC LIMIT 1
 	`)
 	var (
-		o                                       LatestObservation
-		sessPct, weekPct                        sql.NullInt64
-		sessRaw, weekRaw, sessTS, weekTS        sql.NullString
-		sessReset, weekReset, parseOK           int
-		sessSat, weekSat                        int
-		elapsed                                 sql.NullFloat64
+		o                                LatestObservation
+		sessPct, weekPct                 sql.NullInt64
+		sessRaw, weekRaw, sessTS, weekTS sql.NullString
+		sessReset, weekReset, parseOK    int
+		sessSat, weekSat                 int
+		elapsed                          sql.NullFloat64
 	)
 	err := row.Scan(&o.ID, &o.TSISO, &o.TSUnixMS,
 		&sessPct, &weekPct,

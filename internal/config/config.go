@@ -25,9 +25,6 @@ const (
 // Fields that aren't present in the file fall back to Default(). Missing
 // config file => returns Default() with no error.
 type Config struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
-
 	PollIntervalS      int `json:"poll_interval_s"`
 	IngestIntervalS    int `json:"ingest_interval_s"`
 	AggregateIntervalS int `json:"aggregate_interval_s"`
@@ -75,23 +72,30 @@ type Config struct {
 	// panel looks. Sessions whose last turn is older than this are
 	// excluded entirely. Defaults to 24h.
 	RecentSessionWindowS int `json:"recent_session_window_s"`
+
+	// ExtractorSelfHeal toggles the daemon's automatic self-heal: when
+	// a poll's required fields go missing, the daemon spawns a fresh
+	// claude-p as an orchestrator over a live pty (via MCP tools) and
+	// lets it re-learn a working extractor. With it off, the extractor
+	// stays as-is and the user can either edit extractors.json by hand
+	// or hit the Retrain button on the Debug page. Default true.
+	ExtractorSelfHeal bool `json:"extractor_self_heal"`
 }
 
 // Default returns the baseline config. New installs start here.
 func Default() Config {
 	return Config{
-		Host:               "127.0.0.1",
-		Port:               7777,
-		PollIntervalS:      300,  // 5 min
-		IngestIntervalS:    300,  // 5 min
-		AggregateIntervalS: 900,  // 15 min
-		PlanTier:           PlanUnknown,
-		JoinThePack:        false,
-		ClaudeBinary:       "",
+		PollIntervalS:           300, // 5 min
+		IngestIntervalS:         300, // 5 min
+		AggregateIntervalS:      900, // 15 min
+		PlanTier:                PlanUnknown,
+		JoinThePack:             false,
+		ClaudeBinary:            "",
 		StatuslinePrefix:        "🩸",
 		StaleAfterS:             600,
 		ActiveSessionThresholdS: 1800,
 		RecentSessionWindowS:    86400,
+		ExtractorSelfHeal:       true,
 	}
 }
 

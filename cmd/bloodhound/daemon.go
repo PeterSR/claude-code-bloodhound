@@ -15,10 +15,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/aggregate"
+	"github.com/PeterSR/claude-code-bloodhound/internal/api"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
+	"github.com/PeterSR/claude-code-bloodhound/internal/usage/selfheal"
 )
 
 var (
@@ -28,16 +30,22 @@ var (
 	daemonRunOnce            bool
 	daemonLogFile            string
 	daemonNoLogFile          bool
+	daemonNoAPI              bool
 )
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
-	Short: "Run an in-process scheduler for poll/ingest/aggregate",
+	Short: "Run the collection scheduler + HTTP API",
 	Long: `An alternative to wiring up systemd / launchd / scheduled tasks: a single
 long-running process that drives polling, ingestion, and aggregation on
 configured intervals (defaults from config.json: poll 5m, ingest 5m,
 aggregate 15m). All jobs run sequentially against the shared store, so
 SQLite writes never collide.
+
+The daemon exposes a JSON HTTP API on a unix-domain socket at
+$XDG_RUNTIME_DIR/bloodhound/api.sock. The bloodhound-gui binary loads
+the dashboard and reverse-proxies its requests over that socket. Pass
+--no-api to run collection only (no HTTP surface).
 
 By default, daemon output is mirrored to both stdout and a log file at
 $XDG_STATE_HOME/bloodhound/daemon.log (or the per-OS state directory on
@@ -90,6 +98,40 @@ For one-shot CI-style execution that does each job once and exits, pass
 		fmt.Fprintf(w, "[daemon] started %s · poll %s · ingest %s · aggregate %s\n",
 			time.Now().UTC().Format(time.RFC3339), pollIvl, ingestIvl, aggIvl)
 
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			fmt.Fprintln(w, "[daemon] shutdown signal received")
+			cancel()
+		}()
+
+		var wg sync.WaitGroup
+
+		// Bring the API up before the initial cycle. The GUI's setup
+		// wizard polls /api/health; if we waited for ingest/aggregate/poll
+		// to finish first (the poll alone can take 60s), the wizard would
+		// sit on "daemon is down" for the entire initial cycle even
+		// though the daemon process is alive.
+		if !daemonNoAPI {
+			sockPath, err := api.SocketPath()
+			if err != nil {
+				return fmt.Errorf("api: %w", err)
+			}
+			ln, err := api.Listen(sockPath)
+			if err != nil {
+				return fmt.Errorf("api: %w", err)
+			}
+			fmt.Fprintf(w, "[daemon] api: unix://%s\n", sockPath)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := api.Serve(ctx, ln, &api.Server{Store: s}); err != nil {
+					fmt.Fprintf(w, "[daemon] api: %v\n", err)
+				}
+			}()
+		}
+
 		// Run each job once at startup (cheapest first so observation
 		// percentages persist quickly even on a slow first scrape).
 		runIngestOnce(ctx, s, w)
@@ -101,14 +143,6 @@ For one-shot CI-style execution that does each job once and exits, pass
 			return nil
 		}
 
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		go func() {
-			<-sigCh
-			fmt.Fprintln(w, "[daemon] shutdown signal received")
-			cancel()
-		}()
-
 		var mu sync.Mutex
 		runUnder := func(fn func()) {
 			mu.Lock()
@@ -116,7 +150,6 @@ For one-shot CI-style execution that does each job once and exits, pass
 			fn()
 		}
 
-		var wg sync.WaitGroup
 		schedule := func(name string, ivl time.Duration, fn func()) {
 			wg.Add(1)
 			go func() {
@@ -161,9 +194,50 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	pollCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// The self-heal path can take ~30-60s on top of the regular ~8s
+	// fetch, so size the poll context generously when it's enabled.
+	pollBudget := 60 * time.Second
+	if cfg.ExtractorSelfHeal {
+		pollBudget = 150 * time.Second
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, pollBudget)
 	defer cancel()
 	res, fetchErr := usage.Fetch(pollCtx, usage.Options{ClaudeBinary: cfg.ClaudeBinary})
+
+	// Self-heal: if extraction missed required fields, hand the heal
+	// off to selfheal.Run — which spawns its own inner claude in a pty
+	// and lets an orchestrator claude -p drive it via MCP tools (read_pty,
+	// send_keys, test_regex, save_extractor) until the new extractor is
+	// validated and persisted. Gated by config so users who want manual
+	// control (or who don't want self-heal consuming usage on their
+	// account) can flip it off and use the Debug page's manual retrain.
+	if cfg.ExtractorSelfHeal && fetchErr == nil && !res.OK {
+		fmt.Fprintf(w, "[daemon] poll: extraction missed, starting orchestrator self-heal\n")
+		tracePath, traceFile := openSelfHealTrace(w)
+		heal := selfheal.Run(pollCtx, selfheal.Options{
+			ClaudeBinary: cfg.ClaudeBinary,
+			Timeout:      120 * time.Second,
+			Trace:        traceFile,
+		})
+		if traceFile != nil {
+			_ = traceFile.Close()
+		}
+		if heal.OK {
+			fmt.Fprintf(w, "[daemon] poll: self-heal saved a fresh extractor in %dms (saved=%s, trace=%s)\n",
+				heal.TotalMs, heal.SavedAt, tracePath)
+			// Re-apply against the originally captured panel; if the
+			// new regexes still miss (panels differ between heal session
+			// and this poll), leave res.OK=false and next poll picks it
+			// up naturally.
+			if newExt, _, loadErr := usage.LoadExtractor(); loadErr == nil {
+				res = usage.Reapply(res, newExt)
+			}
+		} else {
+			fmt.Fprintf(w, "[daemon] poll: self-heal failed (%v) — next poll will retry; manual retrain available from the Debug page; trace=%s\n",
+				heal.Err, tracePath)
+		}
+	}
+
 	obs, err := s.RecordUsage(pollCtx, res, fetchErr)
 	switch {
 	case err != nil:
@@ -216,6 +290,32 @@ func runAggregateOnce(ctx context.Context, s *store.Store, w io.Writer) {
 		stats.SessionsRefreshed, stats.BucketsRebuilt, stats.CalibrationPointsBuilt, stats.ElapsedS)
 }
 
+// openSelfHealTrace returns a writable trace file inside the daemon's
+// state dir plus its path. The caller closes it when the heal finishes.
+// Trace files accumulate; rotation is the user's problem for now (one
+// file per heal, JSONL, named with a unix-nano timestamp). A nil file
+// + descriptive path is returned on failure so the heal still runs —
+// trace capture is a debugging aid, not load-bearing.
+func openSelfHealTrace(w io.Writer) (string, *os.File) {
+	dir, err := config.StateDir()
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] poll: trace dir resolve failed (%v); proceeding without trace\n", err)
+		return "(none)", nil
+	}
+	traceDir := filepath.Join(dir, "selfheal-traces")
+	if err := os.MkdirAll(traceDir, 0o700); err != nil {
+		fmt.Fprintf(w, "[daemon] poll: trace mkdir failed (%v); proceeding without trace\n", err)
+		return "(none)", nil
+	}
+	path := filepath.Join(traceDir, fmt.Sprintf("heal-%d.jsonl", time.Now().UnixNano()))
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] poll: trace create failed (%v); proceeding without trace\n", err)
+		return "(none)", nil
+	}
+	return path, f
+}
+
 func init() {
 	daemonCmd.Flags().IntVar(&daemonPollIntervalS, "poll-interval", 0, "seconds between /usage polls (0 = use config)")
 	daemonCmd.Flags().IntVar(&daemonIngestIntervalS, "ingest-interval", 0, "seconds between JSONL ingests (0 = use config)")
@@ -225,5 +325,7 @@ func init() {
 		"file to mirror daemon output to (default $XDG_STATE_HOME/bloodhound/daemon.log)")
 	daemonCmd.Flags().BoolVar(&daemonNoLogFile, "no-log-file", false,
 		"don't write a log file (stdout only)")
+	daemonCmd.Flags().BoolVar(&daemonNoAPI, "no-api", false,
+		"don't start the HTTP API server (collection only)")
 	rootCmd.AddCommand(daemonCmd)
 }

@@ -34,17 +34,17 @@ func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
 	defer rows.Close()
 
 	type acc struct {
-		startMS, endMS                       int64
-		raw, output                          int64
-		costWeighted                         float64
-		count                                int
+		startMS, endMS int64
+		raw, output    int64
+		costWeighted   float64
+		count          int
 	}
 	var buckets []acc
 	var cur *acc
 	for rows.Next() {
 		var (
-			tsMS                        int64
-			in, out, cr, cw5m, cw1h     int64
+			tsMS                    int64
+			in, out, cr, cw5m, cw1h int64
 		)
 		if err := rows.Scan(&tsMS, &in, &out, &cr, &cw5m, &cw1h); err != nil {
 			return 0, err
@@ -89,13 +89,13 @@ func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
 	out := make([]store.BucketRow, 0, len(buckets))
 	for i, b := range buckets {
 		row := store.BucketRow{
-			StartUnixMS:        b.startMS,
-			EndUnixMS:          b.endMS,
-			ResetInferred:      true,
-			RawTokenTotal:      b.raw,
-			CostWeightedTotal:  b.costWeighted,
-			OutputTokenTotal:   b.output,
-			TurnCount:          b.count,
+			StartUnixMS:       b.startMS,
+			EndUnixMS:         b.endMS,
+			ResetInferred:     true,
+			RawTokenTotal:     b.raw,
+			CostWeightedTotal: b.costWeighted,
+			OutputTokenTotal:  b.output,
+			TurnCount:         b.count,
 		}
 		if i == len(buckets)-1 && resetMSValid && resetMS > b.startMS {
 			row.EndUnixMS = resetMS
