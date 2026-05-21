@@ -41,9 +41,8 @@ export default function SetupWizard({ onRetry }: { onRetry: () => void }) {
           <Step
             n={2}
             title="Or run it persistently via systemd"
-            hint="Survives reboots. Recommended if you keep Claude Code open often."
-            cmd={SYSTEMD_SETUP_SNIPPET}
-            multiline
+            hint="Survives reboots. Recommended if you keep Claude Code open often. Writes ~/.config/systemd/user/bloodhound.service pointing at the binary you ran it with."
+            cmd="bloodhound install --enable"
           />
 
           <Details summary="Don't have bloodhound on $PATH?">
@@ -80,13 +79,11 @@ function Step({
   title,
   hint,
   cmd,
-  multiline,
 }: {
   n: number;
   title: string;
   hint?: string;
   cmd: string;
-  multiline?: boolean;
 }) {
   return (
     <div className="space-y-2">
@@ -100,13 +97,13 @@ function Step({
         <p className="text-xs text-zinc-500 ml-7">{hint}</p>
       )}
       <div className="ml-7">
-        <CommandBlock cmd={cmd} multiline={multiline} />
+        <CommandBlock cmd={cmd} />
       </div>
     </div>
   );
 }
 
-function CommandBlock({ cmd, multiline }: { cmd: string; multiline?: boolean }) {
+function CommandBlock({ cmd }: { cmd: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -120,12 +117,7 @@ function CommandBlock({ cmd, multiline }: { cmd: string; multiline?: boolean }) 
   };
   return (
     <div className="relative group">
-      <pre
-        className={[
-          'rounded-md bg-zinc-100 dark:bg-zinc-800 text-xs font-mono px-3 py-2 pr-10 text-zinc-800 dark:text-zinc-200 overflow-x-auto',
-          multiline ? 'whitespace-pre' : 'whitespace-nowrap',
-        ].join(' ')}
-      >
+      <pre className="rounded-md bg-zinc-100 dark:bg-zinc-800 text-xs font-mono px-3 py-2 pr-10 text-zinc-800 dark:text-zinc-200 overflow-x-auto whitespace-nowrap">
         {cmd}
       </pre>
       <button
@@ -150,24 +142,3 @@ function Details({ summary, children }: { summary: string; children: React.React
   );
 }
 
-// Kept inline rather than fetched from /api/settings — that endpoint is
-// unreachable in exactly the state this page is for. Drift is bounded:
-// the daemon ignores any extra keys, the user can hand-edit the unit,
-// and the canonical source is the systemdUnitSnippet in
-// internal/api/settings.go.
-const SYSTEMD_SETUP_SNIPPET = `mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/bloodhound.service <<'EOF'
-[Unit]
-Description=Claude Code Bloodhound — usage collector
-After=default.target
-
-[Service]
-Type=simple
-ExecStart=%h/go/bin/bloodhound daemon
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-EOF
-systemctl --user daemon-reload
-systemctl --user enable --now bloodhound.service`;
