@@ -18,7 +18,7 @@ var ErrExtractorVersionMismatch = errors.New("extractor version mismatch")
 // ExtractorVersion is the on-disk schema version. Bump when the DSL grows
 // new primitives or when a new field becomes load-bearing; older extractors
 // are refused on load (LoadExtractor falls back to the bundled default and
-// emits a re-bootstrap hint).
+// emits a self-heal hint).
 //
 // Bump history:
 //

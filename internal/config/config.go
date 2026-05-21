@@ -73,13 +73,12 @@ type Config struct {
 	// excluded entirely. Defaults to 24h.
 	RecentSessionWindowS int `json:"recent_session_window_s"`
 
-	// ExtractorSelfHeal toggles automatic re-learning of /usage extractor
-	// rules when a poll's required fields go missing. With it on, the
-	// daemon spawns `claude -p` to study the captured panel and emit a
-	// fresh extractor JSON. With it off, the extractor stays as-is and
-	// the user can either edit extractors.json by hand or hit the
-	// "retrain" button in the Debug page to trigger a one-shot relearn.
-	// Default true.
+	// ExtractorSelfHeal toggles the daemon's automatic self-heal: when
+	// a poll's required fields go missing, the daemon spawns a fresh
+	// claude-p as an orchestrator over a live pty (via MCP tools) and
+	// lets it re-learn a working extractor. With it off, the extractor
+	// stays as-is and the user can either edit extractors.json by hand
+	// or hit the Retrain button on the Debug page. Default true.
 	ExtractorSelfHeal bool `json:"extractor_self_heal"`
 }
 

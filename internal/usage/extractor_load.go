@@ -34,7 +34,7 @@ const (
 // fall back to the bundled default if the state file is missing. If the
 // state file exists but is *invalid*, return an error — that's a loud
 // failure case (the user previously bootstrapped, but the file is corrupt
-// or schema-incompatible). Callers can choose to re-bootstrap or fall
+// or schema-incompatible). Callers can choose to trigger a self-heal or fall
 // back; we don't silently swallow.
 func LoadExtractor() (*Extractor, ExtractorOrigin, error) {
 	dir, dirErr := config.StateDir()
