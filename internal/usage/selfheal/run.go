@@ -209,6 +209,7 @@ func Run(ctx context.Context, opts Options) Result {
 	orchMs := ms(time.Since(orchT0))
 
 	cost := parseCostFromOrchestratorOutput(stdout.Bytes())
+	apiErr := parseAPIErrorFromOrchestratorOutput(stdout.Bytes())
 
 	// Heuristic for success: did SaveExtractor persist? Check whether
 	// the on-disk extractor was bumped recently AND its generated_by is
@@ -224,9 +225,15 @@ func Run(ctx context.Context, opts Options) Result {
 		Cost:           cost,
 	}
 	if !saved {
-		if runErr != nil {
+		switch {
+		case apiErr != "":
+			// claude -p's JSON envelope often carries the *real* reason
+			// when exit status is non-zero (stderr is usually empty on
+			// auth / rate-limit failures).
+			res.Err = fmt.Errorf("orchestrator: %s", apiErr)
+		case runErr != nil:
 			res.Err = fmt.Errorf("orchestrator: %w", runErr)
-		} else {
+		default:
 			res.Err = errors.New("orchestrator exited without saving an extractor")
 		}
 	}
@@ -332,6 +339,49 @@ func buildMCPConfig(bridgeSock string) string {
     }
   }
 }`, exe, bridgeSock)
+}
+
+// parseAPIErrorFromOrchestratorOutput inspects claude -p's JSON envelope
+// for the failure-shape fields. On non-zero exits we usually get an
+// empty stderr but a JSON result with is_error=true and one of
+// {api_error_status, result, terminal_reason} carrying the human-
+// readable reason.
+func parseAPIErrorFromOrchestratorOutput(stdout []byte) string {
+	var raw struct {
+		IsError         bool   `json:"is_error"`
+		Subtype         string `json:"subtype"`
+		Result          string `json:"result"`
+		APIErrorStatus  any    `json:"api_error_status"`
+		TerminalReason  string `json:"terminal_reason"`
+	}
+	if err := json.Unmarshal(stdout, &raw); err != nil {
+		return ""
+	}
+	if !raw.IsError {
+		return ""
+	}
+	parts := []string{}
+	if raw.Subtype != "" && raw.Subtype != "success" {
+		parts = append(parts, raw.Subtype)
+	}
+	if raw.APIErrorStatus != nil {
+		parts = append(parts, fmt.Sprintf("api_error_status=%v", raw.APIErrorStatus))
+	}
+	if raw.TerminalReason != "" && raw.TerminalReason != "completed" {
+		parts = append(parts, "terminal_reason="+raw.TerminalReason)
+	}
+	if raw.Result != "" {
+		// truncate aggressive — claude can write long error messages
+		r := raw.Result
+		if len(r) > 240 {
+			r = r[:240] + "…"
+		}
+		parts = append(parts, r)
+	}
+	if len(parts) == 0 {
+		return "is_error=true (no further details in envelope)"
+	}
+	return strings.Join(parts, " · ")
 }
 
 // parseCostFromOrchestratorOutput pulls the cost/token fields from
