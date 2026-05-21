@@ -124,11 +124,6 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	if cfg.Port == 0 {
-		// Refuse to wipe the port — we'd lock the user out of their own UI.
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "port must be > 0"})
-		return
-	}
 	if err := config.Save(cfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return

@@ -73,7 +73,8 @@ clean:
 	rm -rf web/dist
 
 # `make dev` runs the daemon (API only — the GUI carries the UI now).
-# For UI dev, `cd web && npm run dev` and Vite proxies /api -> :7777.
+# For UI dev, `cd web && npm run dev` and Vite proxies /api to the
+# daemon's unix socket ($XDG_RUNTIME_DIR/bloodhound/api.sock).
 dev:
 	$(GO) run ./cmd/bloodhound daemon
 

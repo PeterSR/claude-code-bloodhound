@@ -25,9 +25,6 @@ const (
 // Fields that aren't present in the file fall back to Default(). Missing
 // config file => returns Default() with no error.
 type Config struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
-
 	PollIntervalS      int `json:"poll_interval_s"`
 	IngestIntervalS    int `json:"ingest_interval_s"`
 	AggregateIntervalS int `json:"aggregate_interval_s"`
@@ -80,8 +77,6 @@ type Config struct {
 // Default returns the baseline config. New installs start here.
 func Default() Config {
 	return Config{
-		Host:               "127.0.0.1",
-		Port:               7777,
 		PollIntervalS:      300,  // 5 min
 		IngestIntervalS:    300,  // 5 min
 		AggregateIntervalS: 900,  // 15 min

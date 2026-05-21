@@ -41,10 +41,10 @@ configured intervals (defaults from config.json: poll 5m, ingest 5m,
 aggregate 15m). All jobs run sequentially against the shared store, so
 SQLite writes never collide.
 
-The daemon exposes a JSON HTTP API on cfg.Host:cfg.Port (default
-127.0.0.1:7777). The bloodhound-gui binary loads the dashboard and
-proxies its requests back to this API. Pass --no-api to run collection
-only (no HTTP surface).
+The daemon exposes a JSON HTTP API on a unix-domain socket at
+$XDG_RUNTIME_DIR/bloodhound/api.sock. The bloodhound-gui binary loads
+the dashboard and reverse-proxies its requests over that socket. Pass
+--no-api to run collection only (no HTTP surface).
 
 By default, daemon output is mirrored to both stdout and a log file at
 $XDG_STATE_HOME/bloodhound/daemon.log (or the per-OS state directory on
@@ -147,12 +147,19 @@ For one-shot CI-style execution that does each job once and exits, pass
 		schedule("aggregate", aggIvl, func() { runAggregateOnce(ctx, s, w) })
 
 		if !daemonNoAPI {
+			sockPath, err := api.SocketPath()
+			if err != nil {
+				return fmt.Errorf("api: %w", err)
+			}
+			ln, err := api.Listen(sockPath)
+			if err != nil {
+				return fmt.Errorf("api: %w", err)
+			}
+			fmt.Fprintf(w, "[daemon] api: unix://%s\n", sockPath)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-				fmt.Fprintf(w, "[daemon] api: listening on http://%s/\n", addr)
-				if err := api.Run(ctx, cfg.Host, cfg.Port, &api.Server{Store: s}); err != nil {
+				if err := api.Serve(ctx, ln, &api.Server{Store: s}); err != nil {
 					fmt.Fprintf(w, "[daemon] api: %v\n", err)
 				}
 			}()

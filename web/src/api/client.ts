@@ -1,8 +1,9 @@
 /**
  * Tiny fetch wrapper for the Bloodhound API.
  *
- * In dev (npm run dev), Vite proxies /api/* to the Go server on :7777.
- * In a built bundle served by `bloodhound serve`, /api/* is same-origin.
+ * In dev (npm run dev), Vite reverse-proxies /api/* to the daemon's unix
+ * socket at $XDG_RUNTIME_DIR/bloodhound/api.sock. In the production GUI
+ * binary, Wails' AssetServer middleware does the same proxy.
  */
 
 export class ApiError extends Error {

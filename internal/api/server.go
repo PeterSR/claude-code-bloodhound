@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -87,19 +88,19 @@ func logger(h http.Handler) http.Handler {
 	})
 }
 
-// Run is a small convenience for cmd/bloodhound to spin up the server.
-func Run(ctx context.Context, host string, port int, s *Server) error {
-	addr := fmt.Sprintf("%s:%d", host, port)
+// Serve runs the HTTP API on the supplied listener until ctx is cancelled.
+// Caller owns listener creation (and cleanup, when applicable); this lets
+// the daemon pick a unix socket while leaving the API package agnostic.
+func Serve(ctx context.Context, ln net.Listener, s *Server) error {
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stderr(), "[api] http://%s/\n", addr)
-		err := srv.ListenAndServe()
+		fmt.Fprintf(stderr(), "[api] listening on %s\n", ln.Addr())
+		err := srv.Serve(ln)
 		if !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
