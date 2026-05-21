@@ -48,14 +48,16 @@ func LoadExtractor() (*Extractor, ExtractorOrigin, error) {
 			}
 			if errors.Is(parseErr, ErrExtractorVersionMismatch) {
 				// Soft fail: a previous version's extractor on disk shouldn't
-				// brick the tool. Fall back to default and log once; the
-				// user can run --rebootstrap to regenerate.
+				// brick the tool. Fall back to the bundled default and log
+				// once. The daemon's self-heal will re-learn against the
+				// current panel on the next failed poll, or the user can
+				// hit Retrain on the Debug page.
 				ex, err := ParseExtractor(defaultExtractorJSON)
 				if err != nil {
 					return nil, "", fmt.Errorf("parse bundled default extractor: %w", err)
 				}
 				fmt.Fprintf(os.Stderr,
-					"[usage] %s is a previous version (%v); using bundled default. Run `bloodhound poll --rebootstrap` to regenerate.\n",
+					"[usage] %s is a previous schema version (%v); using bundled default. The daemon will re-learn on the next extraction miss.\n",
 					userPath, parseErr)
 				return ex, OriginDefault, nil
 			}

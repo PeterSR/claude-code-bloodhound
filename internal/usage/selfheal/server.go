@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // BridgeRequest is the wire shape between the MCP subcommand (claude's
@@ -44,8 +45,14 @@ type BridgeServer struct {
 	ln      net.Listener
 	path    string
 
+	// Trace, if non-nil, receives one JSON-encoded entry per tool call
+	// (request + result) — useful for capturing the orchestrator's drive
+	// sequence for debugging. nil = no tracing.
+	Trace io.Writer
+
 	mu     sync.Mutex
 	closed bool
+	t0     time.Time
 }
 
 // NewBridgeServer creates a server bound to a fresh unix socket inside
@@ -72,7 +79,7 @@ func NewBridgeServer(session *Session) (*BridgeServer, error) {
 		_ = os.Remove(path)
 		return nil, err
 	}
-	return &BridgeServer{session: session, ln: ln, path: path}, nil
+	return &BridgeServer{session: session, ln: ln, path: path, t0: time.Now()}, nil
 }
 
 // Path returns the unix-socket path the subcommand should dial.
@@ -133,6 +140,7 @@ func (s *BridgeServer) handle(conn net.Conn) {
 			continue
 		}
 		resp := s.dispatch(req)
+		s.trace(req, resp)
 		if err := writeResp(w, resp); err != nil {
 			return
 		}
@@ -174,6 +182,30 @@ func (s *BridgeServer) dispatch(req BridgeRequest) BridgeResponse {
 	default:
 		return BridgeResponse{Err: "unknown tool: " + req.Tool}
 	}
+}
+
+// trace writes one entry to Trace if configured. Each entry is a JSON
+// object with a relative timestamp, the tool name, the request args,
+// and the result/err.
+func (s *BridgeServer) trace(req BridgeRequest, resp BridgeResponse) {
+	if s.Trace == nil {
+		return
+	}
+	entry := map[string]any{
+		"t_ms": time.Since(s.t0).Milliseconds(),
+		"tool": req.Tool,
+		"args": json.RawMessage(req.Args),
+	}
+	if resp.Err != "" {
+		entry["err"] = resp.Err
+	}
+	if len(resp.Result) > 0 {
+		entry["result"] = json.RawMessage(resp.Result)
+	}
+	b, _ := json.Marshal(entry)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _ = s.Trace.Write(append(b, '\n'))
 }
 
 func ok(v any) BridgeResponse {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -19,8 +20,8 @@ type Options struct {
 	ClaudeBinary string
 
 	// Required field names the orchestrator must produce. Defaults to
-	// the six baked into bootstrap.go's prompt (session_pct etc.) when
-	// empty.
+	// session_pct, session_reset, session_reset_tz, week_pct,
+	// week_reset, week_reset_tz when empty.
 	Required []string
 
 	// Timeout caps total wall time for the heal (inner pty + orchestrator
@@ -34,6 +35,11 @@ type Options struct {
 	// Stderr receives the orchestrator's stderr in real time. Useful for
 	// the daemon log to capture claude's reasoning. nil = discard.
 	Stderr *bytes.Buffer
+
+	// Trace, if non-nil, receives a line of JSON per tool call the
+	// orchestrator makes. Lets callers reconstruct the drive sequence
+	// for debugging.
+	Trace io.Writer
 }
 
 // Result summarises one heal attempt. Either OK is true (extractor
@@ -122,6 +128,9 @@ func Run(ctx context.Context, opts Options) Result {
 	bridge, err := NewBridgeServer(session)
 	if err != nil {
 		return Result{Err: fmt.Errorf("bridge: %w", err), TotalMs: ms(time.Since(t0))}
+	}
+	if opts.Trace != nil {
+		bridge.Trace = opts.Trace
 	}
 	defer bridge.Close()
 	go func() {

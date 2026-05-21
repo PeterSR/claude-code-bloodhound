@@ -1,11 +1,13 @@
-// Package usage drives Claude Code's /usage TUI panel in a pty, captures the
-// rendered output, strips ANSI, and applies a configurable Extractor to pull
-// out the session and week percentages plus reset hints.
+// Package usage drives Claude Code's /usage TUI panel in a pty, renders
+// the captured output through a virtual terminal grid, and applies a
+// configurable Extractor to pull out the session and week percentages
+// plus reset hints.
 //
 // The extractor is data-driven (regex DSL persisted to $XDG_STATE_HOME) so
-// we can tolerate Anthropic redesigning the panel: an extraction failure
-// is loud, and `bloodhound poll --rebootstrap` regenerates the rules by
-// asking the local Claude Code to study a fresh panel snapshot.
+// we can tolerate Anthropic redesigning the panel: extraction failures
+// trigger the daemon's self-heal (internal/usage/selfheal), which hands
+// the live pty to an orchestrator claude -p over MCP tools and lets it
+// re-learn the field positions from a fresh capture.
 package usage
 
 import (

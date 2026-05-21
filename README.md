@@ -45,7 +45,7 @@ Your currency is the percentage shown in `/usage`. Bloodhound never asks you to 
 
 ## Self-healing extractor
 
-The `/usage` panel is a TUI, and Anthropic ships layout changes without warning. Bloodhound parses it with a regex DSL stored at `$XDG_STATE_HOME/bloodhound/extractors.json`. When the bundled defaults stop matching, you can regenerate them with `bloodhound poll --rebootstrap`, which uses `claude -p` to discover field positions on a fresh capture. The version number in the file is checked at load time; older files fall back gracefully to the bundled defaults.
+The `/usage` panel is a TUI, and Anthropic ships layout changes without warning. Bloodhound parses it with a regex DSL stored at `$XDG_STATE_HOME/bloodhound/extractors.json`. When the bundled defaults stop matching, the daemon auto-heals: it spawns a fresh `claude -p` as an orchestrator and hands it four MCP tools (`read_pty`, `send_keys`, `test_regex`, `save_extractor`) to drive a live pty session, re-learn the field positions, and persist a working extractor. Gated by `extractor_self_heal` in the config (default on). You can also trigger one on demand via the Retrain button on the Debug page or `POST /api/extractor/retrain`. The version number in the file is checked at load time; older files fall back gracefully to the bundled defaults until the next heal.
 
 ## Privacy
 
@@ -94,7 +94,7 @@ Bloodhound follows XDG conventions on Linux and the platform conventions on macO
 
 This is a tool for monitoring Claude Code, and — fittingly — Claude Code has been used to build it. The Go and TypeScript here are vetted by a human, but parts of the implementation, scaffolding, and copy were drafted with AI assistance.
 
-It's also **alpha software**. Expect rough edges: things may misclassify, the schema may change, your local DB may need to be wiped between releases, and the bundled `/usage` extractor will break the next time Anthropic redesigns the panel (`bloodhound poll --rebootstrap` will get you going again). It does not modify your Claude Code installation, your JSONL session files, or anything outside its own state directory — but treat the numbers as informational, not as a substitute for Anthropic's own billing.
+It's also **alpha software**. Expect rough edges: things may misclassify, the schema may change, your local DB may need to be wiped between releases, and the bundled `/usage` extractor will break the next time Anthropic redesigns the panel. The daemon's self-heal usually catches that on the first failed poll; if it can't, the Debug page has a manual Retrain button. It does not modify your Claude Code installation, your JSONL session files, or anything outside its own state directory — but treat the numbers as informational, not as a substitute for Anthropic's own billing.
 
 Bloodhound is not affiliated with or endorsed by Anthropic.
 

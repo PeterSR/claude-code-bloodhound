@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -134,8 +136,11 @@ func (s *Session) ReadPTY(req ReadPTYRequest) ReadPTYResult {
 	}
 }
 
-// SendKeys writes text into the pty master. Returns the byte count
-// actually written.
+// SendKeys writes text into the pty master, interpreting Go-style
+// escape sequences (\r, \n, \t, \xNN, \uNNNN) on the way in. Claude's
+// JSON tool args may arrive with backslash-r literally rather than a
+// carriage return — match how a human would expect "\r" to behave
+// when they typed it as a string literal.
 func (s *Session) SendKeys(req SendKeysRequest) (SendKeysResult, error) {
 	s.mu.Lock()
 	closed := s.closed
@@ -143,11 +148,43 @@ func (s *Session) SendKeys(req SendKeysRequest) (SendKeysResult, error) {
 	if closed {
 		return SendKeysResult{}, errors.New("session closed")
 	}
-	n, err := s.ptyMaster.Write([]byte(req.Text))
+	text := unescapeKeys(req.Text)
+	n, err := s.ptyMaster.Write([]byte(text))
 	if err != nil {
 		return SendKeysResult{Bytes: n}, fmt.Errorf("write pty: %w", err)
 	}
 	return SendKeysResult{Bytes: n}, nil
+}
+
+// unescapeKeys turns Go-style escape sequences in s into their
+// corresponding bytes. Anything that doesn't parse as a Go literal
+// is returned unchanged (claude probably meant the literal text).
+func unescapeKeys(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	// strconv.Unquote requires surrounding quotes and handles all the
+	// usual escapes (\r, \n, \t, \xNN, \uNNNN, \\, \"). Wrap and try.
+	if unq, err := strconv.Unquote("\"" + escapeForUnquote(s) + "\""); err == nil {
+		return unq
+	}
+	return s
+}
+
+// escapeForUnquote escapes characters strconv.Unquote would otherwise
+// reject when we wrap s in double quotes — primarily unescaped
+// double-quotes within s itself.
+func escapeForUnquote(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' {
+			b.WriteString(`\"`)
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // TestRegex compiles a pattern, searches against the current rendered
