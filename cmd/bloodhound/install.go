@@ -46,6 +46,12 @@ After=default.target
 
 [Service]
 Type=simple
+# Pin CWD to bloodhound's own state dir so the /usage scraper's claude
+# invocation triggers its "is this folder trusted?" check against a
+# small, daemon-owned directory (one-time prompt, auto-answered by the
+# driver) rather than $HOME (broad, surprising). Re-run install --force
+# if you move the state dir.
+WorkingDirectory=%s
 ExecStart=%s daemon
 Restart=on-failure
 RestartSec=10s
@@ -65,6 +71,16 @@ func installLinuxImpl(out interface{ Write(p []byte) (int, error) }) error {
 		return fmt.Errorf("resolve executable: %w", err)
 	}
 
+	// Resolve and create the state dir up front; systemd refuses to
+	// start a service whose WorkingDirectory doesn't exist.
+	stateDir, err := config.StateDir()
+	if err != nil {
+		return fmt.Errorf("resolve state dir: %w", err)
+	}
+	if err := config.EnsureDir(stateDir); err != nil {
+		return err
+	}
+
 	unitDir, err := linuxUnitDir()
 	if err != nil {
 		return err
@@ -77,7 +93,7 @@ func installLinuxImpl(out interface{ Write(p []byte) (int, error) }) error {
 	if _, err := os.Stat(unitPath); err == nil && !installForce {
 		fmt.Fprintf(out, "service already exists: %s (pass --force to overwrite)\n", unitPath)
 	} else {
-		body := fmt.Sprintf(linuxUnitTemplate, exe)
+		body := fmt.Sprintf(linuxUnitTemplate, stateDir, exe)
 		if err := os.WriteFile(unitPath, []byte(body), 0o644); err != nil {
 			return fmt.Errorf("write unit: %w", err)
 		}
