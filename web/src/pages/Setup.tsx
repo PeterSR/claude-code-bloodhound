@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Dog, Copy, Check, Loader2 } from 'lucide-react';
+import type { DaemonHealthState } from '../hooks/useDaemonHealth';
 
 /**
  * SetupWizard renders when /api/health is unreachable. Shown instead of
@@ -7,11 +8,10 @@ import { Dog, Copy, Check, Loader2 } from 'lucide-react';
  * the app is meaningful.
  *
  * Polling for daemon-up happens one level above (DaemonGate in App.tsx);
- * this view is purely presentational + offers a manual "check now" button
- * so the user doesn't wait the full 2s poll interval after starting the
- * daemon.
+ * this view shows when the next probe will fire and lets the user trigger
+ * one early via "Check now".
  */
-export default function SetupWizard({ onRetry }: { onRetry: () => void }) {
+export default function SetupWizard({ daemon }: { daemon: DaemonHealthState }) {
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 p-6">
       <div className="max-w-2xl w-full space-y-6">
@@ -58,18 +58,44 @@ export default function SetupWizard({ onRetry }: { onRetry: () => void }) {
         </div>
 
         <div className="flex items-center justify-between text-sm">
-          <div className="flex items-center gap-2 text-zinc-500">
-            <Loader2 className="size-3.5 animate-spin" />
-            Checking every 2 seconds…
-          </div>
+          <ProbeStatus daemon={daemon} />
           <button
-            onClick={onRetry}
-            className="px-3 py-1.5 rounded-md border border-zinc-300 dark:border-zinc-700 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-900 transition"
+            onClick={daemon.check}
+            disabled={daemon.probing}
+            className="px-3 py-1.5 rounded-md border border-zinc-300 dark:border-zinc-700 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-900 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Check now
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ProbeStatus({ daemon }: { daemon: DaemonHealthState }) {
+  // Re-render on a 250ms tick so the countdown is smooth without spamming
+  // the rest of the tree. Source of truth stays in the hook.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, []);
+
+  if (daemon.probing || daemon.lastProbeAt === 0) {
+    return (
+      <div className="flex items-center gap-2 text-zinc-500">
+        <Loader2 className="size-3.5 animate-spin" />
+        Checking…
+      </div>
+    );
+  }
+
+  const remainingMs = daemon.lastProbeAt + daemon.intervalMs - now;
+  const remainingS = Math.max(0, Math.ceil(remainingMs / 1000));
+  return (
+    <div className="flex items-center gap-2 text-zinc-500">
+      <Loader2 className="size-3.5 animate-spin" />
+      Checking in {remainingS}s…
     </div>
   );
 }

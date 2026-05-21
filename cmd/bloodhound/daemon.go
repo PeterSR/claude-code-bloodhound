@@ -97,6 +97,40 @@ For one-shot CI-style execution that does each job once and exits, pass
 		fmt.Fprintf(w, "[daemon] started %s · poll %s · ingest %s · aggregate %s\n",
 			time.Now().UTC().Format(time.RFC3339), pollIvl, ingestIvl, aggIvl)
 
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			fmt.Fprintln(w, "[daemon] shutdown signal received")
+			cancel()
+		}()
+
+		var wg sync.WaitGroup
+
+		// Bring the API up before the initial cycle. The GUI's setup
+		// wizard polls /api/health; if we waited for ingest/aggregate/poll
+		// to finish first (the poll alone can take 60s), the wizard would
+		// sit on "daemon is down" for the entire initial cycle even
+		// though the daemon process is alive.
+		if !daemonNoAPI {
+			sockPath, err := api.SocketPath()
+			if err != nil {
+				return fmt.Errorf("api: %w", err)
+			}
+			ln, err := api.Listen(sockPath)
+			if err != nil {
+				return fmt.Errorf("api: %w", err)
+			}
+			fmt.Fprintf(w, "[daemon] api: unix://%s\n", sockPath)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := api.Serve(ctx, ln, &api.Server{Store: s}); err != nil {
+					fmt.Fprintf(w, "[daemon] api: %v\n", err)
+				}
+			}()
+		}
+
 		// Run each job once at startup (cheapest first so observation
 		// percentages persist quickly even on a slow first scrape).
 		runIngestOnce(ctx, s, w)
@@ -108,14 +142,6 @@ For one-shot CI-style execution that does each job once and exits, pass
 			return nil
 		}
 
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		go func() {
-			<-sigCh
-			fmt.Fprintln(w, "[daemon] shutdown signal received")
-			cancel()
-		}()
-
 		var mu sync.Mutex
 		runUnder := func(fn func()) {
 			mu.Lock()
@@ -123,7 +149,6 @@ For one-shot CI-style execution that does each job once and exits, pass
 			fn()
 		}
 
-		var wg sync.WaitGroup
 		schedule := func(name string, ivl time.Duration, fn func()) {
 			wg.Add(1)
 			go func() {
@@ -145,25 +170,6 @@ For one-shot CI-style execution that does each job once and exits, pass
 		schedule("poll", pollIvl, func() { runPollOnce(ctx, cfg, s, w) })
 		schedule("ingest", ingestIvl, func() { runIngestOnce(ctx, s, w) })
 		schedule("aggregate", aggIvl, func() { runAggregateOnce(ctx, s, w) })
-
-		if !daemonNoAPI {
-			sockPath, err := api.SocketPath()
-			if err != nil {
-				return fmt.Errorf("api: %w", err)
-			}
-			ln, err := api.Listen(sockPath)
-			if err != nil {
-				return fmt.Errorf("api: %w", err)
-			}
-			fmt.Fprintf(w, "[daemon] api: unix://%s\n", sockPath)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := api.Serve(ctx, ln, &api.Server{Store: s}); err != nil {
-					fmt.Fprintf(w, "[daemon] api: %v\n", err)
-				}
-			}()
-		}
 
 		<-ctx.Done()
 		fmt.Fprintln(w, "[daemon] waiting for in-flight jobs")

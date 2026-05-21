@@ -13,10 +13,10 @@ import Settings from './pages/Settings';
 import { useDaemonHealth } from './hooks/useDaemonHealth';
 
 export default function App() {
-  const { health, check } = useDaemonHealth();
+  const daemon = useDaemonHealth();
 
-  if (health === 'unknown') return <Splash />;
-  if (health === 'down') return <SetupWizard onRetry={check} />;
+  if (daemon.health === 'unknown') return <Splash />;
+  if (daemon.health === 'down') return <SetupWizard daemon={daemon} />;
 
   return (
     <BrowserRouter>
