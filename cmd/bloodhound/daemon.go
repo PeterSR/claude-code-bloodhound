@@ -213,13 +213,18 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	// account) can flip it off and use the Debug page's manual retrain.
 	if cfg.ExtractorSelfHeal && fetchErr == nil && !res.OK {
 		fmt.Fprintf(w, "[daemon] poll: extraction missed, starting orchestrator self-heal\n")
+		tracePath, traceFile := openSelfHealTrace(w)
 		heal := selfheal.Run(pollCtx, selfheal.Options{
 			ClaudeBinary: cfg.ClaudeBinary,
 			Timeout:      120 * time.Second,
+			Trace:        traceFile,
 		})
+		if traceFile != nil {
+			_ = traceFile.Close()
+		}
 		if heal.OK {
-			fmt.Fprintf(w, "[daemon] poll: self-heal saved a fresh extractor in %dms (saved=%s)\n",
-				heal.TotalMs, heal.SavedAt)
+			fmt.Fprintf(w, "[daemon] poll: self-heal saved a fresh extractor in %dms (saved=%s, trace=%s)\n",
+				heal.TotalMs, heal.SavedAt, tracePath)
 			// Re-apply against the originally captured panel; if the
 			// new regexes still miss (panels differ between heal session
 			// and this poll), leave res.OK=false and next poll picks it
@@ -228,7 +233,8 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 				res = usage.Reapply(res, newExt)
 			}
 		} else {
-			fmt.Fprintf(w, "[daemon] poll: self-heal failed (%v) — next poll will retry; manual retrain available from the Debug page\n", heal.Err)
+			fmt.Fprintf(w, "[daemon] poll: self-heal failed (%v) — next poll will retry; manual retrain available from the Debug page; trace=%s\n",
+				heal.Err, tracePath)
 		}
 	}
 
@@ -282,6 +288,32 @@ func runAggregateOnce(ctx context.Context, s *store.Store, w io.Writer) {
 	}
 	fmt.Fprintf(w, "[daemon] aggregate: %d sessions, %d buckets, %d cal-points in %.2fs\n",
 		stats.SessionsRefreshed, stats.BucketsRebuilt, stats.CalibrationPointsBuilt, stats.ElapsedS)
+}
+
+// openSelfHealTrace returns a writable trace file inside the daemon's
+// state dir plus its path. The caller closes it when the heal finishes.
+// Trace files accumulate; rotation is the user's problem for now (one
+// file per heal, JSONL, named with a unix-nano timestamp). A nil file
+// + descriptive path is returned on failure so the heal still runs —
+// trace capture is a debugging aid, not load-bearing.
+func openSelfHealTrace(w io.Writer) (string, *os.File) {
+	dir, err := config.StateDir()
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] poll: trace dir resolve failed (%v); proceeding without trace\n", err)
+		return "(none)", nil
+	}
+	traceDir := filepath.Join(dir, "selfheal-traces")
+	if err := os.MkdirAll(traceDir, 0o700); err != nil {
+		fmt.Fprintf(w, "[daemon] poll: trace mkdir failed (%v); proceeding without trace\n", err)
+		return "(none)", nil
+	}
+	path := filepath.Join(traceDir, fmt.Sprintf("heal-%d.jsonl", time.Now().UnixNano()))
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] poll: trace create failed (%v); proceeding without trace\n", err)
+		return "(none)", nil
+	}
+	return path, f
 }
 
 func init() {
