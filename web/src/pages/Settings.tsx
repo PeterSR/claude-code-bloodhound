@@ -3,8 +3,6 @@ import { Settings as SettingsIcon, Save, Copy, Check, AlertCircle } from 'lucide
 import { apiGet, ApiError } from '../api/client';
 
 type Config = {
-  host: string;
-  port: number;
   poll_interval_s: number;
   ingest_interval_s: number;
   aggregate_interval_s: number;
@@ -101,26 +99,6 @@ export default function Settings() {
         <div className="text-sm text-zinc-500">Loading…</div>
       ) : (
         <div className="space-y-6 max-w-3xl">
-          <Card title="Server">
-            <FieldRow>
-              <Field label="Host">
-                <input
-                  className="text-input"
-                  value={draft.host}
-                  onChange={(e) => setDraft({ ...draft, host: e.target.value })}
-                />
-              </Field>
-              <Field label="Port">
-                <input
-                  type="number"
-                  className="text-input w-24"
-                  value={draft.port}
-                  onChange={(e) => setDraft({ ...draft, port: parseInt(e.target.value || '0', 10) })}
-                />
-              </Field>
-            </FieldRow>
-          </Card>
-
           <Card title="Daemon intervals (seconds)">
             <FieldRow>
               <Field label="Poll">

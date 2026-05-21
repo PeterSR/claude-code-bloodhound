@@ -1,5 +1,7 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { Dog } from 'lucide-react';
 import Layout from './components/Layout';
+import SetupWizard from './pages/Setup';
 import Now from './pages/Now';
 import History from './pages/History';
 import Sessions from './pages/Sessions';
@@ -8,8 +10,14 @@ import Compactions from './pages/Compactions';
 import Leaks from './pages/Leaks';
 import Debug from './pages/Debug';
 import Settings from './pages/Settings';
+import { useDaemonHealth } from './hooks/useDaemonHealth';
 
 export default function App() {
+  const { health, check } = useDaemonHealth();
+
+  if (health === 'unknown') return <Splash />;
+  if (health === 'down') return <SetupWizard onRetry={check} />;
+
   return (
     <BrowserRouter>
       <Routes>
@@ -25,5 +33,13 @@ export default function App() {
         </Route>
       </Routes>
     </BrowserRouter>
+  );
+}
+
+function Splash() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-zinc-50 dark:bg-zinc-950">
+      <Dog className="size-6 text-rose-500/60 animate-pulse" />
+    </div>
   );
 }
