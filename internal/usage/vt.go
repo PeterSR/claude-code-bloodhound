@@ -7,13 +7,15 @@ import (
 	"github.com/charmbracelet/x/vt"
 )
 
-// vtCols / vtRows define the virtual terminal we replay the captured
+// VTCols / VTRows define the virtual terminal we replay the captured
 // pty bytes into. Match the size we ask the real pty for in driver_unix
 // so claude's layout decisions stay consistent between what the user
-// would see and what we feed the extractor.
+// would see and what we feed the extractor. Exported so other packages
+// (selfheal) can spawn pty's with the same dimensions and reason about
+// the rendered grid shape.
 const (
-	vtCols = 200
-	vtRows = 60
+	VTCols = 200
+	VTRows = 60
 )
 
 // renderVT replays the raw pty byte stream into a virtual terminal grid
@@ -35,8 +37,16 @@ const (
 //     can produce false regex matches. The grid only keeps the latest
 //     content at each cell, so the extractor sees what was actually on
 //     screen at the end of the capture.
-func renderVT(raw []byte) string {
-	e := vt.NewEmulator(vtCols, vtRows)
+// renderVT is the unexported entry point in-package callers use; same
+// behaviour as the exported RenderVT below.
+func renderVT(raw []byte) string { return RenderVT(raw) }
+
+// RenderVT replays the raw pty byte stream into a virtual terminal grid
+// and returns the resulting text. Exported so selfheal (which owns its
+// own pty session) can render against the same grid shape extraction
+// sees.
+func RenderVT(raw []byte) string {
+	e := vt.NewEmulator(VTCols, VTRows)
 	// The emulator writes ANSI responses (e.g. for InBandResize when
 	// claude enables it) to an internal io.Pipe. Without a reader,
 	// those writes block Write() forever — and we'd hang the entire
@@ -52,9 +62,9 @@ func renderVT(raw []byte) string {
 	<-drained
 
 	var b strings.Builder
-	for y := 0; y < vtRows; y++ {
+	for y := 0; y < VTRows; y++ {
 		var row strings.Builder
-		for x := 0; x < vtCols; x++ {
+		for x := 0; x < VTCols; x++ {
 			cell := e.CellAt(x, y)
 			if cell == nil {
 				row.WriteByte(' ')
