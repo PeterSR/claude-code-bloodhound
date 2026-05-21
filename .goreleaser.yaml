@@ -1,8 +1,9 @@
 # GoReleaser config for Bloodhound.
 #
 # Triggered by pushing a tag (e.g. v0.1.0) — see .github/workflows/release.yml.
-# `make web` must run before goreleaser so the embedded React bundle is
-# present; the workflow handles that step.
+# The workflow builds the React bundle and installs GTK / WebKit2GTK
+# dev headers before invoking goreleaser; the daemon build is pure-Go
+# and the GUI build needs CGO.
 
 version: 2
 
@@ -11,13 +12,12 @@ before:
     - go mod tidy
 
 builds:
+  # Daemon: pure-Go, cross-compiles cleanly to all four targets.
   - id: bloodhound
     main: ./cmd/bloodhound
     binary: bloodhound
     env:
       - CGO_ENABLED=0
-    flags:
-      - -tags=prod
     ldflags:
       - -s -w
       - -X github.com/PeterSR/claude-code-bloodhound/internal/version.Version={{ .Version }}
@@ -34,8 +34,34 @@ builds:
       # Windows ConPTY driver isn't shipped yet.
       - goos: windows
 
+  # GUI: Wails v2 over GTK3 + WebKit2GTK 4.1. CGO-dependent — only
+  # builds on Linux amd64 from a workflow runner that has the dev
+  # headers installed. Linux arm64 will land when we move to an
+  # arm64-native runner (cross-compiling CGO + GTK from amd64 is
+  # impractical). macOS / Windows ports are future work.
+  - id: bloodhound-gui
+    main: ./cmd/bloodhound-gui
+    binary: bloodhound-gui
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -tags=prod,production,desktop,webkit2_41
+    ldflags:
+      - -s -w
+      - -X github.com/PeterSR/claude-code-bloodhound/internal/version.Version={{ .Version }}
+      - -X github.com/PeterSR/claude-code-bloodhound/internal/version.Commit={{ .Commit }}
+      - -X github.com/PeterSR/claude-code-bloodhound/internal/version.Date={{ .Date }}
+    goos:
+      - linux
+    goarch:
+      - amd64
+
 archives:
-  - id: default
+  # Daemon archives go to every supported OS/arch. Single artifact:
+  # the bloodhound binary plus the usual top-level files.
+  - id: daemon
+    ids:
+      - bloodhound
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -52,6 +78,34 @@ archives:
     files:
       - README.md
       - LICENSE
+
+  # GUI archive is Linux-only and includes the .desktop file, icons,
+  # and a small install-gui.sh script that drops everything into
+  # ~/.local — so users without Go/Make can land it in one command.
+  - id: gui
+    ids:
+      - bloodhound-gui
+    name_template: >-
+      {{ .ProjectName }}-gui_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    formats:
+      - tar.gz
+    files:
+      - README.md
+      - LICENSE
+      - src: packaging/bloodhound.desktop
+        dst: bloodhound.desktop
+      - src: web/public/icon-512.png
+        dst: bloodhound.png
+      - src: web/public/icon.svg
+        dst: bloodhound.svg
+      - src: packaging/install-gui.sh
+        dst: install-gui.sh
+        info:
+          mode: 0755
 
 checksum:
   name_template: 'checksums.txt'
