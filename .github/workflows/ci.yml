@@ -24,6 +24,15 @@ jobs:
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
+      - name: Install GUI build deps
+        # So `go build ./cmd/bloodhound-gui` exercises the same code
+        # path the release workflow does — catches GTK / WebKit2GTK
+        # breakage on PRs instead of at tag time.
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+
       - name: Install web deps
         run: cd web && npm ci
 
@@ -36,8 +45,11 @@ jobs:
       - name: Go vet
         run: go vet -tags prod ./...
 
-      - name: Go build
-        run: go build -tags prod ./cmd/bloodhound
+      - name: Go build daemon
+        run: go build ./cmd/bloodhound
+
+      - name: Go build GUI
+        run: go build -tags 'prod production desktop webkit2_41' ./cmd/bloodhound-gui
 
       - name: Go test
         run: go test ./...

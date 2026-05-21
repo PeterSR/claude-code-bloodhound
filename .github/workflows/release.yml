@@ -27,6 +27,15 @@ jobs:
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
+      - name: Install GUI build deps (Linux only)
+        # Headers required for the bloodhound-gui build's CGO link
+        # against GTK3 + WebKit2GTK 4.1. Ubuntu 24.04+ ships 4.1; we
+        # rely on the GitHub-hosted runner being recent enough.
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+
       - name: Build web bundle
         run: cd web && npm ci && npm run build
 
