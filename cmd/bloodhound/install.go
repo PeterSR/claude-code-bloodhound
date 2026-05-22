@@ -52,6 +52,10 @@ Type=simple
 # driver) rather than $HOME (broad, surprising). Re-run install --force
 # if you move the state dir.
 WorkingDirectory=%s
+# Inherit the user's PATH captured at install time. systemd-user's
+# default PATH is just /usr/local/bin:/usr/bin, which won't find
+# claude when it lives under ~/.local/bin, ~/.nvm/..., etc.
+Environment=PATH=%s
 ExecStart=%s daemon
 Restart=on-failure
 RestartSec=10s
@@ -93,7 +97,11 @@ func installLinuxImpl(out interface{ Write(p []byte) (int, error) }) error {
 	if _, err := os.Stat(unitPath); err == nil && !installForce {
 		fmt.Fprintf(out, "service already exists: %s (pass --force to overwrite)\n", unitPath)
 	} else {
-		body := fmt.Sprintf(linuxUnitTemplate, stateDir, exe)
+		userPATH := os.Getenv("PATH")
+		if userPATH == "" {
+			userPATH = "/usr/local/bin:/usr/bin"
+		}
+		body := fmt.Sprintf(linuxUnitTemplate, stateDir, userPATH, exe)
 		if err := os.WriteFile(unitPath, []byte(body), 0o644); err != nil {
 			return fmt.Errorf("write unit: %w", err)
 		}
