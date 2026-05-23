@@ -216,6 +216,7 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 		tracePath, traceFile := openSelfHealTrace(w)
 		heal := selfheal.Run(pollCtx, selfheal.Options{
 			ClaudeBinary: cfg.ClaudeBinary,
+			Mode:         selfheal.Mode(cfg.SelfHealMode),
 			Timeout:      120 * time.Second,
 			Trace:        traceFile,
 		})

@@ -53,6 +53,12 @@ type BridgeServer struct {
 	mu     sync.Mutex
 	closed bool
 	t0     time.Time
+
+	// savedCh closes the first time save_extractor returns ok=true.
+	// The interactive orchestrator selects on it to know when its work
+	// is done (the headless one ignores it; -p signals via process exit).
+	savedOnce sync.Once
+	savedCh   chan struct{}
 }
 
 // NewBridgeServer creates a server bound to a fresh unix socket inside
@@ -79,8 +85,19 @@ func NewBridgeServer(session *Session) (*BridgeServer, error) {
 		_ = os.Remove(path)
 		return nil, err
 	}
-	return &BridgeServer{session: session, ln: ln, path: path, t0: time.Now()}, nil
+	return &BridgeServer{
+		session: session,
+		ln:      ln,
+		path:    path,
+		t0:      time.Now(),
+		savedCh: make(chan struct{}),
+	}, nil
 }
+
+// Saved returns a channel closed once save_extractor has succeeded at
+// least once during this heal. The interactive orchestrator waits on
+// this to know when to send /exit; the headless orchestrator ignores it.
+func (s *BridgeServer) Saved() <-chan struct{} { return s.savedCh }
 
 // Path returns the unix-socket path the subcommand should dial.
 func (s *BridgeServer) Path() string { return s.path }
@@ -178,7 +195,11 @@ func (s *BridgeServer) dispatch(req BridgeRequest) BridgeResponse {
 		if err := json.Unmarshal(req.Args, &args); err != nil {
 			return BridgeResponse{Err: "decode save_extractor args: " + err.Error()}
 		}
-		return ok(s.session.SaveExtractor(args))
+		saveRes := s.session.SaveExtractor(args)
+		if saveRes.Ok {
+			s.savedOnce.Do(func() { close(s.savedCh) })
+		}
+		return ok(saveRes)
 	default:
 		return BridgeResponse{Err: "unknown tool: " + req.Tool}
 	}

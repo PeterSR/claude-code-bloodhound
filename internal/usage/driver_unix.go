@@ -21,11 +21,14 @@ import (
 // VT-grid path in hasInputPrompt does it row-shape-aware.
 const promptChar = "❯"
 
-// hasInputPrompt reports whether the rendered grid contains a row that
+// HasInputPrompt reports whether the rendered grid contains a row that
 // looks like claude's main input prompt: a "❯" followed by either
 // nothing else or just a placeholder suggestion (Try "..."). Menu rows
 // like "❯ 1. Yes, I trust this folder" don't match.
-func hasInputPrompt(screen string) bool {
+//
+// Exported so the selfheal package can reuse the same detector for the
+// outer orchestrator pty.
+func HasInputPrompt(screen string) bool {
 	for _, line := range strings.Split(screen, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == promptChar {
@@ -182,7 +185,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 			// has nothing past it. Menu cursors (the ❯ in trust prompts
 			// etc.) are followed by their option text, so don't match.
 			screen := renderVT(curBytes)
-			ready := hasInputPrompt(screen)
+			ready := HasInputPrompt(screen)
 			if ready && sinceLast >= settleAfterReady {
 				time.Sleep(500 * time.Millisecond)
 				_, _ = ptyFile.Write([]byte("/usage\r"))

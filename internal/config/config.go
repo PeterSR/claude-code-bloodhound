@@ -75,12 +75,28 @@ type Config struct {
 
 	// ExtractorSelfHeal toggles the daemon's automatic self-heal: when
 	// a poll's required fields go missing, the daemon spawns a fresh
-	// claude-p as an orchestrator over a live pty (via MCP tools) and
-	// lets it re-learn a working extractor. With it off, the extractor
-	// stays as-is and the user can either edit extractors.json by hand
-	// or hit the Retrain button on the Debug page. Default true.
+	// orchestrator over a live pty (via MCP tools) and lets it re-learn
+	// a working extractor. With it off, the extractor stays as-is and
+	// the user can either edit extractors.json by hand or hit the
+	// Retrain button on the Debug page. Default true.
 	ExtractorSelfHeal bool `json:"extractor_self_heal"`
+
+	// SelfHealMode picks how the heal's orchestrator LLM is invoked.
+	//   "interactive" (default) — second interactive `claude` session
+	//      driven from Go over a pty. Tokens count against the user's
+	//      interactive subscription limits.
+	//   "headless" — `claude -p` with --output-format=json. Cleaner
+	//      cost/error envelope, but after 2026-06-15 draws from the
+	//      Agent SDK $100 credit (then extra usage) rather than the
+	//      interactive subscription.
+	SelfHealMode string `json:"self_heal_mode"`
 }
+
+// SelfHealMode values, kept here so callers don't hard-code strings.
+const (
+	SelfHealModeInteractive = "interactive"
+	SelfHealModeHeadless    = "headless"
+)
 
 // Default returns the baseline config. New installs start here.
 func Default() Config {
@@ -96,6 +112,7 @@ func Default() Config {
 		ActiveSessionThresholdS: 1800,
 		RecentSessionWindowS:    86400,
 		ExtractorSelfHeal:       true,
+		SelfHealMode:            SelfHealModeInteractive,
 	}
 }
 

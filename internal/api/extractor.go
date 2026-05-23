@@ -50,6 +50,7 @@ func (s *Server) handleExtractorRetrain(w http.ResponseWriter, r *http.Request) 
 
 	heal := selfheal.Run(ctx, selfheal.Options{
 		ClaudeBinary: cfg.ClaudeBinary,
+		Mode:         selfheal.Mode(cfg.SelfHealMode),
 		Timeout:      150 * time.Second,
 		Stderr:       stderr,
 		Trace:        traceFile,
