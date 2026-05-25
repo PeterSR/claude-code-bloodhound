@@ -1,0 +1,77 @@
+name: Cross-platform GUI build (spike)
+
+# Manual-trigger only. Attempts to compile bloodhound-gui on the four
+# platforms we don't ship pre-built binaries for yet. Artifacts get
+# uploaded so you can download and try them locally; nothing here
+# touches Releases. The point is to surface platform-specific compile
+# failures incrementally, separate from the tag-driven release pipeline.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+            target: linux_arm64
+            tags: prod,production,desktop,webkit2_41
+            ext: ''
+          - os: macos-14
+            target: darwin_arm64
+            tags: prod,production,desktop
+            ext: ''
+          - os: macos-13
+            target: darwin_amd64
+            tags: prod,production,desktop
+            ext: ''
+          - os: windows-latest
+            target: windows_amd64
+            tags: prod,production,desktop
+            ext: '.exe'
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Build web bundle
+        run: cd web && npm ci && npm run build
+
+      - name: Build bloodhound-gui
+        shell: bash
+        run: |
+          go build \
+            -tags '${{ matrix.tags }}' \
+            -ldflags "-s -w -X github.com/PeterSR/claude-code-bloodhound/internal/version.Version=spike-${{ github.sha }}" \
+            -o 'bloodhound-gui-${{ matrix.target }}${{ matrix.ext }}' \
+            ./cmd/bloodhound-gui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloodhound-gui-${{ matrix.target }}
+          path: bloodhound-gui-${{ matrix.target }}${{ matrix.ext }}
+          if-no-files-found: error

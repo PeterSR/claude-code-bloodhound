@@ -37,7 +37,7 @@ Three jobs, scheduled either by your OS or by a built-in scheduler:
 
 `bloodhound daemon` runs all three on configurable intervals (defaults: poll 5m, ingest 5m, aggregate 15m) and exposes a JSON API over a unix socket at `$XDG_RUNTIME_DIR/bloodhound/api.sock` — no TCP port to conflict with anything on your box.
 
-`bloodhound-gui` (Linux only for now) is a native window that loads the dashboard and proxies its API calls to the daemon's socket. It's a separate binary so the daemon can run headless on machines without a desktop environment.
+`bloodhound-gui` is a native window that loads the dashboard and proxies its API calls to the daemon's socket. Pre-built for Linux x86_64; macOS / Windows / Linux-arm builds work in principle but aren't shipped yet (see [Platforms](#platforms)). It's a separate binary so the daemon can run headless on machines without a desktop environment.
 
 A `bloodhound status` subcommand renders one line suitable for Claude Code's statusline so you can keep an eye on your quota without leaving the terminal.
 
@@ -55,30 +55,55 @@ Bloodhound is local-first. Your data stays on your machine. The future opt-in **
 
 ## Install
 
+### Platforms
+
+The daemon is pure-Go and ships pre-built for Linux, macOS, and Windows × amd64 / arm64. The native GUI is a Wails app, and right now it only ships pre-built for Linux x86_64. Daemon-only setups give you the full API — the GUI is just a viewer on top.
+
+|                       | Daemon (pre-built) | GUI (pre-built) | Notes                                          |
+| --------------------- | ------------------ | --------------- | ---------------------------------------------- |
+| Linux x86_64          | ✅                  | ✅               | Primary development target.                    |
+| Linux arm64           | ✅                  | build from source | Daemon tested in CI; GUI build unverified.    |
+| macOS arm64 / amd64   | ✅                  | build from source | Daemon tested in CI; GUI build unverified.    |
+| Windows amd64         | ✅                  | build from source | Daemon tested in CI; GUI build unverified.    |
+
+**Help me test Bloodhound on your platform.** I develop on Linux x86_64, so that's the only combo I exercise end-to-end. If you try Bloodhound on macOS, Windows, or Linux arm64 — daemon-only or full GUI — open [an issue](https://github.com/PeterSR/claude-code-bloodhound/issues) with your `bloodhound doctor` output and what worked or broke. Platform fixes get fast-tracked, and credited.
+
+First-launch friction to expect on unsigned binaries:
+
+- **macOS Gatekeeper** refuses to run downloaded executables. Clear the quarantine bit: `xattr -d com.apple.quarantine bloodhound bloodhound-gui`. Or right-click the binary in Finder → Open → Open for a one-time bypass.
+- **Windows SmartScreen** shows *Windows protected your PC* on first run. Click **More info → Run anyway**.
+
 ### Pre-built binary
 
-Grab a binary from the [Releases page](https://github.com/PeterSR/claude-code-bloodhound/releases), unpack, and put `bloodhound` somewhere on your `$PATH`. Linux and macOS, amd64 and arm64. (The native `bloodhound-gui` window is Linux-only for now; daemon-only setups work everywhere.)
+Grab the right tarball or zip from the [Releases page](https://github.com/PeterSR/claude-code-bloodhound/releases), unpack, and drop `bloodhound` somewhere on your `$PATH`.
 
 ```bash
 bloodhound doctor               # sanity-check paths, schema, claude binary
 bloodhound install --enable     # write + start the systemd user unit (Linux)
 ```
 
-If you have the GUI binary installed too, launch `bloodhound-gui` from your application menu or dash. If you don't — or you're on macOS — you can `curl --unix-socket $XDG_RUNTIME_DIR/bloodhound/api.sock http://bh/api/now | jq` to read the same data the dashboard does.
+On Linux, if you also unpacked the GUI tarball and ran its `install-gui.sh`, launch `bloodhound-gui` from your application menu. Otherwise — or on macOS / Windows where there is no GUI binary yet — the dashboard's API is reachable directly over the unix socket:
+
+```bash
+curl --unix-socket $XDG_RUNTIME_DIR/bloodhound/api.sock http://bh/api/now | jq
+```
 
 ### From source
 
-Requires Go 1.25+ and Node 20+:
+Requires Go 1.25+ and Node 20+.
 
 ```bash
 git clone https://github.com/PeterSR/claude-code-bloodhound
 cd claude-code-bloodhound
-make install       # daemon → $GOPATH/bin/bloodhound
-make install-gui   # GUI → ~/.local/bin/bloodhound-gui + .desktop entry (Linux)
+make install       # daemon → $GOPATH/bin/bloodhound (works on every platform)
 bloodhound install --enable
 ```
 
-The GUI build needs gtk+-3.0 and webkit2gtk-4.1 development headers (Fedora: `gtk3-devel webkit2gtk4.1-devel`; Ubuntu 24.04+: `libgtk-3-dev libwebkit2gtk-4.1-dev`).
+Building the GUI from source needs platform-specific prerequisites:
+
+- **Linux:** GTK 3 and WebKit2GTK 4.1 dev headers. Fedora: `sudo dnf install gtk3-devel webkit2gtk4.1-devel`. Ubuntu 24.04+ / Debian trixie: `sudo apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev`. Then `make install-gui` drops `bloodhound-gui` into `~/.local/bin` and installs the `.desktop` entry.
+- **macOS:** Xcode Command Line Tools (`xcode-select --install`). The Makefile target is Linux-shaped, so build the binary directly: `cd web && npm ci && npm run build && cd .. && go build -tags prod,production,desktop -o bloodhound-gui ./cmd/bloodhound-gui`. If you get it working — or it explodes — please report back.
+- **Windows:** WebView2 runtime (pre-installed on Windows 10/11). PowerShell: `cd web; npm ci; npm run build; cd ..; go build -tags prod,production,desktop -o bloodhound-gui.exe ./cmd/bloodhound-gui`. Same "let me know how it went" applies.
 
 For first-time setup the daemon will collect a few `/usage` polls before the gauges show anything useful; calibration needs at least two non-saturated observations in the same bucket. If the GUI launches before the daemon is running, it shows a setup wizard with the commands above.
 
