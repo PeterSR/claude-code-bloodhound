@@ -25,7 +25,7 @@ Bloodhound watches the JSONL session logs Claude Code already writes to your dis
 - `Settings` — edit `config.json` from the UI, copy-paste statusline + hook + systemd snippets.
 - `Debug` — last `/usage` raw dump, parser output, ingest counters, schema version, paths, and a Retrain button that lets the orchestrator self-heal the extractor on demand.
 
-Per-OS installers and the opt-in **Join the pack** community-insights upload are next.
+Per-OS installers and the opt-in **Join the pack** community-insights upload are next — see [Privacy](#privacy) for what that's for and what it would and wouldn't share.
 
 ## How it works
 
@@ -51,7 +51,31 @@ The `/usage` panel is a TUI, and Anthropic ships layout changes without warning.
 
 ## Privacy
 
-Bloodhound is local-first. Your data stays on your machine. The future opt-in **Join the pack** upload ships only anonymized token counts, classifications, and timings — never your conversations, file paths, project names, or session identifiers. A random per-install `device_id` plus an optional user-pasted `user_id` lets the server dedupe accounts that span multiple machines without ever learning who you are.
+Bloodhound is local-first. Your data stays on your machine. There is no server today, and the daemon makes no outbound network calls beyond driving the local `claude` binary.
+
+The "Join the pack" feature is the planned opt-in to that. Why have one at all: most of the interesting questions about Claude Code's subscription only get sharp answers when you can compare across installs. Examples:
+
+- **Are tokens-per-1% the same for everyone?** If your calibration drifts from the pack median over weeks, Anthropic may be quietly differentiating cost weights by plan, account age, region, or load.
+- **Does the 5-hour window really mean 5 hours?** Reset cadence and saturation rates pooled across many accounts make it visible if some users get longer-effective windows.
+- **Where are the cliffs?** When the bundled extractor breaks because Anthropic redesigned the `/usage` panel, the pack notices in minutes instead of one user at a time.
+- **Plan-tier comparisons.** Pro vs Max-5x vs Max-20x — what does each dollar actually buy in throughput once you account for cache hits and saturation?
+
+Joining the pack would upload:
+
+- **Anonymized observation counts:** `/usage` percentages, reset timestamps, saturation flags, time-of-day buckets.
+- **Anonymized calibration deltas:** tokens-per-1% values without the underlying token totals or prompts they came from.
+- **Plan tier** (if you set it in Settings) and an optional self-declared **user_id** so a single human across multiple machines doesn't double-count.
+- **A random per-install `device_id`** so the same machine doesn't double-count on reconnect.
+- **Build version + extractor version** so we know which clients are reporting.
+
+It would not upload:
+
+- Your conversations, prompts, completions, or any model output.
+- File paths, project names, repository names, session UUIDs, or hostnames.
+- Tool calls, environment variables, or anything outside Bloodhound's own observation database.
+- IP-level identifiers beyond what the transport requires to deliver the packet.
+
+This is all moot until the upload server exists. When it does, joining will be an explicit toggle in Settings, off by default, and you'll be able to see the exact JSON payload before it leaves your machine.
 
 ## Install
 
