@@ -4,8 +4,7 @@ import {
   Activity,
   History as HistoryIcon,
   Files,
-  Combine,
-  Droplet,
+  // Combine, Droplet — re-enable when Compactions / Leaks nav is restored.
   Bug,
   Settings as SettingsIcon,
   Dog,
@@ -23,8 +22,11 @@ const NAV: NavItem[] = [
   { to: '/', label: 'Now', icon: Activity, end: true },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/sessions', label: 'Sessions', icon: Files },
-  { to: '/compactions', label: 'Compactions', icon: Combine },
-  { to: '/leaks', label: 'Leaks', icon: Droplet },
+  // Hidden until polished — routes still live in App.tsx so /compactions
+  // and /leaks remain reachable by URL for testing. Re-add Combine /
+  // Droplet to the lucide import above when restoring.
+  // { to: '/compactions', label: 'Compactions', icon: Combine },
+  // { to: '/leaks', label: 'Leaks', icon: Droplet },
   { to: '/debug', label: 'Debug', icon: Bug },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];

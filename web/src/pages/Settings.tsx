@@ -40,6 +40,10 @@ const PLAN_OPTIONS = [
   { value: 'max-20x', label: 'Max 20x' },
 ];
 
+// Flip to true to show the Community insights / Join the pack card.
+// Gated until the upload server exists.
+const SHOW_COMMUNITY_INSIGHTS = false;
+
 export default function Settings() {
   const [resp, setResp] = useState<SettingsResponse | null>(null);
   const [draft, setDraft] = useState<Config | null>(null);
@@ -180,41 +184,47 @@ export default function Settings() {
             </FieldRow>
           </Card>
 
-          <Card title="Community insights">
-            <p className="text-xs text-zinc-500 mb-3">
-              Plan tier is cosmetic — it only labels community-insights packets when you opt in.
-              The Bloodhound community-insights server is not live yet, so this is a placeholder.
-            </p>
-            <FieldRow>
-              <Field label="Plan tier">
-                <select
-                  className="text-input"
-                  value={draft.plan_tier}
-                  onChange={(e) => setDraft({ ...draft, plan_tier: e.target.value })}
-                >
-                  {PLAN_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="User ID (optional)">
+          {/* Community insights / Join the pack — hidden until the
+              upload server exists. Config fields stay in the schema
+              (plan_tier, user_id, join_the_pack); only the UI is gated.
+              Flip SHOW_COMMUNITY_INSIGHTS to true when ready. */}
+          {SHOW_COMMUNITY_INSIGHTS && (
+            <Card title="Community insights">
+              <p className="text-xs text-zinc-500 mb-3">
+                Plan tier is cosmetic — it only labels community-insights packets when you opt in.
+                The Bloodhound community-insights server is not live yet, so this is a placeholder.
+              </p>
+              <FieldRow>
+                <Field label="Plan tier">
+                  <select
+                    className="text-input"
+                    value={draft.plan_tier}
+                    onChange={(e) => setDraft({ ...draft, plan_tier: e.target.value })}
+                  >
+                    {PLAN_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="User ID (optional)">
+                  <input
+                    className="text-input flex-1"
+                    placeholder="(blank = treat this device as its own user)"
+                    value={draft.user_id}
+                    onChange={(e) => setDraft({ ...draft, user_id: e.target.value })}
+                  />
+                </Field>
+              </FieldRow>
+              <label className="flex items-center gap-2 mt-3 text-sm">
                 <input
-                  className="text-input flex-1"
-                  placeholder="(blank = treat this device as its own user)"
-                  value={draft.user_id}
-                  onChange={(e) => setDraft({ ...draft, user_id: e.target.value })}
+                  type="checkbox"
+                  checked={draft.join_the_pack}
+                  onChange={(e) => setDraft({ ...draft, join_the_pack: e.target.checked })}
                 />
-              </Field>
-            </FieldRow>
-            <label className="flex items-center gap-2 mt-3 text-sm">
-              <input
-                type="checkbox"
-                checked={draft.join_the_pack}
-                onChange={(e) => setDraft({ ...draft, join_the_pack: e.target.checked })}
-              />
-              Join the pack — opt in to anonymized usage upload (no-op until v2)
-            </label>
-          </Card>
+                Join the pack — opt in to anonymized usage upload (no-op until v2)
+              </label>
+            </Card>
+          )}
 
           <div className="sticky bottom-0 z-10 flex items-center gap-3 rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 shadow-md">
             <button
