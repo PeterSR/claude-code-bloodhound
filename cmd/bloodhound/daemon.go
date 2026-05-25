@@ -15,7 +15,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/aggregate"
-	"github.com/PeterSR/claude-code-bloodhound/internal/api"
+	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
+	"github.com/PeterSR/claude-code-bloodhound/internal/api/server"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
@@ -114,11 +115,11 @@ For one-shot CI-style execution that does each job once and exits, pass
 		// sit on "daemon is down" for the entire initial cycle even
 		// though the daemon process is alive.
 		if !daemonNoAPI {
-			sockPath, err := api.SocketPath()
+			sockPath, err := routes.SocketPath()
 			if err != nil {
 				return fmt.Errorf("api: %w", err)
 			}
-			ln, err := api.Listen(sockPath)
+			ln, err := server.Listen(sockPath)
 			if err != nil {
 				return fmt.Errorf("api: %w", err)
 			}
@@ -126,7 +127,7 @@ For one-shot CI-style execution that does each job once and exits, pass
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := api.Serve(ctx, ln, &api.Server{Store: s}); err != nil {
+				if err := server.Serve(ctx, ln, &server.Server{Store: s}); err != nil {
 					fmt.Fprintf(w, "[daemon] api: %v\n", err)
 				}
 			}()

@@ -1,29 +1,11 @@
-package api
+package server
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 )
-
-const socketFile = "api.sock"
-
-// SocketPath returns the unix-socket path the daemon listens on.
-//
-// We use $XDG_RUNTIME_DIR/bloodhound/api.sock. systemd-logind sets that
-// var for every logged-in user on Linux, so in practice it's always
-// present. If it isn't, we error rather than guessing a /tmp fallback —
-// cross-platform path resolution (macOS, Windows) lands when those ports
-// land.
-func SocketPath() (string, error) {
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if dir == "" {
-		return "", errors.New("XDG_RUNTIME_DIR is not set; cannot pick a socket path")
-	}
-	return filepath.Join(dir, "bloodhound", socketFile), nil
-}
 
 // Listen prepares the parent directory, removes any stale socket file
 // from a previous crash, binds an AF_UNIX listener, and tightens

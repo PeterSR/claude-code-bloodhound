@@ -1,7 +1,9 @@
-// Package api wires the HTTP routes for the daemon. The API is JSON-only;
-// the React bundle is served separately by the bloodhound-gui binary,
-// which proxies /api/* back here.
-package api
+// Package server implements the HTTP handlers behind the bloodhound
+// daemon's API. The route paths and JSON payload types are described
+// in sibling package internal/api/routes; the bloodhound-gui binary
+// imports only routes (for the socket-path helper) so the GUI build
+// doesn't pull in the daemon's pty / store / self-heal code.
+package server
 
 import (
 	"context"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/version"
 )
@@ -26,17 +29,17 @@ type Server struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/health", s.handleHealth)
-	mux.HandleFunc("/api/doctor", s.handleDoctor)
-	mux.HandleFunc("/api/now", s.handleNow)
-	mux.HandleFunc("/api/debug", s.handleDebug)
-	mux.HandleFunc("/api/sessions", s.handleSessions)
-	mux.HandleFunc("/api/sessions/", s.handleSessionDetail)
-	mux.HandleFunc("/api/history", s.handleHistory)
-	mux.HandleFunc("/api/compactions", s.handleCompactions)
-	mux.HandleFunc("/api/leaks", s.handleLeaks)
-	mux.HandleFunc("/api/settings", s.handleSettings)
-	mux.HandleFunc("/api/extractor/retrain", s.handleExtractorRetrain)
+	mux.HandleFunc(routes.PathHealth, s.handleHealth)
+	mux.HandleFunc(routes.PathDoctor, s.handleDoctor)
+	mux.HandleFunc(routes.PathNow, s.handleNow)
+	mux.HandleFunc(routes.PathDebug, s.handleDebug)
+	mux.HandleFunc(routes.PathSessions, s.handleSessions)
+	mux.HandleFunc(routes.PathSessionsPrefix, s.handleSessionDetail)
+	mux.HandleFunc(routes.PathHistory, s.handleHistory)
+	mux.HandleFunc(routes.PathCompactions, s.handleCompactions)
+	mux.HandleFunc(routes.PathLeaks, s.handleLeaks)
+	mux.HandleFunc(routes.PathSettings, s.handleSettings)
+	mux.HandleFunc(routes.PathExtractorRetrain, s.handleExtractorRetrain)
 
 	return logger(mux)
 }

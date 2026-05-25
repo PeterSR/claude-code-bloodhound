@@ -28,7 +28,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
-	"github.com/PeterSR/claude-code-bloodhound/internal/api"
+	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/version"
 	"github.com/PeterSR/claude-code-bloodhound/web"
 )
@@ -69,7 +69,7 @@ func main() {
 
 	socketPath := *socketFlag
 	if socketPath == "" {
-		p, err := api.SocketPath()
+		p, err := routes.SocketPath()
 		if err != nil {
 			log.Fatalf("daemon socket: %v", err)
 		}

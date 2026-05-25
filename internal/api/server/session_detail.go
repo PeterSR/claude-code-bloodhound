@@ -1,47 +1,12 @@
-package api
+package server
 
 import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 )
-
-// SessionDetailResponse is the per-session-detail payload.
-type SessionDetailResponse struct {
-	SessionUUID         string           `json:"session_uuid"`
-	Project             string           `json:"project"`
-	FirstTS             string           `json:"first_ts"`
-	LastTS              string           `json:"last_ts"`
-	TurnCount           int              `json:"turn_count"`
-	RawTokens           int64            `json:"raw_tokens"`
-	OutputTokens        int64            `json:"output_tokens"`
-	Peak5hRawTokens     int64            `json:"peak_5h_raw_tokens"`
-	Models              string           `json:"models"`
-	CacheTTL            string           `json:"cache_ttl"`
-	IdleMissCount       int              `json:"idle_miss_count"`
-	RotationCount       int              `json:"rotation_count"`
-	RestructureCount    int              `json:"restructure_count"`
-	CompactionCount     int              `json:"compaction_count"`
-	ColdCompactionCount int              `json:"cold_compaction_count"`
-	Turns               []TurnItem       `json:"turns"`
-	Compactions         []CompactionItem `json:"compactions"`
-}
-
-// TurnItem is the on-the-wire shape for a single turn.
-type TurnItem struct {
-	TurnIdx        int     `json:"turn_idx"`
-	TS             string  `json:"ts"`
-	TSUnixMS       int64   `json:"ts_unix_ms"`
-	Model          string  `json:"model"`
-	InputTokens    int     `json:"input_tokens"`
-	OutputTokens   int     `json:"output_tokens"`
-	CacheRead      int     `json:"cache_read"`
-	CacheCreate5m  int     `json:"cache_create_5m"`
-	CacheCreate1h  int     `json:"cache_create_1h"`
-	GapS           float64 `json:"gap_s"`
-	Classification string  `json:"classification"`
-	PostCompact    bool    `json:"post_compact"`
-}
 
 func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	uuid := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
@@ -54,10 +19,10 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Header from the materialized sessions table.
-	var resp SessionDetailResponse
+	var resp routes.SessionDetailResponse
 	resp.SessionUUID = uuid
-	resp.Turns = []TurnItem{}
-	resp.Compactions = []CompactionItem{}
+	resp.Turns = []routes.TurnItem{}
+	resp.Compactions = []routes.CompactionItem{}
 	var firstMS, lastMS int64
 	err := s.Store.DB.QueryRowContext(ctx, `
 		SELECT project, first_ts_unix_ms, last_ts_unix_ms,
@@ -96,7 +61,7 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	defer trows.Close()
 	for trows.Next() {
 		var (
-			t  TurnItem
+			t  routes.TurnItem
 			pc int
 		)
 		if err := trows.Scan(
@@ -128,7 +93,7 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	defer crows.Close()
 	for crows.Next() {
 		var (
-			it     CompactionItem
+			it     routes.CompactionItem
 			gapVal interface{}
 			conf   int
 		)

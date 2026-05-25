@@ -1,28 +1,11 @@
-package api
+package server
 
 import (
 	"net/http"
 	"time"
-)
 
-// SessionListItem is the public JSON shape for the Sessions list page.
-type SessionListItem struct {
-	SessionUUID         string `json:"session_uuid"`
-	Project             string `json:"project"`
-	FirstTS             string `json:"first_ts"`
-	LastTS              string `json:"last_ts"`
-	TurnCount           int    `json:"turn_count"`
-	RawTokens           int64  `json:"raw_tokens"`
-	OutputTokens        int64  `json:"output_tokens"`
-	Peak5hRawTokens     int64  `json:"peak_5h_raw_tokens"`
-	IdleMissCount       int    `json:"idle_miss_count"`
-	RotationCount       int    `json:"rotation_count"`
-	RestructureCount    int    `json:"restructure_count"`
-	CompactionCount     int    `json:"compaction_count"`
-	ColdCompactionCount int    `json:"cold_compaction_count"`
-	CacheTTL            string `json:"cache_ttl"`
-	Models              string `json:"models"`
-}
+	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
+)
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.Store.ListSessions(r.Context())
@@ -30,9 +13,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	out := make([]SessionListItem, 0, len(rows))
+	out := make([]routes.SessionListItem, 0, len(rows))
 	for _, sess := range rows {
-		out = append(out, SessionListItem{
+		out = append(out, routes.SessionListItem{
 			SessionUUID:         sess.SessionUUID,
 			Project:             sess.Project,
 			FirstTS:             time.UnixMilli(sess.FirstTSUnixMS).UTC().Format(time.RFC3339),
@@ -50,8 +33,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			Models:              sess.Models,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"sessions": out,
-		"count":    len(out),
+	writeJSON(w, http.StatusOK, routes.SessionsResponse{
+		Sessions: out,
+		Count:    len(out),
 	})
 }
