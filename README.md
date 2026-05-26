@@ -20,12 +20,12 @@ Bloodhound watches the JSONL session logs Claude Code already writes to your dis
 - `Now` — gauges for session and week, time to natural reset, burn-rate projection (only when actionable), and an "On extra usage" badge once you blow past 100%.
 - `History` — `/usage` % over time, the calibration trend (tokens per 1%), and a weekday × hour heatmap of when you spend.
 - `Sessions` — every session on disk, sortable, click-through to a per-turn view with classification (idle / rotation / restructure) and inline compactions.
-- `Compactions` — every confirmed `/compact`, broken down by warm vs cold cache state.
-- `Leaks` — avoidable spend ranked: idle misses, rotations, restructures, cold compactions, plus the worst-offending sessions.
 - `Settings` — edit `config.json` from the UI, copy-paste statusline + hook + systemd snippets.
-- `Debug` — last `/usage` raw dump, parser output, ingest counters, schema version, paths, and a Retrain button that lets the orchestrator self-heal the extractor on demand.
+- `Debug` — last `/usage` raw dump, parser output, ingest counters, schema version, paths, and a Retrain button that triggers an on-demand extractor self-heal.
 
-Per-OS installers and the opt-in **Join the pack** community-insights upload are next — see [Privacy](#privacy) for what that's for and what it would and wouldn't share.
+Two more pages exist behind direct URLs but stay out of the sidebar in v0.1 until the visuals get a polish pass: `/compactions` (every confirmed `/compact`, broken down by warm vs cold cache state) and `/leaks` (avoidable spend ranked — idle misses, rotations, restructures, cold compactions).
+
+The opt-in **Join the pack** community-insights upload is next — see [Privacy](#privacy) for what that's for and what it would and wouldn't share.
 
 ## How it works
 
@@ -47,7 +47,7 @@ Your currency is the percentage shown in `/usage`. Bloodhound never asks you to 
 
 ## Self-healing extractor
 
-The `/usage` panel is a TUI, and Anthropic ships layout changes without warning. Bloodhound parses it with a regex DSL stored at `$XDG_STATE_HOME/bloodhound/extractors.json`. When the bundled defaults stop matching, the daemon auto-heals: it spawns a fresh `claude -p` as an orchestrator and hands it four MCP tools (`read_pty`, `send_keys`, `test_regex`, `save_extractor`) to drive a live pty session, re-learn the field positions, and persist a working extractor. Gated by `extractor_self_heal` in the config (default on). You can also trigger one on demand via the Retrain button on the Debug page or `POST /api/extractor/retrain`. The version number in the file is checked at load time; older files fall back gracefully to the bundled defaults until the next heal.
+The `/usage` panel is a TUI, and Anthropic ships layout changes without warning. Bloodhound parses it with a regex DSL stored at `$XDG_STATE_HOME/bloodhound/extractors.json`. When the bundled defaults stop matching, the daemon auto-heals: it spawns a second interactive `claude` in its own pty as an orchestrator and hands it four MCP tools (`read_pty`, `send_keys`, `test_regex`, `save_extractor`) to drive a live pty session, re-learn the field positions, and persist a working extractor. Running the orchestrator as a *second interactive* claude rather than `claude -p` means the heal cost lands on your subscription instead of the Agent SDK credit pool. Gated by `extractor_self_heal` in the config (default on). You can also trigger one on demand via the Retrain button on the Debug page or `POST /api/extractor/retrain`. The version number in the file is checked at load time; older files fall back gracefully to the bundled defaults until the next heal.
 
 ## Privacy
 
@@ -81,16 +81,18 @@ This is all moot until the upload server exists. When it does, joining will be a
 
 ### Platforms
 
-The daemon is pure-Go and ships pre-built for Linux, macOS, and Windows × amd64 / arm64. The native GUI is a Wails app, and right now it only ships pre-built for Linux x86_64. Daemon-only setups give you the full API — the GUI is just a viewer on top.
+The daemon is pure-Go and ships pre-built for Linux and macOS × amd64 / arm64. The native GUI is a Wails app and ships pre-built for Linux x86_64 only. Daemon-only setups give you the full API — the GUI is just a viewer on top.
 
-|                       | Daemon (pre-built) | GUI (pre-built) | Notes                                          |
-| --------------------- | ------------------ | --------------- | ---------------------------------------------- |
-| Linux x86_64          | ✅                  | ✅               | Primary development target.                    |
-| Linux arm64           | ✅                  | build from source | Daemon tested in CI; GUI build unverified.    |
-| macOS arm64 / amd64   | ✅                  | build from source | Daemon tested in CI; GUI build unverified.    |
-| Windows amd64         | ✅                  | build from source | Daemon tested in CI; GUI build unverified.    |
+Both binaries compile cleanly for every other platform listed below; what's missing is the *release pipeline* extension (macOS GUI needs a `macos-*` runner in the release workflow; Windows wants real-hardware validation before it gets a release artifact). The CI-verified column is what makes that gap fillable as soon as someone reports back from a real machine.
 
-**Help me test Bloodhound on your platform.** I develop on Linux x86_64, so that's the only combo I exercise end-to-end. If you try Bloodhound on macOS, Windows, or Linux arm64 — daemon-only or full GUI — open [an issue](https://github.com/PeterSR/claude-code-bloodhound/issues) with your `bloodhound doctor` output and what worked or broke. Platform fixes get fast-tracked, and credited.
+|                       | Daemon (pre-built) | GUI (pre-built) | CI-verified compile         |
+| --------------------- | :----------------: | :-------------: | --------------------------- |
+| Linux x86_64          | ✅                  | ✅               | daemon + GUI                |
+| Linux arm64           | ✅                  | build from source | daemon + GUI               |
+| macOS arm64 / amd64   | ✅                  | build from source | daemon + GUI               |
+| Windows amd64         | build from source  | build from source | daemon + GUI               |
+
+**Help me test Bloodhound on your platform.** I develop on Linux x86_64, so that's the only combo I exercise end-to-end. The other rows compile in CI but haven't been driven against a real `claude` session by anyone yet — especially Windows, where the daemon talks to Claude Code via a freshly-written ConPTY shim that mirrors the Unix pty path on paper but is unproven in practice. If you try Bloodhound on macOS, Windows, or Linux arm64 — daemon-only or full GUI — open [an issue](https://github.com/PeterSR/claude-code-bloodhound/issues) with your `bloodhound doctor` output and what worked or broke. Platform fixes get fast-tracked, and credited.
 
 First-launch friction to expect on unsigned binaries:
 
