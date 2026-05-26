@@ -63,6 +63,14 @@ jobs:
 
       - name: Build bloodhound-gui
         shell: bash
+        env:
+          # macOS: Wails references UTType which lives in
+          # UniformTypeIdentifiers.framework, but the Wails Go code
+          # doesn't add it via `// #cgo LDFLAGS:`. Inject the framework
+          # flag from the workflow so `go build` produces a binary that
+          # links. No effect on Linux / Windows (the env var is just
+          # consumed by the cgo linker on darwin).
+          CGO_LDFLAGS: ${{ runner.os == 'macOS' && '-framework UniformTypeIdentifiers' || '' }}
         run: |
           go build \
             -tags '${{ matrix.tags }}' \
