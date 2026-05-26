@@ -83,3 +83,25 @@ jobs:
           name: bloodhound-gui-${{ matrix.target }}
           path: bloodhound-gui-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
+
+      # Daemon is pure-Go (CGO_ENABLED=0), so this is a compile-only
+      # sanity check rather than a packaging step. Mainly here to catch
+      # Windows-specific breakage in internal/pty's ConPTY backend
+      # before it reaches the release pipeline. Linux/macOS already
+      # build cleanly in the daemon goreleaser path; the artifact
+      # confirms the same goes for Windows.
+      - name: Build bloodhound daemon (compile sanity)
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          go build \
+            -ldflags "-s -w -X github.com/PeterSR/claude-code-bloodhound/internal/version.Version=spike-${{ github.sha }}" \
+            -o 'bloodhound-${{ matrix.target }}${{ matrix.ext }}' \
+            ./cmd/bloodhound
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloodhound-${{ matrix.target }}
+          path: bloodhound-${{ matrix.target }}${{ matrix.ext }}
+          if-no-files-found: error
