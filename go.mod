@@ -3,6 +3,7 @@ module github.com/PeterSR/claude-code-bloodhound
 go 1.25.8
 
 require (
+	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/charmbracelet/x/vt v0.0.0-20260519012233-798e623c8447
 	github.com/creack/pty v1.1.24
 	github.com/mark3labs/mcp-go v0.54.0

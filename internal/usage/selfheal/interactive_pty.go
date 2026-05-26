@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/pty"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
-	"github.com/creack/pty"
 )
 
 // ClaudeLaunch is the set of knobs we hand to interactive `claude` when
@@ -62,7 +62,7 @@ type ClaudeLaunch struct {
 // ClaudeSession is one running interactive claude under Go control.
 type ClaudeSession struct {
 	cmd  *exec.Cmd
-	pty  *os.File
+	pty  pty.Master
 	sess *Session
 
 	// exited closes when the child process has been reaped. Used by

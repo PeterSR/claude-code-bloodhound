@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/pty"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
 )
 
@@ -22,7 +22,7 @@ import (
 type Session struct {
 	// ptyMaster is the host end of the pty pair. Writes go to claude's
 	// stdin; reads pick up claude's terminal output.
-	ptyMaster *os.File
+	ptyMaster pty.Master
 
 	// required holds the field names every saved extractor must include
 	// and successfully extract against. Frozen for the session lifetime.
@@ -42,7 +42,7 @@ type Session struct {
 // NewSession wires a Session around an already-opened pty master and
 // starts a read goroutine. The caller still owns the inner claude
 // process; the Session only manipulates its tty.
-func NewSession(ptyMaster *os.File, required []string) *Session {
+func NewSession(ptyMaster pty.Master, required []string) *Session {
 	s := &Session{
 		ptyMaster:   ptyMaster,
 		required:    required,

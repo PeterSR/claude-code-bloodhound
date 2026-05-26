@@ -1,5 +1,3 @@
-//go:build linux || darwin || freebsd || openbsd || netbsd
-
 package usage
 
 import (
@@ -12,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/PeterSR/claude-code-bloodhound/internal/pty"
 )
 
 // promptChar is the cursor character claude renders at the start of any

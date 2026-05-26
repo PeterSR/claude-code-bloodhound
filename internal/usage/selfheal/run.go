@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/PeterSR/claude-code-bloodhound/internal/pty"
 )
 
 // Options configures one self-heal attempt.
