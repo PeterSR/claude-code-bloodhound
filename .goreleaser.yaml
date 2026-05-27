@@ -30,9 +30,11 @@ builds:
     goarch:
       - amd64
       - arm64
-    ignore:
-      # Windows ConPTY driver isn't shipped yet.
-      - goos: windows
+    # All four target families ship. Windows is experimental — the
+    # ConPTY-backed pty shim (internal/pty/pty_windows.go) compiles
+    # cleanly and is exercised on a Windows runner in the spike
+    # workflow, but no one has driven a real `claude` through it yet.
+    # See the "Help me test" framing in the README.
 
   # GUI: Wails v2 over GTK3 + WebKit2GTK 4.1. CGO-dependent — only
   # builds on Linux amd64 from a workflow runner that has the dev
