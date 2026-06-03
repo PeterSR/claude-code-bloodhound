@@ -373,6 +373,56 @@ func (s *Store) ListTrailBriefs(ctx context.Context) ([]TrailBrief, error) {
 	return out, rows.Err()
 }
 
+// GetTrailBrief returns one session's current brief, or nil.
+func (s *Store) GetTrailBrief(ctx context.Context, uuid string) (*TrailBrief, error) {
+	var b TrailBrief
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT session_uuid, project, cwd, headline, summary, updated_unix_ms, analyzed_runs
+		FROM trail_briefs WHERE session_uuid = ?
+	`, uuid).Scan(&b.SessionUUID, &b.Project, &b.Cwd, &b.Headline, &b.Summary, &b.UpdatedUnixMS, &b.AnalyzedRuns)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// TrailLoopsForSession returns all loops for one session (incl. resolved
+// / stale), so the analyzer can be fed prior loop keys to carry forward.
+func (s *Store) TrailLoopsForSession(ctx context.Context, uuid string) ([]TrailLoop, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT session_uuid, loop_key, text, status, related_repo_path,
+		       first_seen_unix_ms, last_seen_unix_ms,
+		       user_status, user_note, user_updated_unix_ms
+		FROM trail_open_loops WHERE session_uuid = ?
+		ORDER BY last_seen_unix_ms DESC
+	`, uuid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TrailLoop
+	for rows.Next() {
+		var l TrailLoop
+		var us sql.NullString
+		var uu sql.NullInt64
+		if err := rows.Scan(&l.SessionUUID, &l.LoopKey, &l.Text, &l.Status, &l.RelatedRepoPath,
+			&l.FirstSeenUnixMS, &l.LastSeenUnixMS, &us, &l.UserNote, &uu); err != nil {
+			return out, err
+		}
+		if us.Valid {
+			l.UserStatus = &us.String
+		}
+		if uu.Valid {
+			l.UserUpdatedUnixMS = &uu.Int64
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 // ListTrailRepos returns all session<->repo edges.
 func (s *Store) ListTrailRepos(ctx context.Context) ([]TrailRepo, error) {
 	rows, err := s.DB.QueryContext(ctx, `

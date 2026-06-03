@@ -31,6 +31,10 @@ type Info struct {
 	// the same value for every worktree of one repo, so it groups
 	// worktrees. "" when not a git worktree.
 	CommonDir string
+	// Root is `git rev-parse --show-toplevel` — the worktree's top
+	// directory. "" when not a git worktree (caller falls back to the
+	// path itself).
+	Root string
 }
 
 // Look resolves live info for a worktree path. Cheap (a couple of short
@@ -59,6 +63,12 @@ func Look(path, branchCached string) Info {
 			cd = filepath.Join(path, cd)
 		}
 		info.CommonDir = filepath.Clean(cd)
+	}
+	// Worktree top dir — the natural repo_path even when cwd is a subdir.
+	if root, ok := gitOut(ctx, path, "rev-parse", "--show-toplevel"); ok && root != "" {
+		info.Exists = true
+		info.Root = filepath.Clean(root)
+		info.Dirname = filepath.Base(info.Root)
 	}
 	return info
 }
