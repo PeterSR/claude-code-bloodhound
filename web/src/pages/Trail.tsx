@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Footprints,
+  PawPrint,
   GitBranch,
   FolderGit2,
   Check,
@@ -78,7 +78,7 @@ export default function Trail() {
     <div>
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <Footprints className="size-5 text-rose-500" />
+          <PawPrint className="size-5 text-rose-500" />
           <h1 className="text-2xl font-semibold tracking-tight">Trail</h1>
         </div>
         <div className="flex items-center gap-3">

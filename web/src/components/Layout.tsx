@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { Outlet, NavLink } from 'react-router-dom';
 import {
   Activity,
-  Footprints,
+  PawPrint,
   History as HistoryIcon,
   Files,
   // Combine, Droplet — re-enable when Compactions / Leaks nav is restored.
@@ -21,9 +21,9 @@ type NavItem = {
 
 const NAV: NavItem[] = [
   { to: '/', label: 'Now', icon: Activity, end: true },
-  { to: '/trail', label: 'Trail', icon: Footprints },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/sessions', label: 'Sessions', icon: Files },
+  { to: '/trail', label: 'Trail', icon: PawPrint },
   // Hidden until polished — routes still live in App.tsx so /compactions
   // and /leaks remain reachable by URL for testing. Re-add Combine /
   // Droplet to the lucide import above when restoring.
