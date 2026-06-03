@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Outlet, NavLink } from 'react-router-dom';
 import {
   Activity,
+  Footprints,
   History as HistoryIcon,
   Files,
   // Combine, Droplet — re-enable when Compactions / Leaks nav is restored.
@@ -20,6 +21,7 @@ type NavItem = {
 
 const NAV: NavItem[] = [
   { to: '/', label: 'Now', icon: Activity, end: true },
+  { to: '/trail', label: 'Trail', icon: Footprints },
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/sessions', label: 'Sessions', icon: Files },
   // Hidden until polished — routes still live in App.tsx so /compactions
