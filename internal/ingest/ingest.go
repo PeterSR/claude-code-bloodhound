@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
@@ -30,6 +31,7 @@ type Stats struct {
 	FilesScanned      int
 	FilesSkippedMtime int
 	FilesSkippedSmall int
+	FilesSkippedTrail int
 	FilesParsed       int
 	TurnsAdded        int
 	CompactionsAdded  int
@@ -63,11 +65,26 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 		return st, err
 	}
 
+	// Trail's own analyzer runs as `claude` with a known session-id and
+	// writes JSONL like any other session. Skip those files entirely so
+	// the analyzer's turns never enter the turns table — Trail cost is
+	// attributed separately via trail_runs. Loaded once per ingest run.
+	trailSkip, err := s.TrailSessionUUIDs(ctx)
+	if err != nil {
+		// Non-fatal: worst case a few analyzer turns leak into stats.
+		trailSkip = nil
+	}
+
 	for _, p := range files {
 		if err := ctx.Err(); err != nil {
 			return st, err
 		}
 		st.FilesScanned++
+
+		if trailSkip[sessionUUIDFromPath(p)] {
+			st.FilesSkippedTrail++
+			continue
+		}
 
 		info, err := os.Stat(p)
 		if err != nil {
@@ -136,6 +153,13 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 
 	st.ElapsedS = time.Since(t0).Seconds()
 	return st, nil
+}
+
+// sessionUUIDFromPath derives the session UUID from a JSONL path the
+// same way parseFile does (basename minus ".jsonl"), for the trail-skip
+// check without opening the file.
+func sessionUUIDFromPath(p string) string {
+	return strings.TrimSuffix(filepath.Base(p), ".jsonl")
 }
 
 func findSessionFiles(dir string) ([]string, error) {
