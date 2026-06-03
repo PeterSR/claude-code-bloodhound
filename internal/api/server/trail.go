@@ -15,7 +15,13 @@ func (s *Server) handleTrail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
 
-	out := routes.TrailResponse{ServerNowMS: now.UnixMilli()}
+	// Initialise slices so empties serialise as [] not null — a null
+	// would crash array access in the client.
+	out := routes.TrailResponse{
+		ServerNowMS: now.UnixMilli(),
+		Sessions:    []routes.TrailSession{},
+		Repos:       []routes.TrailRepoGroup{},
+	}
 	if cfg, err := config.Load(); err == nil {
 		out.Enabled = cfg.TrailEnabled
 		out.Mode = cfg.TrailMode
@@ -68,6 +74,8 @@ func (s *Server) handleTrail(w http.ResponseWriter, r *http.Request) {
 			Summary:       b.Summary,
 			UpdatedUnixMS: b.UpdatedUnixMS,
 			AnalyzedRuns:  b.AnalyzedRuns,
+			Repos:         []routes.TrailRepoRef{},
+			OpenLoops:     []routes.TrailLoop{},
 		}
 		for _, rp := range reposBySession[b.SessionUUID] {
 			lv := resolve(rp.RepoPath, rp.BranchCached)

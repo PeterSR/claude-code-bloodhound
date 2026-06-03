@@ -179,7 +179,7 @@ function SessionView({ sessions, onResolve }: { sessions: Session[]; onResolve: 
           </div>
           <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-3">{s.summary}</p>
 
-          {s.repos.length > 0 && (
+          {s.repos && s.repos.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-3">
               {s.repos.map((r) => (
                 <RepoChip key={r.path} repo={r} />
@@ -187,7 +187,7 @@ function SessionView({ sessions, onResolve }: { sessions: Session[]; onResolve: 
             </div>
           )}
 
-          {s.open_loops.length > 0 && (
+          {s.open_loops && s.open_loops.length > 0 && (
             <div className="space-y-1.5">
               {s.open_loops.map((l) => (
                 <LoopRow key={l.key} loop={l} onResolve={onResolve} />
@@ -279,14 +279,14 @@ function RepoView({ repos }: { repos: RepoGroup[] }) {
                 <GitBranch className="size-3" />{g.branch}
               </span>
             )}
-            {g.sessions.length > 1 && (
+            {(g.sessions?.length ?? 0) > 1 && (
               <span className="rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider">
                 {g.sessions.length} sessions
               </span>
             )}
           </div>
           <div className="space-y-1 pl-6">
-            {g.sessions.map((s) => (
+            {(g.sessions ?? []).map((s) => (
               <div key={s.session_uuid} className="flex items-center gap-2 text-sm">
                 <span className={[
                   'rounded px-1 text-[10px] uppercase tracking-wider',
