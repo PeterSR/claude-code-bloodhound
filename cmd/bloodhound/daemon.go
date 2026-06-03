@@ -178,20 +178,21 @@ For one-shot CI-style execution that does each job once and exits, pass
 		schedule("poll", pollIvl, func() { runPollOnce(ctx, cfg, s, w) })
 		schedule("ingest", ingestIvl, func() { runIngestOnce(ctx, s, w) })
 		schedule("aggregate", aggIvl, func() { runAggregateOnce(ctx, s, w) })
-		if cfg.TrailEnabled {
-			// Re-read config each tick so toggling trail_mode / window in
-			// the UI takes effect without a daemon restart.
-			schedule("trail", trailIvl, func() {
-				tc, err := config.Load()
-				if err != nil {
-					tc = cfg
-				}
-				if !tc.TrailEnabled {
-					return
-				}
-				runTrailOnce(ctx, tc, s, w)
-			})
-		}
+		// Always schedule the trail ticker; gate per-tick on the LIVE
+		// config so enabling/disabling Trail (or changing mode/window) in
+		// the UI takes effect without a daemon restart. (Scheduling it
+		// only when enabled-at-startup was a bug: toggling it on later
+		// never started the job.)
+		schedule("trail", trailIvl, func() {
+			tc, err := config.Load()
+			if err != nil {
+				tc = cfg
+			}
+			if !tc.TrailEnabled {
+				return
+			}
+			runTrailOnce(ctx, tc, s, w)
+		})
 
 		<-ctx.Done()
 		fmt.Fprintln(w, "[daemon] waiting for in-flight jobs")

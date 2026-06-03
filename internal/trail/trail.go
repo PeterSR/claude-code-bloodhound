@@ -25,6 +25,12 @@ import (
 // runs (and cost).
 const maxSessionsPerCycle = 12
 
+// seedLookbackMS bounds the first-sight seed: when Trail meets a session
+// for the first time it summarises activity within this recent window
+// rather than nothing (better first-run) or the whole history (bounded
+// cost). The analyzer additionally caps fed text at maxFedChars.
+const seedLookbackMS = 6 * 60 * 60 * 1000 // 6h
+
 // Stats summarises one Run.
 type Stats struct {
 	Considered int
@@ -84,29 +90,41 @@ func Run(ctx context.Context, s *store.Store, cfg config.Config, w io.Writer) (S
 			st.Errors = append(st.Errors, ref.UUID+": watermark: "+err.Error())
 			continue
 		}
-		if wm == nil {
-			// First sight: record how far we've seen, analyse nothing.
-			_, maxTS, _, rerr := ReadSince(path, 1<<62)
-			if rerr != nil {
-				st.Errors = append(st.Errors, ref.UUID+": scan: "+rerr.Error())
-				continue
+
+		// Watermark to read from. On first sight there's no prior
+		// watermark; rather than wait a whole cycle producing nothing, we
+		// SEED from a bounded recent window (the analyzer only ever sees
+		// the last maxFedChars anyway). On subsequent cycles we read only
+		// the delta past the watermark.
+		firstSight := wm == nil
+		sinceMS := int64(0)
+		if firstSight {
+			sinceMS = t0.UnixMilli() - seedLookbackMS
+			if sinceMS < 0 {
+				sinceMS = 0
 			}
-			_ = s.SetTrailWatermark(ctx, store.TrailWatermark{
-				SessionUUID:           ref.UUID,
-				FirstSeenUnixMS:       t0.UnixMilli(),
-				AnalyzedThroughUnixMS: maxTS,
-			})
-			st.FirstSeen++
-			continue
+		} else {
+			sinceMS = wm.AnalyzedThroughUnixMS
 		}
 
-		recs, maxTS, cwd, rerr := ReadSince(path, wm.AnalyzedThroughUnixMS)
+		recs, maxTS, cwd, rerr := ReadSince(path, sinceMS)
 		if rerr != nil {
 			st.Errors = append(st.Errors, ref.UUID+": read: "+rerr.Error())
 			continue
 		}
 		if len(recs) == 0 {
-			st.Skipped++
+			// Nothing to summarise. On first sight still drop a watermark
+			// so we don't re-scan from scratch next cycle.
+			if firstSight {
+				_ = s.SetTrailWatermark(ctx, store.TrailWatermark{
+					SessionUUID:           ref.UUID,
+					FirstSeenUnixMS:       t0.UnixMilli(),
+					AnalyzedThroughUnixMS: maxTS,
+				})
+				st.FirstSeen++
+			} else {
+				st.Skipped++
+			}
 			continue
 		}
 		if cwd == "" {
