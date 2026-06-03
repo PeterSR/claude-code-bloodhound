@@ -15,4 +15,6 @@ const (
 	PathLeaks            = "/api/leaks"
 	PathSettings         = "/api/settings"
 	PathExtractorRetrain = "/api/extractor/retrain"
+	PathTrail            = "/api/trail"
+	PathTrailResolve     = "/api/trail/resolve"
 )
