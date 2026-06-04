@@ -303,6 +303,29 @@ func (s *Store) FinishTrailRun(ctx context.Context, r TrailRun) error {
 	return err
 }
 
+// PruneTrailByCwd removes Trail's own output (briefs/repos/loops) for
+// sessions whose brief cwd matches the given dir — used to evict
+// bloodhound machinery sessions (self-heal, analyzers) that were
+// summarised before the cwd guard existed. Watermarks are kept (cheap,
+// and they prevent a rescan). Touches ONLY trail_* tables.
+func (s *Store) PruneTrailByCwd(ctx context.Context, cwd string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, q := range []string{
+		`DELETE FROM trail_brief_repos WHERE session_uuid IN (SELECT session_uuid FROM trail_briefs WHERE cwd = ?)`,
+		`DELETE FROM trail_open_loops  WHERE session_uuid IN (SELECT session_uuid FROM trail_briefs WHERE cwd = ?)`,
+		`DELETE FROM trail_briefs WHERE cwd = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, q, cwd); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // TrailSessionUUIDs returns the set of analyzer session UUIDs, for the
 // ingester to skip (so analyzer turns never enter the turns table).
 func (s *Store) TrailSessionUUIDs(ctx context.Context) (map[string]bool, error) {

@@ -119,7 +119,12 @@ func extractText(raw json.RawMessage) string {
 			b.WriteString(bl.Text)
 			b.WriteByte('\n')
 		case "tool_use":
-			b.WriteString("[tool: " + bl.Name + " " + truncate(string(bl.Input), 200) + "]\n")
+			// Only the tool name + a whitelisted "target" field. Dumping
+			// raw input bled tool-call markup into briefs (most visibly
+			// when Trail summarises bloodhound's own dev session); the
+			// target (file path / command) is the part that carries
+			// signal — it's how the analyzer spots incidental repos.
+			b.WriteString("[tool: " + bl.Name + toolTarget(bl.Input) + "]\n")
 		case "tool_result":
 			// Results are usually large + low-signal for a work summary;
 			// just note one happened.
@@ -127,6 +132,37 @@ func extractText(raw json.RawMessage) string {
 		}
 	}
 	return b.String()
+}
+
+// toolTarget extracts the salient argument of a tool call — the file
+// being edited, the command being run — and nothing else. Unknown
+// shapes yield "".
+func toolTarget(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	for _, k := range []string{"file_path", "path", "notebook_path", "command", "pattern", "url"} {
+		if v, ok := m[k].(string); ok && v != "" {
+			return " " + sanitizeOneLine(truncate(v, 120))
+		}
+	}
+	return ""
+}
+
+// sanitizeOneLine strips markup-significant and control characters so a
+// tool argument can never smuggle tag-like syntax into the analyzer feed.
+func sanitizeOneLine(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '<' || r == '>' || r < 32 {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(s)
 }
 
 func truncate(s string, n int) string {

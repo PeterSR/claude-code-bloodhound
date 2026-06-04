@@ -35,12 +35,18 @@ type Session = {
   repos: RepoRef[];
   open_loops: Loop[];
 };
-type RepoGroup = {
+type RepoSessionRef = { session_uuid: string; headline: string; role: string };
+type Worktree = {
   path: string;
   dirname: string;
   branch: string;
-  common_dir?: string;
-  sessions: { session_uuid: string; headline: string; role: string }[];
+  sessions: RepoSessionRef[];
+};
+type RepoGroup = {
+  key: string;
+  dirname: string;
+  is_repo: boolean;
+  worktrees: Worktree[];
 };
 type Cost = {
   runs: number;
@@ -257,11 +263,19 @@ function LoopRow({ loop, onResolve }: { loop: Loop; onResolve: () => void }) {
   );
 }
 
+function sessionCount(g: RepoGroup): number {
+  const seen = new Set<string>();
+  for (const wt of g.worktrees ?? []) {
+    for (const s of wt.sessions ?? []) seen.add(s.session_uuid);
+  }
+  return seen.size;
+}
+
 function RepoView({ repos }: { repos: RepoGroup[] }) {
-  // Surface overlaps (>1 session) first. useMemo must run before any
-  // early return to satisfy the rules of hooks.
+  // Surface the busiest repos (most distinct sessions) first. useMemo
+  // must run before any early return to satisfy the rules of hooks.
   const sorted = useMemo(
-    () => [...(repos ?? [])].sort((a, b) => b.sessions.length - a.sessions.length),
+    () => [...(repos ?? [])].sort((a, b) => sessionCount(b) - sessionCount(a)),
     [repos],
   );
   if (!repos || repos.length === 0) {
@@ -269,39 +283,71 @@ function RepoView({ repos }: { repos: RepoGroup[] }) {
   }
   return (
     <div className="space-y-3">
-      {sorted.map((g) => (
-        <div key={g.path} className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <FolderGit2 className="size-4 text-zinc-500" />
-            <span className="font-mono text-sm font-medium">{g.dirname || g.path}</span>
-            {g.branch && (
-              <span className="inline-flex items-center gap-0.5 text-[11px] text-zinc-500">
-                <GitBranch className="size-3" />{g.branch}
-              </span>
-            )}
-            {(g.sessions?.length ?? 0) > 1 && (
-              <span className="rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider">
-                {g.sessions.length} sessions
-              </span>
-            )}
-          </div>
-          <div className="space-y-1 pl-6">
-            {(g.sessions ?? []).map((s) => (
-              <div key={s.session_uuid} className="flex items-center gap-2 text-sm">
-                <span className={[
-                  'rounded px-1 text-[10px] uppercase tracking-wider',
-                  s.role === 'primary' ? 'text-rose-600 dark:text-rose-400' : 'text-zinc-500',
-                ].join(' ')}>
-                  {s.role}
+      {sorted.map((g) => {
+        const n = sessionCount(g);
+        const wts = g.worktrees ?? [];
+        // A repo with one worktree named like the repo needs no second
+        // header level — collapse repo+worktree into one line.
+        const collapse = wts.length === 1 && wts[0].dirname === g.dirname;
+        return (
+          <div key={g.key} className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <FolderGit2 className="size-4 text-zinc-500" />
+              <span className="font-mono text-sm font-medium">{g.dirname}</span>
+              {!g.is_repo && (
+                <span className="text-[10px] uppercase tracking-wider text-zinc-400">not a git repo</span>
+              )}
+              {collapse && wts[0].branch && (
+                <span className="inline-flex items-center gap-0.5 text-[11px] text-zinc-500">
+                  <GitBranch className="size-3" />{wts[0].branch}
                 </span>
-                <Link to={`/sessions/${s.session_uuid}`} className="hover:text-rose-500 truncate">
-                  {s.headline || s.session_uuid.slice(0, 8)}
-                </Link>
-              </div>
-            ))}
+              )}
+              {n > 1 && (
+                <span className="rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider">
+                  {n} sessions
+                </span>
+              )}
+            </div>
+            <div className="space-y-2 pl-2">
+              {wts.map((wt) => (
+                <div key={wt.path}>
+                  {!collapse && (
+                    <div className="flex items-center gap-1.5 text-[12px] text-zinc-600 dark:text-zinc-400 mb-1" title={wt.path}>
+                      <span className="text-zinc-400">└</span>
+                      <span className="font-mono">{wt.dirname}</span>
+                      {wt.branch && (
+                        <span className="inline-flex items-center gap-0.5 text-[11px] text-zinc-500">
+                          <GitBranch className="size-3" />{wt.branch}
+                        </span>
+                      )}
+                      {(wt.sessions?.length ?? 0) > 1 && (
+                        <span className="rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider">
+                          {wt.sessions.length} here
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  <div className={collapse ? 'space-y-1 pl-4' : 'space-y-1 pl-8'}>
+                    {(wt.sessions ?? []).map((s) => (
+                      <div key={s.session_uuid} className="flex items-center gap-2 text-sm">
+                        <span className={[
+                          'rounded px-1 text-[10px] uppercase tracking-wider',
+                          s.role === 'primary' ? 'text-rose-600 dark:text-rose-400' : 'text-zinc-500',
+                        ].join(' ')}>
+                          {s.role}
+                        </span>
+                        <Link to={`/sessions/${s.session_uuid}`} className="hover:text-rose-500 truncate">
+                          {s.headline || s.session_uuid.slice(0, 8)}
+                        </Link>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

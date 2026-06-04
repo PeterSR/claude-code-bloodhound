@@ -118,9 +118,12 @@ func buildPrompt(in Input) string {
 Now call save_trail_brief with:
   - headline: <=60 chars, scannable (e.g. "Deploy dry-run flag").
   - summary: 1-3 sentences on what this session is doing.
-  - repos: worktrees this session touched. The cwd above is its PRIMARY
-    worktree; list any OTHER worktree paths it edited as role=incidental.
-    Use absolute paths.
+  - repos: worktrees/directories this session OPERATED IN — where it
+    edited, read, or ran commands (visible in the [tool: ...] markers),
+    not merely where claude happened to be running. The cwd above is its
+    PRIMARY worktree; list any OTHER paths it operated in as
+    role=incidental. Use absolute paths (the worktree/repo root, not the
+    individual file).
   - open_loops: outstanding tasks / things explicitly deferred ("hold off
     until X"), each with status active|blocked|waiting|done. When a loop
     is waiting on work in another worktree, set related_repo_path to that

@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"path/filepath"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
@@ -60,6 +61,14 @@ func Run(ctx context.Context, s *store.Store, cfg config.Config, w io.Writer) (S
 		return st, err
 	}
 	stateDir, _ := config.StateDir()
+
+	// Prune any briefs for bloodhound's OWN machinery sessions (self-heal
+	// orchestrator + inner scrape, Trail analyzers) that slipped in before
+	// the cwd guard below existed. All machinery runs with cwd pinned to
+	// the state dir; real work never lives there.
+	if stateDir != "" {
+		_ = s.PruneTrailByCwd(ctx, stateDir)
+	}
 
 	refs, err := sessioninsight.RecentN(ctx, s.DB, t0, window, maxSessionsPerCycle)
 	if err != nil {
@@ -129,6 +138,20 @@ func Run(ctx context.Context, s *store.Store, cfg config.Config, w io.Writer) (S
 		}
 		if cwd == "" {
 			cwd = ref.Project
+		}
+
+		// Machinery guard: bloodhound's own claude sessions (self-heal
+		// orchestrator + inner scrape, Trail analyzers) all run with cwd
+		// pinned to the state dir. They're plumbing, not your work —
+		// advance the watermark and move on.
+		if stateDir != "" && filepath.Clean(cwd) == filepath.Clean(stateDir) {
+			_ = s.SetTrailWatermark(ctx, store.TrailWatermark{
+				SessionUUID:           ref.UUID,
+				FirstSeenUnixMS:       t0.UnixMilli(),
+				AnalyzedThroughUnixMS: maxTS,
+			})
+			st.Skipped++
+			continue
 		}
 
 		prior, _ := s.GetTrailBrief(ctx, ref.UUID)

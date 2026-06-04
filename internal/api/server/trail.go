@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
@@ -22,16 +24,30 @@ func (s *Server) handleTrail(w http.ResponseWriter, r *http.Request) {
 		Sessions:    []routes.TrailSession{},
 		Repos:       []routes.TrailRepoGroup{},
 	}
+	// Briefs older than the recent-session window drop off the page —
+	// Trail is an overview of what's IN FLIGHT, not an archive. The rows
+	// stay in the store; tighten/loosen via recent_session_window_s.
+	recentWindowS := 86400
 	if cfg, err := config.Load(); err == nil {
 		out.Enabled = cfg.TrailEnabled
 		out.Mode = cfg.TrailMode
 		out.IntervalS = cfg.TrailIntervalS
+		if cfg.RecentSessionWindowS > 0 {
+			recentWindowS = cfg.RecentSessionWindowS
+		}
 	}
+	cutoffMS := now.UnixMilli() - int64(recentWindowS)*1000
 
-	briefs, err := s.Store.ListTrailBriefs(ctx)
+	allBriefs, err := s.Store.ListTrailBriefs(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
+	}
+	briefs := allBriefs[:0]
+	for _, b := range allBriefs {
+		if b.UpdatedUnixMS >= cutoffMS {
+			briefs = append(briefs, b)
+		}
 	}
 	repos, _ := s.Store.ListTrailRepos(ctx)
 	loops, _ := s.Store.ListTrailLoops(ctx, false) // open loops only (effective)
@@ -92,18 +108,30 @@ func (s *Server) handleTrail(w http.ResponseWriter, r *http.Request) {
 		out.Sessions = append(out.Sessions, ts)
 	}
 
-	// By-repo pivot. Group by live common-dir when available (so two
-	// worktrees of one repo collapse), else by path.
+	// By-repo pivot, three levels: repo (git common-dir; non-repo paths
+	// stand alone) → worktree folder (path + live branch) → sessions.
+	visible := map[string]bool{}
+	for _, b := range briefs {
+		visible[b.SessionUUID] = true
+	}
+	type wt struct {
+		ref  routes.TrailWorktree
+		seen map[string]bool
+	}
 	type grp struct {
-		ref      routes.TrailRepoGroup
-		sessions []routes.TrailRepoSessionRef
-		seen     map[string]bool
+		ref     routes.TrailRepoGroup
+		wts     map[string]*wt
+		wtOrder []string
 	}
 	groups := map[string]*grp{}
 	var order []string
 	for _, rp := range repos {
+		if !visible[rp.SessionUUID] {
+			continue
+		}
 		lv := resolve(rp.RepoPath, rp.BranchCached)
 		key := lv.commonDir
+		isRepo := key != ""
 		if key == "" {
 			key = rp.RepoPath
 		}
@@ -111,19 +139,31 @@ func (s *Server) handleTrail(w http.ResponseWriter, r *http.Request) {
 		if g == nil {
 			g = &grp{
 				ref: routes.TrailRepoGroup{
-					Path:      rp.RepoPath,
-					Dirname:   lv.dirname,
-					Branch:    lv.branch,
-					CommonDir: lv.commonDir,
+					Key:     key,
+					Dirname: repoDisplayName(key, lv.dirname, isRepo),
+					IsRepo:  isRepo,
 				},
-				seen: map[string]bool{},
+				wts: map[string]*wt{},
 			}
 			groups[key] = g
 			order = append(order, key)
 		}
-		if !g.seen[rp.SessionUUID] {
-			g.seen[rp.SessionUUID] = true
-			g.sessions = append(g.sessions, routes.TrailRepoSessionRef{
+		t := g.wts[rp.RepoPath]
+		if t == nil {
+			t = &wt{
+				ref: routes.TrailWorktree{
+					Path:    rp.RepoPath,
+					Dirname: lv.dirname,
+					Branch:  lv.branch,
+				},
+				seen: map[string]bool{},
+			}
+			g.wts[rp.RepoPath] = t
+			g.wtOrder = append(g.wtOrder, rp.RepoPath)
+		}
+		if !t.seen[rp.SessionUUID] {
+			t.seen[rp.SessionUUID] = true
+			t.ref.Sessions = append(t.ref.Sessions, routes.TrailRepoSessionRef{
 				SessionUUID: rp.SessionUUID,
 				Headline:    headlineBySession[rp.SessionUUID],
 				Role:        rp.Role,
@@ -132,7 +172,9 @@ func (s *Server) handleTrail(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, k := range order {
 		g := groups[k]
-		g.ref.Sessions = g.sessions
+		for _, wk := range g.wtOrder {
+			g.ref.Worktrees = append(g.ref.Worktrees, g.wts[wk].ref)
+		}
 		out.Repos = append(out.Repos, g.ref)
 	}
 
@@ -177,6 +219,21 @@ func (s *Server) handleTrailResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// repoDisplayName derives the repo-level label from the grouping key.
+// For git repos the key is the common dir (usually <main-worktree>/.git,
+// or a bare <name>.git); for non-repo paths it's the path itself, so the
+// worktree dirname doubles as the label.
+func repoDisplayName(key, dirname string, isRepo bool) string {
+	if !isRepo {
+		return dirname
+	}
+	base := filepath.Base(key)
+	if base == ".git" {
+		return filepath.Base(filepath.Dir(key))
+	}
+	return strings.TrimSuffix(base, ".git")
 }
 
 func toRouteLoop(l store.TrailLoop) routes.TrailLoop {

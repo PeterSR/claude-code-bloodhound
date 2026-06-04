@@ -49,17 +49,30 @@ type TrailLoop struct {
 	LastSeenUnixMS  int64  `json:"last_seen_unix_ms"`
 }
 
-// TrailRepoGroup is the by-repo pivot: one worktree and the sessions
-// touching it (the cross-cutting view).
+// TrailRepoGroup is the by-repo pivot, three levels deep:
+// repo (worktree-agnostic; IsRepo=false for non-git paths) → worktree
+// folder (path + live branch) → sessions touching it. Where a session
+// "touches" a worktree is where it operated — edited, read, ran
+// commands — not merely where claude happened to run.
 type TrailRepoGroup struct {
-	Path      string                `json:"path"`
-	Dirname   string                `json:"dirname"`
-	Branch    string                `json:"branch"`
-	CommonDir string                `json:"common_dir,omitempty"`
-	Sessions  []TrailRepoSessionRef `json:"sessions"`
+	// Key is the grouping identity: the git common-dir for repos, the
+	// raw path otherwise.
+	Key       string          `json:"key"`
+	Dirname   string          `json:"dirname"` // repo display name
+	IsRepo    bool            `json:"is_repo"`
+	Worktrees []TrailWorktree `json:"worktrees"`
 }
 
-// TrailRepoSessionRef links a repo group back to a session.
+// TrailWorktree is one worktree folder within a repo group (repos
+// without linked worktrees have exactly one).
+type TrailWorktree struct {
+	Path     string                `json:"path"`
+	Dirname  string                `json:"dirname"`
+	Branch   string                `json:"branch"`
+	Sessions []TrailRepoSessionRef `json:"sessions"`
+}
+
+// TrailRepoSessionRef links a worktree back to a session.
 type TrailRepoSessionRef struct {
 	SessionUUID string `json:"session_uuid"`
 	Headline    string `json:"headline"`
