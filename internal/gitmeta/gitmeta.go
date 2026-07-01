@@ -20,7 +20,7 @@ import (
 // Info is the live view of a worktree path.
 type Info struct {
 	// Dirname is filepath.Base(path) — the worktree directory name, the
-	// natural display label (e.g. "caterflow-new-k8s-platform").
+	// natural display label (e.g. "myapp-k8s-platform").
 	Dirname string
 	// Branch is the current checked-out branch, or "" if detached /
 	// unavailable.
