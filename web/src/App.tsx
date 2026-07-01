@@ -3,6 +3,7 @@ import { Dog } from 'lucide-react';
 import Layout from './components/Layout';
 import SetupWizard from './pages/Setup';
 import Now from './pages/Now';
+import Trail from './pages/Trail';
 import History from './pages/History';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
@@ -23,6 +24,7 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Now />} />
+          <Route path="trail" element={<Trail />} />
           <Route path="history" element={<History />} />
           <Route path="sessions" element={<Sessions />} />
           <Route path="sessions/:uuid" element={<SessionDetail />} />

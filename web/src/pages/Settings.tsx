@@ -15,6 +15,10 @@ type Config = {
   active_session_threshold_s: number;
   recent_session_window_s: number;
   extractor_self_heal: boolean;
+  trail_enabled: boolean;
+  trail_mode: string;
+  trail_interval_s: number;
+  trail_window_s: number;
 };
 
 type Snippets = {
@@ -161,6 +165,45 @@ export default function Settings() {
                 </div>
               </div>
             </label>
+          </Card>
+
+          <Card title="Trail — active-session tracker">
+            <label className="flex items-start gap-2 text-sm mb-3">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={draft.trail_enabled}
+                onChange={(e) => setDraft({ ...draft, trail_enabled: e.target.checked })}
+              />
+              <div>
+                <div>Enable Trail</div>
+                <div className="text-xs text-zinc-500 mt-0.5 max-w-xl">
+                  Passively summarises your recently-active sessions into per-session
+                  briefs + open loops. Drives <code className="font-mono text-xs">claude</code> to
+                  summarise, so it consumes usage — cost is attributed on the Trail page.
+                </div>
+              </div>
+            </label>
+            <FieldRow>
+              <Field label="Mode">
+                <select
+                  className="text-input"
+                  value={draft.trail_mode}
+                  onChange={(e) => setDraft({ ...draft, trail_mode: e.target.value })}
+                >
+                  <option value="interactive">interactive (subscription)</option>
+                  <option value="headless">headless (claude -p)</option>
+                </select>
+              </Field>
+              <Field label="Interval (s)">
+                <input type="number" className="text-input w-28" value={draft.trail_interval_s}
+                  onChange={(e) => setDraft({ ...draft, trail_interval_s: parseInt(e.target.value || '0', 10) })} />
+              </Field>
+              <Field label="Active window (s, 0 = use Now threshold)">
+                <input type="number" className="text-input w-28" value={draft.trail_window_s}
+                  onChange={(e) => setDraft({ ...draft, trail_window_s: parseInt(e.target.value || '0', 10) })} />
+              </Field>
+            </FieldRow>
           </Card>
 
           <Card title="Statusline">

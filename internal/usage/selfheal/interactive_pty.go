@@ -136,9 +136,9 @@ func buildClaudeArgs(l ClaudeLaunch) []string {
 // quieter rendering and TERM so the TUI is willing to draw.
 func subscriptionEnv() []string {
 	strip := map[string]struct{}{
-		"ANTHROPIC_API_KEY":   {},
+		"ANTHROPIC_API_KEY":    {},
 		"ANTHROPIC_AUTH_TOKEN": {},
-		"ANTHROPIC_BASE_URL":  {},
+		"ANTHROPIC_BASE_URL":   {},
 	}
 	src := os.Environ()
 	out := make([]string, 0, len(src)+2)

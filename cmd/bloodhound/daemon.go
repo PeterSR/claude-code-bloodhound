@@ -20,6 +20,7 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
+	"github.com/PeterSR/claude-code-bloodhound/internal/trail"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage/selfheal"
 )
@@ -28,6 +29,7 @@ var (
 	daemonPollIntervalS      int
 	daemonIngestIntervalS    int
 	daemonAggregateIntervalS int
+	daemonTrailIntervalS     int
 	daemonRunOnce            bool
 	daemonLogFile            string
 	daemonNoLogFile          bool
@@ -89,6 +91,7 @@ For one-shot CI-style execution that does each job once and exits, pass
 		pollIvl := durationS(daemonPollIntervalS, cfg.PollIntervalS, 300)
 		ingestIvl := durationS(daemonIngestIntervalS, cfg.IngestIntervalS, 300)
 		aggIvl := durationS(daemonAggregateIntervalS, cfg.AggregateIntervalS, 900)
+		trailIvl := durationS(daemonTrailIntervalS, cfg.TrailIntervalS, 900)
 
 		s, err := store.Open(ctx)
 		if err != nil {
@@ -138,6 +141,9 @@ For one-shot CI-style execution that does each job once and exits, pass
 		runIngestOnce(ctx, s, w)
 		runAggregateOnce(ctx, s, w)
 		runPollOnce(ctx, cfg, s, w)
+		if cfg.TrailEnabled {
+			runTrailOnce(ctx, cfg, s, w)
+		}
 
 		if daemonRunOnce {
 			fmt.Fprintln(w, "[daemon] --once: exiting after first cycle")
@@ -172,6 +178,21 @@ For one-shot CI-style execution that does each job once and exits, pass
 		schedule("poll", pollIvl, func() { runPollOnce(ctx, cfg, s, w) })
 		schedule("ingest", ingestIvl, func() { runIngestOnce(ctx, s, w) })
 		schedule("aggregate", aggIvl, func() { runAggregateOnce(ctx, s, w) })
+		// Always schedule the trail ticker; gate per-tick on the LIVE
+		// config so enabling/disabling Trail (or changing mode/window) in
+		// the UI takes effect without a daemon restart. (Scheduling it
+		// only when enabled-at-startup was a bug: toggling it on later
+		// never started the job.)
+		schedule("trail", trailIvl, func() {
+			tc, err := config.Load()
+			if err != nil {
+				tc = cfg
+			}
+			if !tc.TrailEnabled {
+				return
+			}
+			runTrailOnce(ctx, tc, s, w)
+		})
 
 		<-ctx.Done()
 		fmt.Fprintln(w, "[daemon] waiting for in-flight jobs")
@@ -292,6 +313,29 @@ func runAggregateOnce(ctx context.Context, s *store.Store, w io.Writer) {
 		stats.SessionsRefreshed, stats.BucketsRebuilt, stats.CalibrationPointsBuilt, stats.ElapsedS)
 }
 
+// runTrailOnce runs one Trail cycle: summarise the recent activity of
+// recently-active sessions into per-session briefs. Gated by
+// cfg.TrailEnabled at the call sites. Bounded by a generous cycle
+// timeout so a slow analyzer can't wedge the scheduler — most cycles
+// touch only the 1-2 sessions with new activity (the rest skip cheaply).
+func runTrailOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Writer) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	tctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+	defer cancel()
+	st, err := trail.Run(tctx, s, cfg, w)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] trail: error %v\n", err)
+		return
+	}
+	fmt.Fprintf(w, "[daemon] trail: %d considered, %d analyzed, %d first-seen, %d skipped, $%.4f, %d errors in %.1fs\n",
+		st.Considered, st.Analyzed, st.FirstSeen, st.Skipped, st.CostUSD, len(st.Errors), st.ElapsedS)
+	for _, e := range st.Errors {
+		fmt.Fprintf(w, "[daemon] trail: · %s\n", e)
+	}
+}
+
 // openSelfHealTrace returns a writable trace file inside the daemon's
 // state dir plus its path. The caller closes it when the heal finishes.
 // Trace files accumulate; rotation is the user's problem for now (one
@@ -322,6 +366,7 @@ func init() {
 	daemonCmd.Flags().IntVar(&daemonPollIntervalS, "poll-interval", 0, "seconds between /usage polls (0 = use config)")
 	daemonCmd.Flags().IntVar(&daemonIngestIntervalS, "ingest-interval", 0, "seconds between JSONL ingests (0 = use config)")
 	daemonCmd.Flags().IntVar(&daemonAggregateIntervalS, "aggregate-interval", 0, "seconds between aggregate refreshes (0 = use config)")
+	daemonCmd.Flags().IntVar(&daemonTrailIntervalS, "trail-interval", 0, "seconds between Trail cycles (0 = use config; only runs when trail_enabled)")
 	daemonCmd.Flags().BoolVar(&daemonRunOnce, "once", false, "run each job once at startup, then exit")
 	daemonCmd.Flags().StringVar(&daemonLogFile, "log-file", "",
 		"file to mirror daemon output to (default $XDG_STATE_HOME/bloodhound/daemon.log)")

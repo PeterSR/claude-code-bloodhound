@@ -40,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(routes.PathLeaks, s.handleLeaks)
 	mux.HandleFunc(routes.PathSettings, s.handleSettings)
 	mux.HandleFunc(routes.PathExtractorRetrain, s.handleExtractorRetrain)
+	mux.HandleFunc(routes.PathTrailResolve, s.handleTrailResolve)
+	mux.HandleFunc(routes.PathTrail, s.handleTrail)
 
 	return logger(mux)
 }

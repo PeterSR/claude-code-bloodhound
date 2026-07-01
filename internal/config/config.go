@@ -90,12 +90,41 @@ type Config struct {
 	//      Agent SDK $100 credit (then extra usage) rather than the
 	//      interactive subscription.
 	SelfHealMode string `json:"self_heal_mode"`
+
+	// TrailEnabled turns on the Trail job: a passive watcher that reads
+	// recently-active sessions and keeps per-session work briefs + open
+	// loops so you can see what's in flight across worktrees. Off by
+	// default — it consumes usage (it drives `claude` to summarise).
+	TrailEnabled bool `json:"trail_enabled"`
+
+	// TrailMode picks how the Trail analyzer LLM is invoked — same
+	// interactive/headless split as SelfHealMode, and the same
+	// 2026-06-15 caveat for headless. Defaults to interactive.
+	TrailMode string `json:"trail_mode"`
+
+	// TrailIntervalS is the cadence of the Trail job. Defaults to 900
+	// (15 min) — slower than ingest; the briefs are an overview, not a
+	// live feed.
+	TrailIntervalS int `json:"trail_interval_s"`
+
+	// TrailWindowS bounds which sessions Trail considers "active" enough
+	// to analyse. Sessions whose last turn is older than this are
+	// skipped. Defaults to ActiveSessionThresholdS when zero.
+	TrailWindowS int `json:"trail_window_s"`
 }
 
 // SelfHealMode values, kept here so callers don't hard-code strings.
 const (
 	SelfHealModeInteractive = "interactive"
 	SelfHealModeHeadless    = "headless"
+)
+
+// TrailMode values. Same semantics as the SelfHeal modes; kept separate
+// so the two features can diverge (and so the June-15 headless removal
+// can be done independently per feature if needed).
+const (
+	TrailModeInteractive = "interactive"
+	TrailModeHeadless    = "headless"
 )
 
 // Default returns the baseline config. New installs start here.
@@ -113,6 +142,10 @@ func Default() Config {
 		RecentSessionWindowS:    86400,
 		ExtractorSelfHeal:       true,
 		SelfHealMode:            SelfHealModeInteractive,
+		TrailEnabled:            false,
+		TrailMode:               TrailModeInteractive,
+		TrailIntervalS:          900, // 15 min
+		TrailWindowS:            0,   // 0 => fall back to ActiveSessionThresholdS
 	}
 }
 
