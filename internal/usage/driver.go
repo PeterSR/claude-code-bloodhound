@@ -144,7 +144,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 			// Render the current capture through the VT grid so visual
 			// spacing is preserved and overdrawn text is dropped. Match
 			// against natural human-readable markers.
-			screen := strings.ToLower(renderVT(curBytes))
+			screen := strings.ToLower(renderVTVisible(curBytes))
 			hasTrustModal := strings.Contains(screen, "trust this folder")
 			welcomeReady := strings.Contains(screen, "tips for getting") ||
 				strings.Contains(screen, "claude code v") ||
@@ -182,7 +182,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 			// claude's main input row ends in "❯ <cursor>" and otherwise
 			// has nothing past it. Menu cursors (the ❯ in trust prompts
 			// etc.) are followed by their option text, so don't match.
-			screen := renderVT(curBytes)
+			screen := renderVTVisible(curBytes)
 			ready := HasInputPrompt(screen)
 			if ready && sinceLast >= settleAfterReady {
 				time.Sleep(500 * time.Millisecond)
@@ -203,7 +203,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 			// sequences between any two characters, and the grid drops
 			// stale overdrawn text that could falsely match. The /usage
 			// panel always shows "% used" with a real space.
-			screen := renderVT(curBytes)
+			screen := renderVTVisible(curBytes)
 			panelRendered := strings.Contains(screen, "% used")
 			if time.Since(typedAt) > minRenderAfterType && panelRendered {
 				time.Sleep(700 * time.Millisecond)

@@ -193,7 +193,10 @@ func (cs *ClaudeSession) WaitForReady(ctx context.Context, budget time.Duration)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		screen := usage.RenderVT(raw)
+		// Readiness detection (trust modal, prompt): reason about the live
+		// visible screen, not scrolled-off history, so a stale transient
+		// prompt in scrollback can't trigger an early action.
+		screen := usage.RenderVTVisible(raw)
 		lower := strings.ToLower(screen)
 
 		if !trustHandled {
