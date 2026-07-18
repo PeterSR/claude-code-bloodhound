@@ -82,47 +82,12 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		}
 	}
 
-	// Reset detection: two complementary heuristics against the most
-	// recent prior observation.
-	//   1. Drop heuristic — pct fell by ≥30pp between adjacent polls.
-	//      Catches the typical rotation where prev was near-cap.
-	//   2. Boundary heuristic — current observation is at or past the
-	//      previous observation's stored reset_ts. Catches long gaps
-	//      where the daemon was idle across a rotation and post-reset
-	//      accumulation makes the pct delta too small to trip (1).
-	// A 1-2 point dip between adjacent polls is noise from Anthropic's
-	// rolling-window accounting; the 30pp threshold filters it out.
-	const resetDropThresholdPP = 30
-	var prevSessionPct, prevWeekPct sql.NullInt64
-	var prevSessionResetTS, prevWeekResetTS sql.NullString
-	row := tx.QueryRowContext(ctx,
-		`SELECT session_pct, week_pct, session_reset_ts, week_reset_ts
-		   FROM usage_observations ORDER BY ts_unix_ms DESC LIMIT 1`,
-	)
-	_ = row.Scan(&prevSessionPct, &prevWeekPct, &prevSessionResetTS, &prevWeekResetTS)
-	sessionResetDetected := 0
-	weekResetDetected := 0
-	if prevSessionPct.Valid && sessionPct.Valid &&
-		prevSessionPct.Int64-sessionPct.Int64 >= resetDropThresholdPP {
-		sessionResetDetected = 1
-	}
-	if prevWeekPct.Valid && weekPct.Valid &&
-		prevWeekPct.Int64-weekPct.Int64 >= resetDropThresholdPP {
-		weekResetDetected = 1
-	}
-	if sessionResetDetected == 0 && prevSessionPct.Valid && sessionPct.Valid && prevSessionResetTS.Valid {
-		if t, err := time.Parse(time.RFC3339, prevSessionResetTS.String); err == nil &&
-			!res.FetchedAt.Before(t) {
-			sessionResetDetected = 1
-		}
-	}
-	if weekResetDetected == 0 && prevWeekPct.Valid && weekPct.Valid && prevWeekResetTS.Valid {
-		if t, err := time.Parse(time.RFC3339, prevWeekResetTS.String); err == nil &&
-			!res.FetchedAt.Before(t) {
-			weekResetDetected = 1
-		}
-	}
-
+	// Reset detection and misparse flagging are derived from the whole
+	// percentage series, not from this one row against its predecessor: a
+	// misparse can only be told from a real drop by whether the *next*
+	// reading recovers. So the new row goes in with placeholder flags, then
+	// RecomputeUsageFlags reclassifies the tail (and self-heals any older
+	// rows whose classification the new data changes). See usage_flags.go.
 	parseOK := 0
 	if res.OK {
 		parseOK = 1
@@ -137,6 +102,8 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		weekSaturated = 1
 	}
 
+	// Reset/validity flags start as placeholders (no reset, valid); the
+	// recompute below sets them from the series.
 	r, err := tx.ExecContext(ctx,
 		`INSERT INTO usage_observations (
 			ts, ts_unix_ms,
@@ -146,14 +113,14 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 			raw_dump_id,
 			session_reset_detected, week_reset_detected,
 			session_saturated, week_saturated,
+			session_pct_valid, week_pct_valid,
 			elapsed_s, parse_ok
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1, 1, ?, ?)`,
 		tsISO, tsMS,
 		nullInt(sessionPct), nullInt(weekPct),
 		nullStr(sessionResetRaw), nullStr(weekResetRaw),
 		nullStr(sessionResetTS), nullStr(weekResetTS),
 		dumpID,
-		sessionResetDetected, weekResetDetected,
 		sessionSaturated, weekSaturated,
 		res.ElapsedS, parseOK,
 	)
@@ -161,6 +128,21 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		return Observation{}, err
 	}
 	id, _ := r.LastInsertId()
+
+	// Classify the new row (and correct any older rows the new reading
+	// disambiguates) before committing, so readers never see the
+	// placeholder flags.
+	if err := recomputeUsageFlags(ctx, tx); err != nil {
+		return Observation{}, err
+	}
+
+	var sessReset, weekReset int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT session_reset_detected, week_reset_detected
+		   FROM usage_observations WHERE id = ?`, id,
+	).Scan(&sessReset, &weekReset); err != nil {
+		return Observation{}, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return Observation{}, err
@@ -170,8 +152,8 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		ID:                   id,
 		TS:                   res.FetchedAt,
 		ParseOK:              res.OK,
-		SessionResetDetected: sessionResetDetected == 1,
-		WeekResetDetected:    weekResetDetected == 1,
+		SessionResetDetected: sessReset == 1,
+		WeekResetDetected:    weekReset == 1,
 		SessionSaturated:     sessionSaturated == 1,
 		WeekSaturated:        weekSaturated == 1,
 	}
