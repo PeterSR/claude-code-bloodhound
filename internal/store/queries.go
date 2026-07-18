@@ -264,3 +264,32 @@ func (s *Store) LatestBucket(ctx context.Context) (*BucketRow, error) {
 	r.ResetInferred = ri == 1
 	return &r, nil
 }
+
+// ModelsWithSpend returns the distinct models that have actually consumed
+// tokens, newest-active first. Models with no token spend (the
+// "<synthetic>" pseudo-model the ingester writes for API-error messages,
+// which is all zeros) are excluded, so price discovery never chases a name
+// that was never a real model.
+func (s *Store) ModelsWithSpend(ctx context.Context) ([]string, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT model
+		FROM turns
+		GROUP BY model
+		HAVING SUM(input_tokens + output_tokens + cache_read +
+		           cache_create_5m + cache_create_1h) > 0
+		ORDER BY MAX(ts_unix_ms) DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}

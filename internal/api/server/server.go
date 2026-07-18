@@ -36,6 +36,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(routes.PathSessions, s.handleSessions)
 	mux.HandleFunc(routes.PathSessionsPrefix, s.handleSessionDetail)
 	mux.HandleFunc(routes.PathHistory, s.handleHistory)
+	mux.HandleFunc(routes.PathModels, s.handleModels)
+	mux.HandleFunc(routes.PathPricesHeal, s.handlePricesHeal)
 	mux.HandleFunc(routes.PathCompactions, s.handleCompactions)
 	mux.HandleFunc(routes.PathLeaks, s.handleLeaks)
 	mux.HandleFunc(routes.PathSettings, s.handleSettings)

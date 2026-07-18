@@ -21,12 +21,22 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 
+	// burn_window_min is the burn-rate smoothing baseline. Wider trades
+	// responsiveness for a steadier line; burnSeries floors it regardless.
+	burnWindowMin := 45
+	if v := r.URL.Query().Get("burn_window_min"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 240 {
+			burnWindowMin = n
+		}
+	}
+
 	out := routes.HistoryResponse{OK: true, WindowDays: days}
 
 	rows, err := s.Store.DB.QueryContext(ctx, `
 		SELECT ts_unix_ms, session_pct, week_pct,
 		       session_saturated, week_saturated,
-		       session_reset_detected, week_reset_detected
+		       session_reset_detected, week_reset_detected,
+		       session_pct_valid, week_pct_valid
 		FROM usage_observations
 		WHERE ts_unix_ms >= ?
 		ORDER BY ts_unix_ms ASC
@@ -41,9 +51,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			tsMS                       int64
 			spct, wpct                 *int
 			ssat, wsat, sreset, wreset int
+			svalid, wvalid             int
 			sNull, wNull               interface{}
 		)
-		if err := rows.Scan(&tsMS, &sNull, &wNull, &ssat, &wsat, &sreset, &wreset); err != nil {
+		if err := rows.Scan(&tsMS, &sNull, &wNull, &ssat, &wsat, &sreset, &wreset, &svalid, &wvalid); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -61,6 +72,8 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			WeekSaturated:    wsat == 1,
 			SessionReset:     sreset == 1,
 			WeekReset:        wreset == 1,
+			SessionValid:     svalid == 1,
+			WeekValid:        wvalid == 1,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -89,6 +102,14 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		t := time.UnixMilli(b.TSUnixMS)
 		out.PctBurnedHeatmap[t.Weekday()][t.Hour()] += int64(delta)
 	}
+
+	// Burn rate: the derivative of both usage curves. Computed here rather
+	// than in the browser because the corrections that make it honest
+	// (never differentiate across a reset, never differentiate a saturated
+	// bucket, refuse baselines too short to out-signal /usage's integer
+	// rounding) are worth testing.
+	out.BurnWindowMin = burnWindowMin
+	out.BurnRate = burnRateSeries(out.Observations, int64(burnWindowMin)*60*1000)
 
 	sessPts, err := s.Store.CalibrationPoints(ctx, "session")
 	if err != nil {
@@ -134,6 +155,64 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, out)
 }
+
+// burnRateSeries differentiates both usage curves over the same
+// observation list, pairing the results by timestamp.
+func burnRateSeries(obs []routes.ObservationPoint, lookbackMS int64) []routes.BurnPoint {
+	// Empty rather than nil: the client maps over this directly, and a nil
+	// slice would serialize to null.
+	if len(obs) == 0 {
+		return []routes.BurnPoint{}
+	}
+	// Usable and SegmentBreak come from the store's authoritative
+	// reset/misparse flags; the derivative doesn't second-guess them.
+	toRatePoints := func(
+		pick func(routes.ObservationPoint) *int,
+		saturated, valid, reset func(routes.ObservationPoint) bool,
+	) []ratePoint {
+		pts := make([]ratePoint, len(obs))
+		for i, o := range obs {
+			v := pick(o)
+			pts[i] = ratePoint{
+				TSUnixMS:     o.TSUnixMS,
+				Usable:       v != nil && !saturated(o) && valid(o),
+				SegmentBreak: reset(o),
+			}
+			if v != nil {
+				pts[i].Pct = *v
+			}
+		}
+		return pts
+	}
+
+	sess := burnSeries(toRatePoints(
+		func(o routes.ObservationPoint) *int { return o.SessionPct },
+		func(o routes.ObservationPoint) bool { return o.SessionSaturated },
+		func(o routes.ObservationPoint) bool { return o.SessionValid },
+		func(o routes.ObservationPoint) bool { return o.SessionReset },
+	), lookbackMS)
+	week := burnSeries(toRatePoints(
+		func(o routes.ObservationPoint) *int { return o.WeekPct },
+		func(o routes.ObservationPoint) bool { return o.WeekSaturated },
+		func(o routes.ObservationPoint) bool { return o.WeekValid },
+		func(o routes.ObservationPoint) bool { return o.WeekReset },
+	), lookbackMS)
+
+	out := make([]routes.BurnPoint, 0, len(obs))
+	for i, o := range obs {
+		p := routes.BurnPoint{TSUnixMS: o.TSUnixMS}
+		if sess[i] != nil {
+			p.SessionPctHour = ptr(round2(*sess[i]))
+		}
+		if week[i] != nil {
+			p.WeekPctHour = ptr(round2(*week[i]))
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func ptr[T any](v T) *T { return &v }
 
 func convertCalPoints(in []store.CalibrationPoint) []routes.CalibrationOutput {
 	out := make([]routes.CalibrationOutput, 0, len(in))

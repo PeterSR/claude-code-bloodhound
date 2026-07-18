@@ -91,6 +91,17 @@ type Config struct {
 	//      interactive subscription.
 	SelfHealMode string `json:"self_heal_mode"`
 
+	// PriceSelfHeal toggles automatic price discovery: when the daemon
+	// sees a model in the logs that the price table doesn't price, it asks
+	// a headless `claude` to look up the model's list price on the web and
+	// writes it back marked unverified. Unlike the extractor self-heal
+	// (which MUST work or the app goes blind), this is best-effort — an
+	// un-found price just leaves the model dropped from the cost-weighted
+	// analysis, flagged, and the user can hit "find out for me" on the
+	// Models page. Default true. Headless tokens draw from the Agent SDK
+	// credit pool; disable this if you'd rather price new models by hand.
+	PriceSelfHeal bool `json:"price_self_heal"`
+
 	// TrailEnabled turns on the Trail job: a passive watcher that reads
 	// recently-active sessions and keeps per-session work briefs + open
 	// loops so you can see what's in flight across worktrees. Off by
@@ -142,6 +153,7 @@ func Default() Config {
 		RecentSessionWindowS:    86400,
 		ExtractorSelfHeal:       true,
 		SelfHealMode:            SelfHealModeInteractive,
+		PriceSelfHeal:           true,
 		TrailEnabled:            false,
 		TrailMode:               TrailModeInteractive,
 		TrailIntervalS:          900, // 15 min

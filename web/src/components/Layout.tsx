@@ -4,6 +4,7 @@ import {
   Activity,
   PawPrint,
   History as HistoryIcon,
+  Boxes,
   Files,
   // Combine, Droplet — re-enable when Compactions / Leaks nav is restored.
   Bug,
@@ -22,6 +23,7 @@ type NavItem = {
 const NAV: NavItem[] = [
   { to: '/', label: 'Now', icon: Activity, end: true },
   { to: '/history', label: 'History', icon: HistoryIcon },
+  { to: '/models', label: 'Models', icon: Boxes },
   { to: '/sessions', label: 'Sessions', icon: Files },
   { to: '/trail', label: 'Trail', icon: PawPrint },
   // Hidden until polished — routes still live in App.tsx so /compactions

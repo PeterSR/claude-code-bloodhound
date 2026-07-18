@@ -21,6 +21,23 @@ type HistoryResponse struct {
 	// vs when raw token volume happens to be high (cache-heavy windows
 	// can spend tokens cheaply in pct terms, and vice versa).
 	PctBurnedHeatmap [7][24]int64 `json:"pct_burned_heatmap"`
+
+	// BurnRate is the derivative of the two usage curves: how fast the
+	// limit was being consumed at each instant, in percentage points per
+	// hour. Smoothed over BurnWindowMin because /usage is integer-
+	// quantized and adjacent readings mostly measure rounding.
+	BurnRate      []BurnPoint `json:"burn_rate"`
+	BurnWindowMin int         `json:"burn_window_min"`
+}
+
+// BurnPoint is one instant's rate of limit consumption. Either rate may be
+// absent: at the start of a window there is nothing to measure against,
+// and while a bucket is saturated its percentage is pinned so the slope
+// would read a misleading zero.
+type BurnPoint struct {
+	TSUnixMS       int64    `json:"ts_unix_ms"`
+	SessionPctHour *float64 `json:"session_pct_per_hour,omitempty"`
+	WeekPctHour    *float64 `json:"week_pct_per_hour,omitempty"`
 }
 
 // ObservationPoint is a slimmed-down /usage observation for charting.
@@ -32,6 +49,11 @@ type ObservationPoint struct {
 	WeekSaturated    bool  `json:"week_saturated"`
 	SessionReset     bool  `json:"session_reset_detected"`
 	WeekReset        bool  `json:"week_reset_detected"`
+	// Valid is false for a misparsed reading: a value that fell further
+	// than rounding allows and then recovered. Charts should drop it rather
+	// than draw the dip and rebound. Defaults true.
+	SessionValid bool `json:"session_pct_valid"`
+	WeekValid    bool `json:"week_pct_valid"`
 }
 
 // CalibrationOutput is one calibration point in API form.
