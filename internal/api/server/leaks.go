@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
+	"github.com/PeterSR/claude-code-bloodhound/internal/sessioninsight"
 )
 
 func (s *Server) handleLeaks(w http.ResponseWriter, r *http.Request) {
@@ -16,11 +17,8 @@ func (s *Server) handleLeaks(w http.ResponseWriter, r *http.Request) {
 	classRows, err := s.Store.DB.QueryContext(ctx, `
 		SELECT classification,
 		       COUNT(*) AS n,
-		       COALESCE(SUM(input_tokens + output_tokens + cache_read +
-		                    cache_create_5m + cache_create_1h), 0) AS raw,
-		       COALESCE(SUM(cache_read*0.1 + cache_create_5m*1.25 +
-		                    cache_create_1h*2.0 + input_tokens*1.0 +
-		                    output_tokens*5.0), 0) AS cw
+		       COALESCE(SUM(`+sessioninsight.RawExpr+`), 0) AS raw,
+		       COALESCE(SUM(`+sessioninsight.CWExpr()+`), 0) AS cw
 		FROM turns
 		GROUP BY classification
 	`)
