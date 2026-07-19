@@ -13,6 +13,10 @@ type ObservationPoint = {
   week_saturated: boolean;
   session_reset_detected: boolean;
   week_reset_detected: boolean;
+  // False for a misparsed reading (fell further than rounding allows, then
+  // recovered). Charted as a gap, not a dip.
+  session_pct_valid: boolean;
+  week_pct_valid: boolean;
 };
 
 type CalibrationPoint = {
@@ -26,9 +30,17 @@ type CalibrationPoint = {
   tokens_per_pct_cw: number;
 };
 
+type BurnPoint = {
+  ts_unix_ms: number;
+  session_pct_per_hour?: number;
+  week_pct_per_hour?: number;
+};
+
 type HistoryResponse = {
   ok: boolean;
   window_days: number;
+  burn_rate: BurnPoint[];
+  burn_window_min: number;
   observations: ObservationPoint[];
   session_calibration: CalibrationPoint[];
   week_calibration: CalibrationPoint[];
@@ -51,10 +63,23 @@ const SESSION_FAINT = 'rgba(244,63,94,0.35)';
 const WEEK_COLOR = '#0ea5e9';
 const WEEK_FAINT = 'rgba(14,165,233,0.35)';
 
+const BURN_OPTIONS = [
+  { label: '15m', min: 15 },
+  { label: '45m', min: 45 },
+  { label: '2h', min: 120 },
+];
+
+/** The rate that exactly exhausts a limit window if you sustain it for the
+ *  window's whole length. Above this line you are on course to run out
+ *  before the reset; below it you are not. */
+const SESSION_SUSTAINABLE = 100 / 5; // 5-hour window
+const WEEK_SUSTAINABLE = 100 / (7 * 24);
+
 export default function History() {
   const [days, setDays] = useState(7);
+  const [burnMin, setBurnMin] = useState(45);
   const { data, error, loading, refreshing, refresh } = useApi<HistoryResponse>(
-    `/history?window_days=${days}`,
+    `/history?window_days=${days}&burn_window_min=${burnMin}`,
     60_000,
   );
 
@@ -63,7 +88,7 @@ export default function History() {
       data
         ? breakAtResets(
             data.observations,
-            (o) => o.session_pct,
+            (o) => (o.session_pct_valid ? o.session_pct : null),
             (o) => o.session_reset_detected,
           )
         : null,
@@ -74,7 +99,7 @@ export default function History() {
       data
         ? breakAtResets(
             data.observations,
-            (o) => o.week_pct,
+            (o) => (o.week_pct_valid ? o.week_pct : null),
             (o) => o.week_reset_detected,
           )
         : null,
@@ -157,6 +182,65 @@ export default function History() {
                 values={weekUsage?.values ?? []}
                 color={WEEK_COLOR}
                 resetTS={weekResetTS}
+              />
+            </div>
+          </Section>
+
+          <Section
+            title="Burn rate"
+            subtitle={
+              <>
+                How fast you were spending the limit at each moment — the
+                slope of the charts above, in percentage points per hour.
+                Measured over a trailing {data.burn_window_min}-minute
+                baseline: <code className="font-mono text-xs">/usage</code>{' '}
+                reports whole percents, so differentiating adjacent readings
+                mostly measures rounding, and a longer baseline divides that
+                fixed error down until real signal outweighs it. The line
+                breaks where no honest rate exists — across a reset, while
+                saturated, or where a reading was misparsed.
+              </>
+            }
+          >
+            <div className="flex justify-end mb-3">
+              <div className="flex items-center gap-2 text-xs text-zinc-500">
+                <span>Smoothing</span>
+                <div className="flex rounded-md border border-zinc-300 dark:border-zinc-700 overflow-hidden">
+                  {BURN_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.label}
+                      onClick={() => setBurnMin(opt.min)}
+                      className={[
+                        'px-3 py-1',
+                        burnMin === opt.min
+                          ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                          : 'bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800',
+                      ].join(' ')}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="grid gap-5 grid-cols-1 xl:grid-cols-2">
+              <BurnCard
+                label="Session (5h)"
+                points={data.burn_rate}
+                pick={(p) => p.session_pct_per_hour}
+                color={SESSION_COLOR}
+                resetTS={sessionResetTS}
+                sustainable={SESSION_SUSTAINABLE}
+                sustainableHint="Sustain this for the full 5 hours and the window runs out exactly at reset."
+              />
+              <BurnCard
+                label="Week"
+                points={data.burn_rate}
+                pick={(p) => p.week_pct_per_hour}
+                color={WEEK_COLOR}
+                resetTS={weekResetTS}
+                sustainable={WEEK_SUSTAINABLE}
+                sustainableHint="The rate that would exhaust the week if held around the clock. Working in bursts, you spend most of the week well above it and the rest of it at zero."
               />
             </div>
           </Section>
@@ -294,6 +378,82 @@ function UsageCard({
       ) : (
         <Empty />
       )}
+    </div>
+  );
+}
+
+function BurnCard({
+  label,
+  points,
+  pick,
+  color,
+  resetTS,
+  sustainable,
+  sustainableHint,
+}: {
+  label: string;
+  points: BurnPoint[];
+  pick: (p: BurnPoint) => number | undefined;
+  color: string;
+  resetTS?: number[];
+  sustainable: number;
+  sustainableHint: string;
+}) {
+  const data = useMemo(() => {
+    const ts = points.map((p) => p.ts_unix_ms / 1000);
+    const values = points.map((p) => pick(p) ?? null);
+    const measured = values.filter((v): v is number => v !== null);
+    return {
+      ts,
+      values,
+      peak: measured.length ? Math.max(...measured) : null,
+    };
+  }, [points, pick]);
+
+  const hasData = data.values.some((v) => v !== null);
+
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+      <div className="flex items-baseline justify-between gap-3 mb-4">
+        <div className="flex flex-col">
+          <span className="text-xs uppercase tracking-wider text-zinc-500">{label}</span>
+          <span className="text-[10px] text-zinc-500 mt-0.5">
+            Peak in window
+          </span>
+        </div>
+        {data.peak != null && (
+          <div className="text-right">
+            <span className="text-4xl font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">
+              {data.peak.toFixed(data.peak < 10 ? 1 : 0)}
+            </span>
+            <span className="text-sm text-zinc-500 ml-1">%/h</span>
+          </div>
+        )}
+      </div>
+      {hasData ? (
+        <Spark
+          ts={data.ts}
+          height={200}
+          ySuffix="%/h"
+          series={[{ label: '%/hour', values: data.values, color, width: 1.5 }]}
+          hLines={[
+            {
+              value: sustainable,
+              color: 'rgba(113,113,122,0.55)',
+              dash: [2, 4],
+              label: `${sustainable < 1 ? sustainable.toFixed(2) : sustainable}%/h exhausts the window`,
+            },
+          ]}
+          vLines={resetTS?.map((x) => ({
+            x,
+            color: 'rgba(113,113,122,0.45)',
+            dash: [2, 4],
+          }))}
+        />
+      ) : (
+        <Empty hint="Need observations spanning at least 10 minutes inside one limit window." />
+      )}
+      <div className="text-[10px] text-zinc-500 mt-2">{sustainableHint}</div>
     </div>
   );
 }

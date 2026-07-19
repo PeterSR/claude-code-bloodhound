@@ -37,6 +37,15 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 	t0 := time.Now()
 	st := Stats{}
 
+	// Reset/misparse flags are derived from the raw percentage series;
+	// recompute them first so calibration (which skips resets and misparses)
+	// and everything downstream see corrected values. This is also the
+	// one-time backfill for observations recorded before the classifier
+	// existed.
+	if err := s.RecomputeUsageFlags(ctx); err != nil {
+		return st, fmt.Errorf("recompute usage flags: %w", err)
+	}
+
 	if !opts.SkipSessions {
 		n, err := refreshSessions(ctx, s)
 		if err != nil {

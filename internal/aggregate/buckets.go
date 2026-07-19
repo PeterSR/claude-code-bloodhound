@@ -3,6 +3,7 @@ package aggregate
 import (
 	"context"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/costweight"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
@@ -22,7 +23,7 @@ func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
 	const fiveHMS int64 = 5 * 3600 * 1000
 
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT ts_unix_ms,
+		SELECT ts_unix_ms, model,
 		       input_tokens, output_tokens, cache_read,
 		       cache_create_5m, cache_create_1h
 		FROM turns
@@ -44,9 +45,10 @@ func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
 	for rows.Next() {
 		var (
 			tsMS                    int64
+			model                   string
 			in, out, cr, cw5m, cw1h int64
 		)
-		if err := rows.Scan(&tsMS, &in, &out, &cr, &cw5m, &cw1h); err != nil {
+		if err := rows.Scan(&tsMS, &model, &in, &out, &cr, &cw5m, &cw1h); err != nil {
 			return 0, err
 		}
 		if cur == nil || tsMS >= cur.endMS {
@@ -54,9 +56,7 @@ func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
 			cur = &buckets[len(buckets)-1]
 		}
 		w := in + out + cr + cw5m + cw1h
-		// Cost-weighted ratios match Anthropic's published API pricing.
-		costW := float64(cr)*0.1 + float64(cw5m)*1.25 + float64(cw1h)*2.0 +
-			float64(in)*1.0 + float64(out)*5.0
+		costW := costweight.CW(model, in, out, cr, cw5m, cw1h)
 		cur.raw += w
 		cur.output += out
 		cur.costWeighted += costW

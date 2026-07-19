@@ -9,17 +9,19 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/PeterSR/claude-code-bloodhound/internal/costweight"
 )
 
 // CWExpr is the SQL fragment that converts a turn's raw token columns
-// into cost-weighted tokens, mirroring the calibrator's weighting
-// (input ×1, output ×5, cache_read ×0.1, cache_create_5m ×1.25,
-// cache_create_1h ×2).
-const CWExpr = `(input_tokens
-                 + output_tokens * 5.0
-                 + cache_read * 0.1
-                 + cache_create_5m * 1.25
-                 + cache_create_1h * 2.0)`
+// into cost-weighted tokens. It weights by token type *and* by model, and
+// is generated from internal/costweight so this and the calibrator can
+// never drift.
+//
+// It is a function, not a constant: the model multipliers come from a price
+// table loaded at runtime (and reloadable after a self-heal), so the
+// expression must be built per call rather than frozen at package init.
+func CWExpr() string { return costweight.SQLExpr() }
 
 // RawExpr is the SQL fragment summing every per-turn token category
 // without weighting — used for the headline "raw" totals.
@@ -31,8 +33,12 @@ const RawExpr = `(input_tokens + output_tokens + cache_read + cache_create_5m + 
 // predict the new prompt or response size, but the prefix itself is
 // fixed and must be re-paid as cache creation. The prefix at turn N is
 // approximated by what the model saw as input + what it produced as
-// output during that turn.
-const ColdPrefixCWExpr = `((input_tokens + cache_read + cache_create_5m + cache_create_1h + output_tokens) * 1.25)`
+// output during that turn. Like CWExpr, generated per call from the
+// runtime price table.
+func ColdPrefixCWExpr() string {
+	return `((input_tokens + cache_read + cache_create_5m + cache_create_1h + output_tokens) * 1.25 * ` +
+		costweight.ModelCaseExpr() + `)`
+}
 
 // SessionRef identifies one session for downstream insight queries.
 // The values come straight from the `sessions` table and are enough
@@ -220,7 +226,7 @@ func ForSession(ctx context.Context, db *sql.DB, ref SessionRef, now time.Time, 
 	var cwSum sql.NullFloat64
 	var turnCount sql.NullInt64
 	if err := db.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(SUM(`+RawExpr+`), 0), COALESCE(SUM(`+CWExpr+`), 0)
+		SELECT COUNT(*), COALESCE(SUM(`+RawExpr+`), 0), COALESCE(SUM(`+CWExpr()+`), 0)
 		FROM turns WHERE session_uuid = ?
 	`, ref.UUID).Scan(&turnCount, &rawSum, &cwSum); err != nil {
 		return info
@@ -233,7 +239,7 @@ func ForSession(ctx context.Context, db *sql.DB, ref SessionRef, now time.Time, 
 	}
 
 	if rows, err := db.QueryContext(ctx, `
-		SELECT `+RawExpr+`, `+CWExpr+`, `+ColdPrefixCWExpr+`, cache_create_5m, cache_create_1h
+		SELECT `+RawExpr+`, `+CWExpr()+`, `+ColdPrefixCWExpr()+`, cache_create_5m, cache_create_1h
 		FROM turns WHERE session_uuid = ?
 		ORDER BY turn_idx DESC LIMIT 3
 	`, ref.UUID); err == nil {

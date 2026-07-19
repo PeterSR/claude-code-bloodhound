@@ -18,6 +18,8 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/server"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
+	"github.com/PeterSR/claude-code-bloodhound/internal/costweight"
+	"github.com/PeterSR/claude-code-bloodhound/internal/costweight/priceheal"
 	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/trail"
@@ -141,6 +143,9 @@ For one-shot CI-style execution that does each job once and exits, pass
 		runIngestOnce(ctx, s, w)
 		runAggregateOnce(ctx, s, w)
 		runPollOnce(ctx, cfg, s, w)
+		if cfg.PriceSelfHeal {
+			runPriceHealOnce(ctx, cfg, s, w)
+		}
 		if cfg.TrailEnabled {
 			runTrailOnce(ctx, cfg, s, w)
 		}
@@ -178,6 +183,19 @@ For one-shot CI-style execution that does each job once and exits, pass
 		schedule("poll", pollIvl, func() { runPollOnce(ctx, cfg, s, w) })
 		schedule("ingest", ingestIvl, func() { runIngestOnce(ctx, s, w) })
 		schedule("aggregate", aggIvl, func() { runAggregateOnce(ctx, s, w) })
+		// Price discovery rides the aggregate cadence. Gated per-tick on the
+		// live config so toggling it in the UI takes effect without a daemon
+		// restart, same as Trail.
+		schedule("price-heal", aggIvl, func() {
+			pc, err := config.Load()
+			if err != nil {
+				pc = cfg
+			}
+			if !pc.PriceSelfHeal {
+				return
+			}
+			runPriceHealOnce(ctx, pc, s, w)
+		})
 		// Always schedule the trail ticker; gate per-tick on the LIVE
 		// config so enabling/disabling Trail (or changing mode/window) in
 		// the UI takes effect without a daemon restart. (Scheduling it
@@ -311,6 +329,58 @@ func runAggregateOnce(ctx context.Context, s *store.Store, w io.Writer) {
 	}
 	fmt.Fprintf(w, "[daemon] aggregate: %d sessions, %d buckets, %d cal-points in %.2fs\n",
 		stats.SessionsRefreshed, stats.BucketsRebuilt, stats.CalibrationPointsBuilt, stats.ElapsedS)
+}
+
+// priceHealMaxPerCycle bounds how many unknown models one cycle will try to
+// price, so a burst of new model names can't tie the scheduler up in a long
+// chain of web lookups. The rest wait for the next cycle; per-model backoff
+// keeps failures from repeating.
+const priceHealMaxPerCycle = 3
+
+// runPriceHealOnce discovers models that appear in the logs but aren't in
+// the price table and asks a headless claude to look up each one's list
+// price. Best-effort and gated: a model that can't be priced stays dropped
+// from the cost-weighted analysis (flagged in the UI) rather than blocking
+// anything. Gated at the call site on cfg.PriceSelfHeal.
+func runPriceHealOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Writer) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	models, err := s.ModelsWithSpend(ctx)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] price-heal: list models: %v\n", err)
+		return
+	}
+	unpriced := costweight.Current().UnpricedModels(models)
+	if len(unpriced) == 0 {
+		return
+	}
+
+	healed := 0
+	for _, m := range unpriced {
+		if healed >= priceHealMaxPerCycle {
+			fmt.Fprintf(w, "[daemon] price-heal: %d more unpriced model(s) deferred to next cycle\n",
+				len(unpriced)-healed)
+			break
+		}
+		hctx, cancel := context.WithTimeout(ctx, 130*time.Second)
+		res, gateErr := priceheal.Shared().Heal(hctx, m, priceheal.Options{
+			ClaudeBinary: cfg.ClaudeBinary,
+		})
+		cancel()
+		if gateErr != nil {
+			// Cooling down or another heal running — skip quietly, not a
+			// failure of this model's lookup.
+			continue
+		}
+		healed++
+		if res.Saved {
+			fmt.Fprintf(w, "[daemon] price-heal: priced %s at $%g/$%g input/output (%s), $%.4f\n",
+				m, res.Price.Input, res.Price.Output, res.Price.Source, res.CostUSD)
+		} else {
+			fmt.Fprintf(w, "[daemon] price-heal: %s left unpriced — %s\n", m, res.Reason)
+		}
+	}
 }
 
 // runTrailOnce runs one Trail cycle: summarise the recent activity of

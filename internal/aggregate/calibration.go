@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/costweight"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
@@ -42,13 +43,19 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 		weekSat   bool
 		sessReset bool
 		weekReset bool
+		// Validity: a misparsed reading must not anchor a calibration
+		// point. The recovery after a misparse (e.g. a 16 between two 34s)
+		// otherwise reads as a large real burn that never happened.
+		sessValid bool
+		weekValid bool
 	}
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, ts_unix_ms,
 		       session_pct, week_pct,
 		       session_saturated, week_saturated,
-		       session_reset_detected, week_reset_detected
+		       session_reset_detected, week_reset_detected,
+		       session_pct_valid, week_pct_valid
 		FROM usage_observations
 		ORDER BY ts_unix_ms ASC, id ASC
 	`)
@@ -58,8 +65,8 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 	var observations []obs
 	for rows.Next() {
 		var o obs
-		var ss, ws, sr, wr int
-		if err := rows.Scan(&o.id, &o.tsMS, &o.sessPct, &o.weekPct, &ss, &ws, &sr, &wr); err != nil {
+		var ss, ws, sr, wr, sv, wv int
+		if err := rows.Scan(&o.id, &o.tsMS, &o.sessPct, &o.weekPct, &ss, &ws, &sr, &wr, &sv, &wv); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -67,6 +74,8 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 		o.weekSat = ws == 1
 		o.sessReset = sr == 1
 		o.weekReset = wr == 1
+		o.sessValid = sv == 1
+		o.weekValid = wv == 1
 		observations = append(observations, o)
 	}
 	rows.Close()
@@ -87,7 +96,7 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 		cw   float64
 	}
 	trows, err := tx.QueryContext(ctx, `
-		SELECT ts_unix_ms,
+		SELECT ts_unix_ms, model,
 		       input_tokens, output_tokens, cache_read,
 		       cache_create_5m, cache_create_1h
 		FROM turns
@@ -100,15 +109,15 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 	for trows.Next() {
 		var (
 			tsMS                    int64
+			model                   string
 			in, out, cr, cw5m, cw1h int64
 		)
-		if err := trows.Scan(&tsMS, &in, &out, &cr, &cw5m, &cw1h); err != nil {
+		if err := trows.Scan(&tsMS, &model, &in, &out, &cr, &cw5m, &cw1h); err != nil {
 			trows.Close()
 			return 0, err
 		}
 		raw := in + out + cr + cw5m + cw1h
-		cw := float64(cr)*0.1 + float64(cw5m)*1.25 + float64(cw1h)*2.0 +
-			float64(in)*1.0 + float64(out)*5.0
+		cw := costweight.CW(model, in, out, cr, cw5m, cw1h)
 		turns = append(turns, turn{tsMS: tsMS, raw: raw, out: out, cw: cw})
 	}
 	trows.Close()
@@ -183,6 +192,9 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 		if !a.sessPct.Valid || !b.sessPct.Valid {
 			continue
 		}
+		if !a.sessValid || !b.sessValid {
+			continue
+		}
 		if a.sessSat || b.sessSat {
 			continue
 		}
@@ -198,6 +210,9 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 	for i := 1; i < len(observations); i++ {
 		a, b := observations[i-1], observations[i]
 		if !a.weekPct.Valid || !b.weekPct.Valid {
+			continue
+		}
+		if !a.weekValid || !b.weekValid {
 			continue
 		}
 		if a.weekSat || b.weekSat {

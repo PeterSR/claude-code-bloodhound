@@ -5,6 +5,7 @@ import SetupWizard from './pages/Setup';
 import Now from './pages/Now';
 import Trail from './pages/Trail';
 import History from './pages/History';
+import Models from './pages/Models';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
 import Compactions from './pages/Compactions';
@@ -26,6 +27,7 @@ export default function App() {
           <Route index element={<Now />} />
           <Route path="trail" element={<Trail />} />
           <Route path="history" element={<History />} />
+          <Route path="models" element={<Models />} />
           <Route path="sessions" element={<Sessions />} />
           <Route path="sessions/:uuid" element={<SessionDetail />} />
           <Route path="compactions" element={<Compactions />} />

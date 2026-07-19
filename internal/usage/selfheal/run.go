@@ -3,7 +3,6 @@ package selfheal
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -258,13 +257,6 @@ func pickOrchestrator(m Mode) Orchestrator {
 
 func ms(d time.Duration) int64 { return d.Milliseconds() }
 
-func tailString(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
-}
-
 func waitForFirstBytes(s *Session, budget time.Duration) bool {
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
@@ -350,74 +342,6 @@ func buildMCPConfig(bridgeSock string) string {
     }
   }
 }`, exe, bridgeSock)
-}
-
-// parseAPIErrorFromOrchestratorOutput inspects claude -p's JSON envelope
-// for the failure-shape fields. Headless-only; interactive mode scrapes
-// the TUI directly via ClassifyInteractiveFailure.
-func parseAPIErrorFromOrchestratorOutput(stdout []byte) string {
-	var raw struct {
-		IsError        bool   `json:"is_error"`
-		Subtype        string `json:"subtype"`
-		Result         string `json:"result"`
-		APIErrorStatus any    `json:"api_error_status"`
-		TerminalReason string `json:"terminal_reason"`
-	}
-	if err := json.Unmarshal(stdout, &raw); err != nil {
-		return ""
-	}
-	if !raw.IsError {
-		return ""
-	}
-	parts := []string{}
-	if raw.Subtype != "" && raw.Subtype != "success" {
-		parts = append(parts, raw.Subtype)
-	}
-	if raw.APIErrorStatus != nil {
-		parts = append(parts, fmt.Sprintf("api_error_status=%v", raw.APIErrorStatus))
-	}
-	if raw.TerminalReason != "" && raw.TerminalReason != "completed" {
-		parts = append(parts, "terminal_reason="+raw.TerminalReason)
-	}
-	if raw.Result != "" {
-		// truncate aggressive — claude can write long error messages
-		r := raw.Result
-		if len(r) > 240 {
-			r = r[:240] + "…"
-		}
-		parts = append(parts, r)
-	}
-	if len(parts) == 0 {
-		return "is_error=true (no further details in envelope)"
-	}
-	return strings.Join(parts, " · ")
-}
-
-// parseCostFromOrchestratorOutput pulls the cost/token fields from
-// claude -p's --output-format=json blob. Best-effort: if the format
-// changes, we just return a zero CostInfo and don't fail the heal.
-func parseCostFromOrchestratorOutput(stdout []byte) CostInfo {
-	var raw struct {
-		NumTurns     int     `json:"num_turns"`
-		TotalCostUSD float64 `json:"total_cost_usd"`
-		Usage        struct {
-			InputTokens              int `json:"input_tokens"`
-			OutputTokens             int `json:"output_tokens"`
-			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(stdout, &raw); err != nil {
-		return CostInfo{}
-	}
-	return CostInfo{
-		NumTurns:                 raw.NumTurns,
-		TotalCostUSD:             raw.TotalCostUSD,
-		InputTokens:              raw.Usage.InputTokens,
-		OutputTokens:             raw.Usage.OutputTokens,
-		CacheReadInputTokens:     raw.Usage.CacheReadInputTokens,
-		CacheCreationInputTokens: raw.Usage.CacheCreationInputTokens,
-	}
 }
 
 func writeTempMCPConfig(content string) (string, error) {
