@@ -52,6 +52,35 @@ type HistoryResponse = {
   pct_burned_heatmap: number[][]; // 7 × 24, sum of positive session-pct deltas
 };
 
+type SessionSlice = {
+  start_unix_ms: number;
+  end_unix_ms: number;
+  week_pct: number;
+};
+
+type WeekCapacity = {
+  start_unix_ms: number;
+  reset_unix_ms?: number;
+  sessions: SessionSlice[];
+  total_week_pct: number;
+  hit_cap: boolean;
+  in_progress?: boolean;
+  partial?: boolean;
+};
+
+type CapacityResponse = {
+  ok: boolean;
+  window_weeks: number;
+  weeks: WeekCapacity[];
+  typical_session_week_pct?: number;
+  session_week_pct_p25?: number;
+  session_week_pct_p75?: number;
+  sessions_per_week?: number;
+  days_per_session?: number;
+  session_count: number;
+  maxed_sessions_per_week?: number;
+};
+
 const WINDOW_OPTIONS = [
   { label: '24h', days: 1 },
   { label: '7d', days: 7 },
@@ -82,6 +111,9 @@ export default function History() {
     `/history?window_days=${days}&burn_window_min=${burnMin}`,
     60_000,
   );
+  // Weekly capacity spans several weekly windows, so it fetches on its own
+  // fixed horizon rather than following the 24h/7d/30d selector above.
+  const { data: cap } = useApi<CapacityResponse>('/capacity?weeks=8', 60_000);
 
   const sessionUsage = useMemo(
     () =>
@@ -289,6 +321,8 @@ export default function History() {
             </div>
           </Section>
 
+          {cap && <CapacitySection cap={cap} />}
+
           <Section
             title="When you spend"
             subtitle="Two views of the same hours. Tokens shows when you push volume; % burned shows when you actually eat into the session limit. Cache-heavy windows can be loud on tokens but cheap in %, and vice versa."
@@ -342,6 +376,152 @@ function Section({
       {children}
     </div>
   );
+}
+
+function CapacitySection({ cap }: { cap: CapacityResponse }) {
+  const enough =
+    cap.session_count >= 3 &&
+    cap.sessions_per_week != null &&
+    cap.typical_session_week_pct != null;
+
+  return (
+    <Section
+      title="Weekly capacity"
+      subtitle="How many typical 5h work sessions fit inside your weekly limit, measured from the weekly cost of each session in your history. Not the maxed-out ceiling, just the pace you actually work at. A work session is one that used at least 3% of the weekly limit; briefer check-ins are left out."
+    >
+      <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+        {enough ? (
+          <>
+            <div className="grid gap-6 lg:grid-cols-[minmax(0,16rem),1fr] items-center">
+              <div>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-5xl font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">
+                    {formatSessions(cap.sessions_per_week!)}
+                  </span>
+                  <span className="text-sm text-zinc-500">sessions / week</span>
+                </div>
+                <div className="text-xs text-zinc-500 mt-3 leading-relaxed">
+                  A typical work session eats{' '}
+                  <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                    ~{fmtNumber(cap.typical_session_week_pct!)}%
+                  </span>{' '}
+                  of your weekly limit
+                  {cap.session_week_pct_p25 != null && cap.session_week_pct_p75 != null && (
+                    <>
+                      {' '}
+                      (most land {fmtNumber(cap.session_week_pct_p25)}–
+                      {fmtNumber(cap.session_week_pct_p75)}%)
+                    </>
+                  )}
+                  . That's about{' '}
+                  <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                    one every {formatCadence(cap.days_per_session!)}
+                  </span>
+                  , across {cap.session_count} work sessions.
+                </div>
+                {cap.maxed_sessions_per_week != null && (
+                  <div className="text-[11px] text-zinc-400 mt-3">
+                    Maxing out every session instead would fit only ~
+                    {formatSessions(cap.maxed_sessions_per_week)} per week.
+                  </div>
+                )}
+              </div>
+              <CapacityBars weeks={cap.weeks} />
+            </div>
+            <div className="text-[10px] text-zinc-400 mt-4 leading-relaxed">
+              Each bar is one weekly window filled toward its 100% cap; each
+              segment is one 5h session. A rose line marks weeks that hit the
+              limit. Faded bars are partial (collection began mid-week) or the
+              current week still in progress.
+            </div>
+          </>
+        ) : (
+          <Empty hint="Need at least 3 completed work sessions (each using 3%+ of the weekly limit). Keep the daemon running and this fills in as you work." />
+        )}
+      </div>
+    </Section>
+  );
+}
+
+function CapacityBars({ weeks }: { weeks: WeekCapacity[] }) {
+  if (!weeks.length) return null;
+  const TRACK = 150; // px; the full track height represents 100% of the week
+  return (
+    <div className="overflow-x-auto">
+      <div className="flex items-end gap-2 pt-2 pb-1">
+        {weeks.map((wk, wi) => {
+          const faded = wk.partial || wk.in_progress;
+          const count = wk.sessions.length;
+          return (
+            <div key={wi} className="flex flex-col items-center gap-1 shrink-0">
+              <div
+                className="relative w-9 rounded bg-zinc-100 dark:bg-zinc-800 overflow-hidden"
+                style={{ height: TRACK }}
+                title={
+                  `Week of ${fmtDate(wk.start_unix_ms)}: ${Math.round(
+                    wk.total_week_pct,
+                  )}% of the weekly limit across ${count} session${count === 1 ? '' : 's'}` +
+                  (wk.hit_cap ? ' · hit the cap' : '') +
+                  (wk.in_progress
+                    ? ' · in progress'
+                    : wk.partial
+                      ? ' · partial'
+                      : '')
+                }
+              >
+                <div className="absolute inset-x-0 bottom-0 flex flex-col-reverse">
+                  {wk.sessions.map((sess, si) => (
+                    <div
+                      key={si}
+                      style={{
+                        height: Math.max(1, (sess.week_pct / 100) * TRACK),
+                        backgroundColor: `rgba(14,165,233,${
+                          faded ? 0.28 : si % 2 ? 0.55 : 0.8
+                        })`,
+                        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.35)',
+                      }}
+                      title={`${fmtDate(sess.start_unix_ms)}: ${fmtNumber(
+                        sess.week_pct,
+                      )}% of the week`}
+                    />
+                  ))}
+                </div>
+                {wk.hit_cap && (
+                  <div
+                    className="absolute inset-x-0 top-0 h-[3px] bg-rose-500"
+                    title="Hit the weekly cap"
+                  />
+                )}
+              </div>
+              <div className="text-[10px] text-zinc-500 tabular-nums whitespace-nowrap">
+                {fmtDate(wk.start_unix_ms)}
+              </div>
+              <div className="text-[10px] text-zinc-400 tabular-nums">
+                {Math.round(wk.total_week_pct)}%
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function formatSessions(n: number): string {
+  return n >= 10 ? String(Math.round(n)) : n.toFixed(1);
+}
+
+function formatCadence(days: number): string {
+  if (days >= 1) return `${days.toFixed(1)} days`;
+  const hours = Math.round(days * 24);
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+function fmtDate(ms: number): string {
+  return new Date(ms).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 function UsageCard({

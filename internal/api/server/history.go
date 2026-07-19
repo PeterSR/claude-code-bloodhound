@@ -32,54 +32,12 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	out := routes.HistoryResponse{OK: true, WindowDays: days}
 
-	rows, err := s.Store.DB.QueryContext(ctx, `
-		SELECT ts_unix_ms, session_pct, week_pct,
-		       session_saturated, week_saturated,
-		       session_reset_detected, week_reset_detected,
-		       session_pct_valid, week_pct_valid
-		FROM usage_observations
-		WHERE ts_unix_ms >= ?
-		ORDER BY ts_unix_ms ASC
-	`, cutoff)
+	obs, err := s.observationsSince(ctx, cutoff)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			tsMS                       int64
-			spct, wpct                 *int
-			ssat, wsat, sreset, wreset int
-			svalid, wvalid             int
-			sNull, wNull               interface{}
-		)
-		if err := rows.Scan(&tsMS, &sNull, &wNull, &ssat, &wsat, &sreset, &wreset, &svalid, &wvalid); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		if v, ok := nullableInt(sNull); ok {
-			spct = &v
-		}
-		if v, ok := nullableInt(wNull); ok {
-			wpct = &v
-		}
-		out.Observations = append(out.Observations, routes.ObservationPoint{
-			TSUnixMS:         tsMS,
-			SessionPct:       spct,
-			WeekPct:          wpct,
-			SessionSaturated: ssat == 1,
-			WeekSaturated:    wsat == 1,
-			SessionReset:     sreset == 1,
-			WeekReset:        wreset == 1,
-			SessionValid:     svalid == 1,
-			WeekValid:        wvalid == 1,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
+	out.Observations = obs
 
 	// Pct-burned heatmap from session_pct deltas across adjacent
 	// observations. Skipped if either side is saturated (pct doesn't
