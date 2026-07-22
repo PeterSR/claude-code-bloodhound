@@ -99,6 +99,49 @@ func TestParseFile_DedupesRepeatedContentBlocks(t *testing.T) {
 	}
 }
 
+// TestParseFile_TrustsSubagentContextProjectAtAnyDepth guards against a
+// regression to the depth assumption parseFile used to make: it once
+// derived project by walking a fixed number of directories up from path,
+// which was correct for a Task-tool subagent (3 levels) but silently wrong
+// for a Workflow-tool agent (5 levels): it would have read the "workflows"
+// or "subagents" directory name as the project instead. parseFile now
+// trusts subagentContext.project outright (computed by findSessionFiles,
+// where the matched glob already tells us the depth); this test writes the
+// file at the deeper workflow-agent nesting and passes a
+// hand-built subagentContext, so it fails if parseFile ever goes back to
+// guessing from path depth.
+func TestParseFile_TrustsSubagentContextProjectAtAnyDepth(t *testing.T) {
+	root := t.TempDir()
+	const parentUUID = "a850d051-2b0d-455b-991c-a0a434be269f"
+	path := filepath.Join(root, "proj1", parentUUID, "subagents", "workflows", "wf_abc123", "agent-x.jsonl")
+	mustWriteJSONL(t, path, []map[string]any{
+		assistantRecord("2026-01-01T00:00:00Z", "req_x", "msg_x", "claude-haiku", usageMap(10, 5, 0, 0, 0)),
+	})
+
+	sa := &subagentContext{parentUUID: parentUUID, project: "proj1"}
+	fr, err := parseFile(path, sa)
+	if err != nil {
+		t.Fatalf("parseFile: %v", err)
+	}
+	if fr.Project != "proj1" {
+		t.Errorf("FileResult.Project = %q, want %q", fr.Project, "proj1")
+	}
+	if len(fr.Turns) != 1 {
+		t.Fatalf("want 1 turn, got %d", len(fr.Turns))
+	}
+	if fr.Turns[0].Project != "proj1" {
+		t.Errorf("Turn.Project = %q, want %q", fr.Turns[0].Project, "proj1")
+	}
+	if fr.Turns[0].ParentSessionUUID != parentUUID {
+		t.Errorf("Turn.ParentSessionUUID = %q, want %q", fr.Turns[0].ParentSessionUUID, parentUUID)
+	}
+	// session_uuid is still the filename stem, not sessionId; see the
+	// comment on that derivation in parseFile.
+	if fr.SessionUUID != "agent-x" {
+		t.Errorf("FileResult.SessionUUID = %q, want %q", fr.SessionUUID, "agent-x")
+	}
+}
+
 // TestParseFile_DedupesOnMessageIDWithoutRequestID covers the older
 // transcript format that predates requestId: identity falls back to
 // message.id alone.

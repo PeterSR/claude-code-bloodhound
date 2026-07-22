@@ -120,11 +120,11 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 		}
 		// MinFileSize guards against wasting a parse + transaction on an
 		// abandoned top-level session that's little more than the initial
-		// human message (see the field doc). A subagent transcript has no
-		// such correlation between file size and whether real spend
-		// happened: a one-exchange subagent invocation can be small and
-		// still carry a real API charge, so the guard only applies to
-		// top-level files.
+		// human message (see the field doc). A subagent transcript (Task-
+		// or Workflow-tool, same exemption either way) has no such
+		// correlation between file size and whether real spend happened:
+		// a one-exchange subagent invocation can be small and still carry
+		// a real API charge, so the guard only applies to top-level files.
 		if !sf.isSubagent && info.Size() < opts.MinFileSize {
 			st.FilesSkippedSmall++
 			continue
@@ -141,7 +141,7 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 
 		var sa *subagentContext
 		if sf.isSubagent {
-			sa = &subagentContext{parentUUID: sf.parentUUID}
+			sa = &subagentContext{parentUUID: sf.parentUUID, project: sf.project}
 		}
 		fr, err := parseFile(p, sa)
 		if err != nil {
@@ -203,13 +203,37 @@ func sessionUUIDFromPath(p string) string {
 // sessionFile is one discovered JSONL transcript.
 type sessionFile struct {
 	path string
-	// isSubagent marks a file found one level deeper, at
-	// <project>/<parent-uuid>/subagents/<file>.jsonl, rather than
-	// <project>/<file>.jsonl.
+	// isSubagent marks a file found one or more levels deeper than a
+	// top-level session file: either the Task-tool shape
+	// (<project>/<parent-uuid>/subagents/<file>.jsonl) or the Workflow-tool
+	// shape one level deeper still
+	// (<project>/<parent-uuid>/subagents/workflows/<wf-id>/agent-*.jsonl).
+	// The two share one flag rather than a second isWorkflowAgent bool
+	// because everything downstream (the MinFileSize exemption, the
+	// trail-skip lookup, the parent-UUID validation, the rollup) treats
+	// them identically; only findSessionFiles needs to know which shape it
+	// found, to compute parentUUID/project at the right depth.
 	isSubagent bool
-	// parentUUID is the directory two levels up from a subagent file (the
-	// session that dispatched it). Unset for a top-level file.
+	// parentUUID is the session that dispatched this file: the directory
+	// named for a session UUID, however many levels up the specific shape
+	// puts it. Unset for a top-level file.
 	parentUUID string
+	// project is the containing project directory. Always set; computed
+	// here (where the matched shape, and so the exact depth, is already
+	// known) rather than re-derived from path depth in parseFile, which
+	// can't tell a Task-tool subagent from a Workflow-tool one just by
+	// looking at the path.
+	project string
+}
+
+// upN walks p up n directories via repeated filepath.Dir. Used to reach an
+// ancestor directory a known number of levels above a discovered file,
+// where "known" comes from which glob in findSessionFiles matched.
+func upN(p string, n int) string {
+	for i := 0; i < n; i++ {
+		p = filepath.Dir(p)
+	}
+	return p
 }
 
 // uuidRE matches a canonical 8-4-4-4-12 hex UUID. Used to validate a
@@ -220,12 +244,19 @@ func looksLikeUUID(s string) bool {
 	return uuidRE.MatchString(s)
 }
 
-// findSessionFiles walks both the top-level session layout Claude Code has
-// always used (<project>/<session>.jsonl) and subagent transcripts, written
-// one level deeper under a "subagents" directory named for the session that
-// dispatched them (<project>/<parent-uuid>/subagents/agent-*.jsonl). The two
-// patterns are independent globs rather than one recursive walk, so adding
-// the second can't change what the first matches.
+// findSessionFiles walks three transcript layouts Claude Code writes:
+//
+//   - the top-level session layout it has always used,
+//     <project>/<session>.jsonl;
+//   - Task-tool subagent transcripts, one level deeper under a "subagents"
+//     directory named for the session that dispatched them,
+//     <project>/<parent-uuid>/subagents/agent-*.jsonl;
+//   - Workflow-tool agent transcripts, the same idea one level deeper
+//     still, grouped under a directory per workflow run,
+//     <project>/<parent-uuid>/subagents/workflows/<wf-id>/agent-*.jsonl.
+//
+// The three patterns are independent globs rather than one recursive walk,
+// so adding the second and third could never change what the first matches.
 func findSessionFiles(dir string) ([]sessionFile, error) {
 	var out []sessionFile
 
@@ -242,10 +273,45 @@ func findSessionFiles(dir string) ([]sessionFile, error) {
 		return nil, err
 	}
 	for _, p := range sub {
-		// p = <project>/<parent-uuid>/subagents/<file>.jsonl, so the parent
-		// UUID is the directory name one level above "subagents".
-		parentUUID := filepath.Base(filepath.Dir(filepath.Dir(p)))
-		out = append(out, sessionFile{path: p, isSubagent: true, parentUUID: parentUUID})
+		// p = <project>/<parent-uuid>/subagents/<file>.jsonl
+		parentDir := upN(p, 2) // <project>/<parent-uuid>
+		out = append(out, sessionFile{
+			path:       p,
+			isSubagent: true,
+			parentUUID: filepath.Base(parentDir),
+			project:    filepath.Base(filepath.Dir(parentDir)),
+		})
+	}
+
+	// Workflow agents: one per agent the Workflow tool dispatched, grouped
+	// under a directory named for the workflow run (<wf-id>). The same
+	// directory also holds journal.jsonl, the workflow's own run journal
+	// (start/result events keyed by agentId, written by the workflow
+	// runner itself, not a transcript of anything an assistant said).
+	// Verified live against every journal.jsonl on disk: zero "assistant"
+	// records, no token usage object anywhere in the file. The glob is
+	// "agent-*.jsonl" rather than "*.jsonl" specifically to exclude it, a
+	// deliberate skip rather than relying on it happening to parse to
+	// zero turns if it were ever fed through parseFile.
+	//
+	// Reuses isSubagent rather than adding an isWorkflowAgent flag: a
+	// workflow agent attributes to its parentUUID exactly like a Task-tool
+	// subagent does (same rollup, same trail-skip rule, same MinFileSize
+	// exemption, see their uses in Run), so there is nothing for a
+	// separate flag to distinguish downstream of here.
+	wf, err := filepath.Glob(filepath.Join(dir, "*", "*", "subagents", "workflows", "*", "agent-*.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range wf {
+		// p = <project>/<parent-uuid>/subagents/workflows/<wf-id>/agent-x.jsonl
+		parentDir := upN(p, 4) // <project>/<parent-uuid>
+		out = append(out, sessionFile{
+			path:       p,
+			isSubagent: true,
+			parentUUID: filepath.Base(parentDir),
+			project:    filepath.Base(filepath.Dir(parentDir)),
+		})
 	}
 
 	return out, nil
