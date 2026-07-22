@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Files, Search } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
-import { fmtAbs, fmtNumber, fmtRel } from '../lib/format';
+import { fmtAbs, fmtCount, fmtNumber, fmtRel } from '../lib/format';
 
 type Session = {
   session_uuid: string;
@@ -143,7 +143,7 @@ export default function Sessions() {
                         {s.subagent_count > 0 && (
                           <span
                             className="text-zinc-400"
-                            title={`dispatched ${s.subagent_count} subagent${s.subagent_count === 1 ? '' : 's'}, ${s.subagent_turn_count.toLocaleString()} turns`}
+                            title={`dispatched ${s.subagent_count} subagent${s.subagent_count === 1 ? '' : 's'}, ${fmtCount(s.subagent_turn_count)} turns`}
                           >
                             · {s.subagent_count} sub
                           </span>
@@ -151,7 +151,7 @@ export default function Sessions() {
                       </div>
                     </Link>
                   </td>
-                  <td className="px-3 py-2 text-right tabular-nums">{s.turn_count.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{fmtCount(s.turn_count)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{fmtNumber(s.raw_tokens)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">
                     <PctCell value={s.attribution.week_pct} estimated={s.attribution.estimated_pct} />
