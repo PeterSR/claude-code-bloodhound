@@ -70,6 +70,11 @@ current time on its own. Combine the two to see a group's share of just the
 open window; use --per-window alone to see its rate across every window in
 the lookback instead of only the current one.
 
+When no window is open (a fresh database, say, before "bloodhound
+aggregate" has ever run), --window current is not an error: it exits 0,
+prints a one-line "no <bucket> window is currently open." on human output,
+and --json emits an empty groups array ("groups": []) with total_pct 0.
+
 --porcelain output is a stable parsing contract: tab separated, one record
 per line, no header row. The rollup's columns, in order, are:
 

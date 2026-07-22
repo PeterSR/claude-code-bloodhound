@@ -34,11 +34,13 @@ measure." --json below carries that same omission.
 
 --json emits the routes.NowResponse struct GET /api/now returns, so a
 consumer can switch transports without reshaping its parser. It carries
-only the pool-state fields (ok, session, week, last_poll, server_now_ms):
-the poll-interval/stale-after/active-session config hints, the in-window
-chart history, and the recent-sessions panel are Now-page-only additions
-the HTTP handler layers on afterward, so they're absent here rather than
-zeroed.`,
+the pool-state fields (ok, session, week, last_poll, server_now_ms) plus
+poll_interval_s and stale_after_s: nowstate.Compute loads config and sets
+those two itself, for both surfaces, so they're never missing here the way
+they used to be. The active-session-threshold and recent-session-window
+config hints, the in-window chart history, and the recent-sessions panel
+are still Now-page-only additions the HTTP handler layers on afterward, so
+those remain absent here rather than zeroed.`,
 	Args: cobra.NoArgs,
 	RunE: runNow,
 }
