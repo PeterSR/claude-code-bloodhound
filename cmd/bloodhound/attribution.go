@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -64,7 +65,11 @@ var attributionWindowsCmd = &cobra.Command{
 	Short: "List the limit windows for a bucket",
 	Long: `Lists the reconstructed limit windows (weekly or 5 hour) for the
 requested lookback, one line per window. --slices expands each window into
-one line per session (or the unattributed remainder) that filled it.
+one line per effective owner that filled it: a subagent (Task tool) session
+folds into whichever session dispatched it, the same rollup
+"attribution --by session" already applies, so the two commands agree on
+where a window's spend went. A subagent's own detail is still reachable
+through "bloodhound attribution session <uuid>".
 
 --porcelain columns, in order, without --slices (8 columns):
 
@@ -79,8 +84,8 @@ one line per session (or the unattributed remainder) that filled it.
 Percentages print at 4 decimal places (%.4f), cw_tokens and
 tokens_per_pct_cw at 2 (%.2f), everything else as a plain integer. flags is
 "-" when nothing applies, otherwise a comma joined list drawn from
-inferred, partial, in_progress, hit_cap. An empty key (the unattributed
-remainder) prints as "-".`,
+inferred, partial, in_progress, hit_cap. key is the effective owner (see
+above), or "-" for the unattributed remainder.`,
 	Args: cobra.NoArgs,
 	RunE: runAttributionWindows,
 }
@@ -388,6 +393,15 @@ func runAttributionWindows(cmd *cobra.Command, args []string) error {
 		for _, r := range rows {
 			bySlices[r.WindowStartUnixMS] = append(bySlices[r.WindowStartUnixMS], r)
 		}
+		// Fold each window's rows onto their effective owner before any
+		// writer sees them, human, --json and --porcelain alike share this
+		// map. Without it a subagent would print as its own slice here
+		// while "attribution --by session" already folds that same spend
+		// into its parent, and the two commands would disagree on where a
+		// window's spend went.
+		for start, rs := range bySlices {
+			bySlices[start] = foldSlicesByEffectiveOwner(rs)
+		}
 	}
 
 	w := cmd.OutOrStdout()
@@ -399,6 +413,54 @@ func runAttributionWindows(cmd *cobra.Command, args []string) error {
 	default:
 		return writeAttrWindowsHuman(w, bucket, days, windows, bySlices, attrSlices)
 	}
+}
+
+// foldSlicesByEffectiveOwner collapses a window's rows onto EffectiveSessionUUID,
+// summing the percentage, token and turn figures for any rows that share
+// one: a subagent (Task tool) session and whichever session dispatched it.
+// This is the same fold GroupAttribution and the web stacked chart already
+// apply (see WindowSlices's doc comment for where EffectiveSessionUUID
+// comes from); a subagent's own row is still reachable, unfolded, through
+// `bloodhound attribution session <uuid>`, so nothing here is a loss, only
+// a different key to look it up by.
+func foldSlicesByEffectiveOwner(rows []store.AttributionRow) []store.AttributionRow {
+	order := make([]string, 0, len(rows))
+	byKey := map[string]*store.AttributionRow{}
+	for _, r := range rows {
+		key := r.EffectiveSessionUUID
+		agg, ok := byKey[key]
+		if !ok {
+			cp := r
+			cp.SessionUUID = key
+			byKey[key] = &cp
+			order = append(order, key)
+			continue
+		}
+		agg.MeasuredPct += r.MeasuredPct
+		agg.EstimatedPct += r.EstimatedPct
+		agg.CWTokens += r.CWTokens
+		agg.RawTokens += r.RawTokens
+		agg.TurnCount += r.TurnCount
+		if agg.FirstTSUnixMS == 0 || (r.FirstTSUnixMS != 0 && r.FirstTSUnixMS < agg.FirstTSUnixMS) {
+			agg.FirstTSUnixMS = r.FirstTSUnixMS
+		}
+		if r.LastTSUnixMS > agg.LastTSUnixMS {
+			agg.LastTSUnixMS = r.LastTSUnixMS
+		}
+	}
+
+	out := make([]store.AttributionRow, 0, len(order))
+	for _, k := range order {
+		out = append(out, *byKey[k])
+	}
+	// WindowSlices documents largest-share-first within a window; folding
+	// can reorder rows relative to that (a parent with a small direct share
+	// but large subagent spend now outranks what came before it), so
+	// re-sort rather than leave the pre-fold order in place.
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].MeasuredPct+out[i].EstimatedPct > out[j].MeasuredPct+out[j].EstimatedPct
+	})
+	return out
 }
 
 func writeAttrWindowsHuman(w io.Writer, bucket string, days int, windows []store.LimitWindowRow,
