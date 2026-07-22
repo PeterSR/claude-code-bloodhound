@@ -5,9 +5,19 @@ import (
 	"testing"
 )
 
-// insertTestSession inserts a minimal sessions row. Every NOT NULL column
-// besides the ones under test gets an inert placeholder value.
+// insertTestSession inserts a minimal sessions row with cwd left empty.
+// Every NOT NULL column besides the ones under test gets an inert
+// placeholder value.
 func insertTestSession(t *testing.T, s *Store, uuid, project, parentUUID string) {
+	t.Helper()
+	insertTestSessionCwd(t, s, uuid, project, parentUUID, "")
+}
+
+// insertTestSessionCwd is insertTestSession plus an explicit cwd, for tests
+// that need one session's directory to differ from another's (the subagent
+// rollup cases: a subagent's own cwd must never surface as its parent
+// group's).
+func insertTestSessionCwd(t *testing.T, s *Store, uuid, project, parentUUID, cwd string) {
 	t.Helper()
 	_, err := s.DB.Exec(`
 		INSERT INTO sessions (
@@ -16,8 +26,8 @@ func insertTestSession(t *testing.T, s *Store, uuid, project, parentUUID string)
 			idle_miss_count, rotation_count, restructure_count,
 			compaction_count, cold_compaction_count, cache_ttl, models,
 			parent_session_uuid, cwd
-		) VALUES (?, ?, 0, 0, 1, 100, 10, 100, 0, 0, 0, 0, 0, 'none', '', ?, '')
-	`, uuid, project, parentUUID)
+		) VALUES (?, ?, 0, 0, 1, 100, 10, 100, 0, 0, 0, 0, 0, 'none', '', ?, ?)
+	`, uuid, project, parentUUID, cwd)
 	if err != nil {
 		t.Fatalf("insert session %s: %v", uuid, err)
 	}
@@ -174,6 +184,141 @@ func TestGroupAttribution_BySessionFoldsSubagentsIntoParent(t *testing.T) {
 	}
 	if got, want := parentGroup.Sessions, 2; got != want {
 		t.Errorf("parent group Sessions = %d, want %d (parent + 1 subagent)", got, want)
+	}
+}
+
+// TestGroupAttribution_BySessionCwdIsParentsNotSubagents is the cwd version
+// of the fold test above: a subagent that genuinely ran in a different
+// directory than its dispatcher (verified live: a subagent working in a
+// subdirectory of the same repo, or even a different repo entirely) must
+// not make its own directory win the rolled-up group's Cwd. The group
+// belongs to the parent; its Cwd must too.
+func TestGroupAttribution_BySessionCwdIsParentsNotSubagents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const (
+		parent    = "44444444-4444-4444-4444-444444444444"
+		sub       = "agent-ddddddddddddddddd"
+		parentCwd = "/home/user/projects/myapp"
+		subCwd    = "/home/user/projects/myapp/.agent-workspace/helper"
+	)
+
+	insertTestSessionCwd(t, s, parent, "proj", "", parentCwd)
+	insertTestSessionCwd(t, s, sub, "proj", parent, subCwd)
+
+	insertTestWindow(t, s, "week", 7000)
+	insertTestAttribution(t, s, "week", 7000, parent, "proj", 10, 0)
+	insertTestAttribution(t, s, "week", 7000, sub, "proj", 6, 0)
+
+	groups, err := s.GroupAttribution(ctx, "week", "session", 0)
+	if err != nil {
+		t.Fatalf("GroupAttribution: %v", err)
+	}
+
+	var parentGroup *AttributionGroup
+	for i := range groups {
+		if groups[i].Key == parent {
+			parentGroup = &groups[i]
+		}
+	}
+	if parentGroup == nil {
+		t.Fatalf("no group for parent %s (got %+v)", parent, groups)
+	}
+	if got := parentGroup.Cwd; got != parentCwd {
+		t.Errorf("parent group Cwd = %q, want %q (the parent's own, never the subagent's %q)", got, parentCwd, subCwd)
+	}
+}
+
+// TestGroupAttribution_ByProjectCwdIsEmpty covers the other half of the
+// design decision documented on AttributionGroup.Cwd: a project-keyed group
+// never reports a cwd, even in the degenerate case where every session
+// under it happens to share one, because the rollup can't tell "everyone
+// agrees" from "we only picked one arbitrarily" without inspecting every
+// row, and reporting a value at all would invite a caller to trust it in
+// the general (multi-directory) case where it's wrong.
+func TestGroupAttribution_ByProjectCwdIsEmpty(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const sess = "55555555-5555-5555-5555-555555555555"
+	insertTestSessionCwd(t, s, sess, "proj", "", "/home/user/projects/myapp")
+
+	insertTestWindow(t, s, "week", 9000)
+	insertTestAttribution(t, s, "week", 9000, sess, "proj", 10, 0)
+
+	groups, err := s.GroupAttribution(ctx, "week", "project", 0)
+	if err != nil {
+		t.Fatalf("GroupAttribution: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d, want 1: %+v", len(groups), groups)
+	}
+	if got := groups[0].Cwd; got != "" {
+		t.Errorf("project-keyed group Cwd = %q, want \"\" (a project can span many directories; see the field doc)", got)
+	}
+}
+
+// TestSessionPctTotalsAll_CwdIsParentsNotSubagents mirrors the GroupAttribution
+// cwd test for the other rollup helper (the one behind /api/sessions and
+// /api/sessions/{uuid}): a supervisor's totals must carry its own cwd even
+// though the numbers themselves include a subagent that ran elsewhere.
+func TestSessionPctTotalsAll_CwdIsParentsNotSubagents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const (
+		parent    = "66666666-6666-6666-6666-666666666666"
+		sub       = "agent-eeeeeeeeeeeeeeeee"
+		parentCwd = "/home/user/projects/myapp"
+		subCwd    = "/home/user/projects/other-repo"
+	)
+
+	insertTestSessionCwd(t, s, parent, "proj", "", parentCwd)
+	insertTestSessionCwd(t, s, sub, "proj", parent, subCwd)
+
+	insertTestWindow(t, s, "5h", 3000)
+	insertTestAttribution(t, s, "5h", 3000, parent, "proj", 5, 0)
+	insertTestAttribution(t, s, "5h", 3000, sub, "proj", 3, 0)
+
+	totals, err := s.SessionPctTotalsAll(ctx)
+	if err != nil {
+		t.Fatalf("SessionPctTotalsAll: %v", err)
+	}
+	pt, ok := totals[parent]
+	if !ok || pt == nil {
+		t.Fatalf("no rollup for parent %s (have keys: %v)", parent, keysOf(totals))
+	}
+	if got := pt.Cwd; got != parentCwd {
+		t.Errorf("parent totals Cwd = %q, want %q (never the subagent's %q)", got, parentCwd, subCwd)
+	}
+}
+
+// TestSessionPctTotalsAll_CwdEmptyWhenUnknown covers the graceful-empty
+// requirement: a session whose transcript rotated off disk before cwd
+// existed as a column has "" in the sessions table (the migration's
+// documented default), and that must surface as "" here too rather than
+// erroring or fabricating a value.
+func TestSessionPctTotalsAll_CwdEmptyWhenUnknown(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const sess = "77777777-7777-7777-7777-777777777777"
+	insertTestSession(t, s, sess, "proj", "") // cwd == "" by default
+
+	insertTestWindow(t, s, "week", 11000)
+	insertTestAttribution(t, s, "week", 11000, sess, "proj", 4, 0)
+
+	totals, err := s.SessionPctTotalsAll(ctx)
+	if err != nil {
+		t.Fatalf("SessionPctTotalsAll: %v", err)
+	}
+	pt, ok := totals[sess]
+	if !ok || pt == nil {
+		t.Fatalf("no rollup for session %s", sess)
+	}
+	if got := pt.Cwd; got != "" {
+		t.Errorf("Cwd = %q, want \"\" (unknown, not fabricated)", got)
 	}
 }
 

@@ -78,6 +78,17 @@ type AttrSlice struct {
 type AttrGroup struct {
 	Key     string `json:"key"`
 	Project string `json:"project,omitempty"`
+	// Cwd is the absolute working directory behind Project's sanitized name
+	// (project only replaces "/" with "-", which a real path segment can
+	// also contain, so it can't be reversed). Only meaningful for a
+	// session-keyed group (one owner, one directory); a project-keyed group
+	// omits it rather than pick one of the several directories that project
+	// name can legitimately span. For a group whose key is a session that
+	// dispatched subagents, this is the dispatcher's own cwd, never a
+	// subagent's, even though the subagent's spend is folded into this same
+	// row. Empty when the underlying session's cwd was never captured
+	// (transcript rotated off disk before this field existed).
+	Cwd string `json:"cwd,omitempty"`
 
 	Pct          float64 `json:"pct"`
 	MeasuredPct  float64 `json:"measured_pct"`
@@ -101,6 +112,15 @@ type AttrGroup struct {
 // SessionAttribution is one session's cost against both meters, embedded in
 // the session list and the session detail payload.
 type SessionAttribution struct {
+	// Cwd is the session's absolute working directory: the same value
+	// Project would reverse to if project's sanitization were reversible.
+	// For a session that dispatched subagents, this is its own cwd, never a
+	// subagent's, even though a subagent's spend rolls up into these same
+	// totals. Empty when the underlying session's cwd was never captured
+	// (transcript rotated off disk before this field existed) - render that
+	// as "unknown", not as a blank that reads like a bug.
+	Cwd string `json:"cwd,omitempty"`
+
 	// WeekPct is the session's share of the weekly limit: the headline
 	// number, since weekly windows are long enough that most sessions sit
 	// inside exactly one.

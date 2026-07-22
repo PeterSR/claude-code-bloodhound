@@ -25,11 +25,35 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 		rotation     int
 		restructure  int
 		modelsSeen   map[string]bool
-		// parentSessionUUID and cwd are constant across every turn in a
-		// session (denormalized onto each turn row the same way project is),
-		// so we only need to capture them once, at accumulator creation.
+		// parentSessionUUID is constant across every turn in a session
+		// (denormalized onto each turn row the same way project is), so we
+		// only need to capture it once, at accumulator creation.
 		parentSessionUUID string
-		cwd               string
+		// cwd is NOT constant the way project and parentSessionUUID are:
+		// project comes from the transcript's file path (one value per
+		// file, by construction), but cwd is read off each JSONL record and
+		// tracks wherever the agent's tools actually were at that moment,
+		// which can change turn to turn (cd into a subdirectory, a monorepo
+		// package, even a different checkout). sessions.cwd needs a single
+		// value, so we pick the most common one across the session's turns:
+		// it best reflects where the bulk of the session's actual work (and
+		// so its actual spend) happened. Rejected alternatives: the first
+		// turn's cwd (the launch directory) can be stale for the rest of a
+		// session that immediately moved elsewhere; the last turn's cwd (a
+		// single `cd` back to the launch dir at the very end would mislabel
+		// a session that did all its real work in between). Most-common is
+		// also naturally robust to a brief excursion (one `cd /tmp && ...`)
+		// that neither of the other two rules resists on its own.
+		//
+		// Empty cwd values (missing on old records, or turns whose JSONL
+		// predates this field) are excluded from the count entirely rather
+		// than being allowed to win by volume: a session with some tagged
+		// and some untagged turns should report the real directory, not "".
+		// cwdOrder preserves first-seen order so a tie resolves to whichever
+		// directory the session visited first, deterministically, rather
+		// than depending on Go's map iteration order.
+		cwdCounts map[string]int
+		cwdOrder  []string
 		// 5h-rolling
 		weights []int64
 		times   []int64
@@ -72,9 +96,15 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 				firstTSMS:         tsMS,
 				modelsSeen:        map[string]bool{},
 				parentSessionUUID: parentUUID,
-				cwd:               cwd,
+				cwdCounts:         map[string]int{},
 			}
 			acc[uuid] = a
+		}
+		if cwd != "" {
+			if _, seen := a.cwdCounts[cwd]; !seen {
+				a.cwdOrder = append(a.cwdOrder, cwd)
+			}
+			a.cwdCounts[cwd]++
 		}
 		a.lastTSMS = tsMS
 		a.turnCount++
@@ -155,6 +185,20 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 		}
 		sort.Strings(models)
 
+		// Most common cwd wins; see the field doc on sessAcc for why. Ties
+		// (equal counts) resolve to whichever was seen first, since we only
+		// overwrite on a strictly greater count.
+		var cwd string
+		if len(a.cwdOrder) > 0 {
+			cwd = a.cwdOrder[0]
+			best := a.cwdCounts[cwd]
+			for _, c := range a.cwdOrder[1:] {
+				if n := a.cwdCounts[c]; n > best {
+					cwd, best = c, n
+				}
+			}
+		}
+
 		rowsOut = append(rowsOut, store.SessionRow{
 			SessionUUID:         uuid,
 			Project:             a.project,
@@ -172,7 +216,7 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 			CacheTTL:            ttl,
 			Models:              strings.Join(models, ","),
 			ParentSessionUUID:   a.parentSessionUUID,
-			Cwd:                 a.cwd,
+			Cwd:                 cwd,
 		})
 	}
 

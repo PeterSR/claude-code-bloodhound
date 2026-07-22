@@ -123,6 +123,16 @@ func (s *Store) ReplaceAttribution(ctx context.Context, bucket string, windows [
 type SessionPctTotals struct {
 	SessionUUID string
 	Project     string
+	// Cwd is the EFFECTIVE owner's working directory: for a session that
+	// dispatched subagents, its own cwd (never a subagent's, even though a
+	// subagent's own spend is folded into this same row - see
+	// SessionPctTotalsAll). A subagent looked up directly never has its own
+	// key in the map SessionPctTotalsAll returns (its spend lives under its
+	// parent's key instead), so this field is never a subagent's cwd by
+	// construction, not just by convention. Empty when the underlying
+	// session's cwd was never captured (transcript rotated off disk before
+	// this column existed).
+	Cwd string
 
 	// WeekPct is the session's share of the weekly limit. Additive and
 	// well-behaved: every session in a week sums to that week's usage.
@@ -160,21 +170,28 @@ func (s *Store) SessionPctTotalsAll(ctx context.Context) (map[string]*SessionPct
 	// subagents contributed alongside it in that window (the common case,
 	// since a supervisor typically dispatches subagents inside one 5h
 	// window rather than across a boundary).
+	// psess resolves the effective owner's OWN sessions row, so cwd (unlike
+	// project) can't just read sa.project straight off session_attribution:
+	// a subagent's cwd genuinely differs from its dispatcher's, and this
+	// rollup's whole point is to report the dispatcher's, never the
+	// subagent's, for a row that already folds the subagent's spend in.
 	rows, err := s.DB.QueryContext(ctx, `
 		WITH per_window AS (
 			SELECT
 			    COALESCE(NULLIF(sess.parent_session_uuid, ''), sa.session_uuid) AS effective_uuid,
 			    sa.project              AS project,
+			    COALESCE(CASE WHEN sess.parent_session_uuid <> '' THEN psess.cwd ELSE sess.cwd END, '') AS cwd,
 			    sa.bucket               AS bucket,
 			    sa.window_start_unix_ms AS window_start_unix_ms,
 			    SUM(sa.measured_pct)    AS measured,
 			    SUM(sa.estimated_pct)   AS estimated
 			FROM session_attribution sa
-			LEFT JOIN sessions sess ON sess.session_uuid = sa.session_uuid
+			LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
+			LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
 			WHERE sa.session_uuid <> ''
 			GROUP BY effective_uuid, sa.bucket, sa.window_start_unix_ms
 		)
-		SELECT effective_uuid, MAX(project) AS project, bucket,
+		SELECT effective_uuid, MAX(project) AS project, MAX(cwd) AS cwd, bucket,
 		       SUM(measured + estimated) AS pct,
 		       MAX(measured + estimated) AS peak,
 		       SUM(measured)  AS measured,
@@ -191,16 +208,16 @@ func (s *Store) SessionPctTotalsAll(ctx context.Context) (map[string]*SessionPct
 	out := map[string]*SessionPctTotals{}
 	for rows.Next() {
 		var (
-			uuid, project, bucket       string
+			uuid, project, cwd, bucket  string
 			pct, peak, measured, estPct float64
 			windows                     int
 		)
-		if err := rows.Scan(&uuid, &project, &bucket, &pct, &peak, &measured, &estPct, &windows); err != nil {
+		if err := rows.Scan(&uuid, &project, &cwd, &bucket, &pct, &peak, &measured, &estPct, &windows); err != nil {
 			return nil, err
 		}
 		t, ok := out[uuid]
 		if !ok {
-			t = &SessionPctTotals{SessionUUID: uuid, Project: project}
+			t = &SessionPctTotals{SessionUUID: uuid, Project: project, Cwd: cwd}
 			out[uuid] = t
 		}
 		switch bucket {
@@ -283,6 +300,14 @@ type AttributionGroup struct {
 	Windows       int
 	FirstTSUnixMS int64
 	LastTSUnixMS  int64
+	// Cwd is the group's working directory, populated only when by=="session":
+	// a session-keyed group has exactly one well-defined owner and so one
+	// cwd (see GroupAttribution). A project-keyed group deliberately gets ""
+	// instead of an arbitrary member's directory: the whole point of adding
+	// this field is that one project can span many directories (measured on
+	// a real account: 140 distinct cwds under 44 projects), so picking just
+	// one to show would misrepresent the rest rather than fill a gap.
+	Cwd string
 }
 
 // GroupAttribution rolls attribution up by project or by session over the
@@ -296,12 +321,25 @@ type AttributionGroup struct {
 // naturally already pools them, join or no join.
 func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS int64) ([]AttributionGroup, error) {
 	keyCol := "sa.project"
+	// cwdExpr resolves to the EFFECTIVE owner's cwd, never a subagent's: when
+	// the spending session has a parent, its own cwd is irrelevant to this
+	// group (that's the row this whole rollup already folds it into), so we
+	// reach one more join to the parent's own sessions row instead of
+	// reporting where the subagent itself happened to run. Literal '' in
+	// by=="project" mode is deliberate (see AttributionGroup.Cwd's doc): a
+	// project-keyed group has no single cwd to report, so we don't compute
+	// one instead of just not having one.
+	cwdExpr := "''"
 	if by == "session" {
 		keyCol = "COALESCE(NULLIF(sess.parent_session_uuid, ''), sa.session_uuid)"
+		cwdExpr = "COALESCE(CASE WHEN sess.parent_session_uuid <> '' THEN psess.cwd ELSE sess.cwd END, '')"
 	}
 	// MAX(sa.project) is a plain lookup, not an aggregate choice: a session
 	// belongs to exactly one project, and grouping by project makes it the
-	// key anyway.
+	// key anyway. MAX(cwd) is the same kind of plain lookup in by=="session"
+	// mode: every row folded into one effective-owner group resolves cwdExpr
+	// to that same owner's single cwd, so MAX() just reads it back rather
+	// than choosing among genuinely different values.
 	//
 	// peak here is MAX() over raw session_attribution rows, same as the
 	// project grouping already did before this change: two sessions (or a
@@ -311,6 +349,7 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 	q := `
 		SELECT ` + keyCol + ` AS k,
 		       MAX(sa.project)                      AS project,
+		       MAX(` + cwdExpr + `)                 AS cwd,
 		       SUM(sa.measured_pct + sa.estimated_pct) AS pct,
 		       SUM(sa.measured_pct)                 AS measured,
 		       SUM(sa.estimated_pct)                AS estimated,
@@ -323,7 +362,8 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 		       MIN(NULLIF(sa.first_ts_unix_ms, 0))  AS first_ts,
 		       MAX(sa.last_ts_unix_ms)              AS last_ts
 		FROM session_attribution sa
-		LEFT JOIN sessions sess ON sess.session_uuid = sa.session_uuid
+		LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
+		LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
 		WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
 		GROUP BY k
 		ORDER BY pct DESC
@@ -337,17 +377,18 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 	out := []AttributionGroup{}
 	for rows.Next() {
 		var (
-			g, project      sql.NullString
+			g, project, cwd sql.NullString
 			firstTS, lastTS sql.NullInt64
 			grp             AttributionGroup
 		)
-		if err := rows.Scan(&g, &project, &grp.Pct, &grp.MeasuredPct, &grp.EstimatedPct, &grp.PeakPct,
+		if err := rows.Scan(&g, &project, &cwd, &grp.Pct, &grp.MeasuredPct, &grp.EstimatedPct, &grp.PeakPct,
 			&grp.CWTokens, &grp.RawTokens, &grp.TurnCount,
 			&grp.Sessions, &grp.Windows, &firstTS, &lastTS); err != nil {
 			return nil, err
 		}
 		grp.Key = g.String
 		grp.Project = project.String
+		grp.Cwd = cwd.String
 		grp.FirstTSUnixMS = firstTS.Int64
 		grp.LastTSUnixMS = lastTS.Int64
 		// The unattributed sentinel is a window property, not a session or a

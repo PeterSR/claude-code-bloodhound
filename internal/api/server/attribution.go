@@ -126,6 +126,7 @@ func (s *Server) attrGroups(ctx context.Context, bucket, by string, since int64)
 		row := routes.AttrGroup{
 			Key:           g.Key,
 			Project:       g.Project,
+			Cwd:           g.Cwd,
 			Pct:           round2(g.Pct),
 			MeasuredPct:   round2(g.MeasuredPct),
 			EstimatedPct:  round2(g.EstimatedPct),
@@ -263,6 +264,7 @@ func sessionAttribution(t *store.SessionPctTotals) routes.SessionAttribution {
 		return routes.SessionAttribution{}
 	}
 	return routes.SessionAttribution{
+		Cwd:          t.Cwd,
 		WeekPct:      round2(t.WeekPct),
 		FiveHPct:     round2(t.FiveHPct),
 		FiveHPeakPct: round2(t.FiveHPeakPct),
