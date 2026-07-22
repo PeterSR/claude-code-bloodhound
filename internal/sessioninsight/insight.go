@@ -8,6 +8,7 @@ package sessioninsight
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/costweight"
@@ -33,10 +34,20 @@ const RawExpr = `(input_tokens + output_tokens + cache_read + cache_create_5m + 
 // predict the new prompt or response size, but the prefix itself is
 // fixed and must be re-paid as cache creation. The prefix at turn N is
 // approximated by what the model saw as input + what it produced as
-// output during that turn. Like CWExpr, generated per call from the
-// runtime price table.
-func ColdPrefixCWExpr() string {
-	return `((input_tokens + cache_read + cache_create_5m + cache_create_1h + output_tokens) * 1.25 * ` +
+// output during that turn.
+//
+// cacheWriteWeight is the price of that re-caching, and it must match
+// the TTL the session's cache is actually running on: a 1h-TTL session
+// re-caches at costweight.WCacheWrite1h (2.0), a 5m-TTL session at
+// costweight.WCacheWrite5m (1.25): a 60% difference, so picking the wrong
+// one is not cosmetic.
+// This function does not know the TTL by itself (that comes from the
+// turn's own cache_create columns, decided in ForSession); callers build
+// the expression once per candidate weight and let the caller's TTL
+// decision choose between the results, so the two can never disagree.
+// Like CWExpr, generated per call from the runtime price table.
+func ColdPrefixCWExpr(cacheWriteWeight float64) string {
+	return fmt.Sprintf(`((input_tokens + cache_read + cache_create_5m + cache_create_1h + output_tokens) * %g * `, cacheWriteWeight) +
 		costweight.ModelCaseExpr() + `)`
 }
 
@@ -238,25 +249,32 @@ func ForSession(ctx context.Context, db *sql.DB, ref SessionRef, now time.Time, 
 		info.SessionAvgCWTokens = round2(cwSum.Float64 / float64(info.TurnCount))
 	}
 
+	// The cold-prefix cost depends on which cache TTL the session is
+	// running on, but that TTL is only known once we've read this same
+	// query's cache_create columns for the most recent turn (below). So
+	// both candidate weights are computed here, and the TTL decision just
+	// below picks between the two results rather than the query picking
+	// one up front.
 	if rows, err := db.QueryContext(ctx, `
-		SELECT `+RawExpr+`, `+CWExpr()+`, `+ColdPrefixCWExpr()+`, cache_create_5m, cache_create_1h
+		SELECT `+RawExpr+`, `+CWExpr()+`, `+ColdPrefixCWExpr(costweight.WCacheWrite5m)+`, `+ColdPrefixCWExpr(costweight.WCacheWrite1h)+`, cache_create_5m, cache_create_1h
 		FROM turns WHERE session_uuid = ?
 		ORDER BY turn_idx DESC LIMIT 3
 	`, ref.UUID); err == nil {
 		defer rows.Close()
 		var lastRaw, lastCC5m, lastCC1h int64
-		var lastCW, lastColdPrefix, sumCW float64
+		var lastCW, lastColdPrefix5m, lastColdPrefix1h, sumCW float64
 		var n int
 		for rows.Next() {
 			var r, cc5m, cc1h int64
-			var c, cp float64
-			if err := rows.Scan(&r, &c, &cp, &cc5m, &cc1h); err != nil {
+			var c, cp5m, cp1h float64
+			if err := rows.Scan(&r, &c, &cp5m, &cp1h, &cc5m, &cc1h); err != nil {
 				break
 			}
 			if n == 0 {
 				lastRaw = r
 				lastCW = c
-				lastColdPrefix = cp
+				lastColdPrefix5m = cp5m
+				lastColdPrefix1h = cp1h
 				lastCC5m = cc5m
 				lastCC1h = cc1h
 			}
@@ -277,18 +295,29 @@ func ForSession(ctx context.Context, db *sql.DB, ref SessionRef, now time.Time, 
 		var ttlS int64 = 0
 		switch {
 		case lastCC1h > 0:
-			ttlS = 3600
+			ttlS = costweight.CacheTTL1hSeconds
 		case lastCC5m > 0:
-			ttlS = 300
+			ttlS = costweight.CacheTTL5mSeconds
 		case ref.CacheTTL == "1h":
-			ttlS = 3600
+			ttlS = costweight.CacheTTL1hSeconds
 		case ref.CacheTTL == "5m":
-			ttlS = 300
+			ttlS = costweight.CacheTTL5mSeconds
 		}
 		if ttlS > 0 {
 			info.CacheTTLS = ttlS
 			if info.AgeS >= ttlS {
-				info.ColdResumeCostCWTokens = round2(lastColdPrefix)
+				// Same ttlS decision as above picks which weight priced the
+				// prefix: 1h TTL re-caches at WCacheWrite1h, everything else
+				// (5m, or an unresolved TTL that fell through to
+				// CacheTTL5mSeconds above) at WCacheWrite5m. Mirrors
+				// costweight.CacheWriteWeight's own branching, just applied
+				// to the two precomputed SQL results rather than the weight
+				// itself.
+				coldPrefix := lastColdPrefix5m
+				if ttlS == costweight.CacheTTL1hSeconds {
+					coldPrefix = lastColdPrefix1h
+				}
+				info.ColdResumeCostCWTokens = round2(coldPrefix)
 			} else if remain := ttlS - info.AgeS; remain <= ttlS/5 {
 				info.CacheExpiresInS = remain
 			}

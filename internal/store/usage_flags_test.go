@@ -137,6 +137,48 @@ func TestClassifyBoundaryHeuristicCatchesQuietRotation(t *testing.T) {
 	}
 }
 
+func TestClassifyRejectsReadingsAboveCap(t *testing.T) {
+	// The exact bug: a 109 misread where the panel showed 100. If it were
+	// clamped rather than rejected it would become the peak, and the
+	// honest 100 that follows would then read as a drop that never
+	// recovers (a phantom reset). Rejecting it keeps the peak at whatever
+	// preceded it, so the honest 100 is just a rise.
+	f := classifyBucket(seq(92, 95, 109, 100, 100))
+	if got := invalids(f); !eqInts(got, []int{2}) {
+		t.Errorf("invalid at %v, want [2] (the impossible reading)", got)
+	}
+	if got := resets(f); len(got) != 0 {
+		t.Errorf("no reset expected, got %v", got)
+	}
+}
+
+func TestClassifyOscillationIsNotAReset(t *testing.T) {
+	// A jitter dip that repeats its low value for a few polls before
+	// ticking back up, rather than recovering on the very next reading.
+	// The old single-reading lookahead in bucketRecovers called the
+	// second 28 a persistent drop; it should still read as jitter.
+	f := classifyBucket(seq(30, 28, 28, 28, 30, 30))
+	if got := resets(f); len(got) != 0 {
+		t.Errorf("no reset expected from an oscillation, got %v", got)
+	}
+	if got := invalids(f); !eqInts(got, []int{1, 2, 3}) {
+		t.Errorf("invalids=%v, want [1 2 3] (the whole low plateau)", got)
+	}
+}
+
+func TestClassifyStillDetectsGenuineDropToZero(t *testing.T) {
+	// A real reset must survive both changes above: the drop is not above
+	// the cap (no rejection applies) and it does not recover, immediately
+	// or after a run of equal readings (still a reset).
+	f := classifyBucket(seq(88, 95, 97, 0, 0, 1, 2))
+	if got := resets(f); !eqInts(got, []int{3}) {
+		t.Errorf("reset at %v, want [3]", got)
+	}
+	if got := invalids(f); len(got) != 0 {
+		t.Errorf("no misparse expected, got %v", got)
+	}
+}
+
 func TestClassifyEmptyAndSingle(t *testing.T) {
 	if len(classifyBucket(nil)) != 0 {
 		t.Error("nil series should classify to nothing")

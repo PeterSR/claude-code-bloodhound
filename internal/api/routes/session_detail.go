@@ -19,6 +19,10 @@ type SessionDetailResponse struct {
 	ColdCompactionCount int              `json:"cold_compaction_count"`
 	Turns               []TurnItem       `json:"turns"`
 	Compactions         []CompactionItem `json:"compactions"`
+
+	// Attribution is what this one conversation cost against the 5h and
+	// weekly limits, both in total and window by window.
+	Attribution SessionAttributionDetail `json:"attribution"`
 }
 
 // TurnItem is the on-the-wire shape for a single turn.

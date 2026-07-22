@@ -17,8 +17,8 @@ var aggregateJSON bool
 var aggregateCmd = &cobra.Command{
 	Use:   "aggregate",
 	Short: "Recompute rolling metrics and materialized views",
-	Long: `Rebuilds the sessions and buckets tables from the raw turns +
-compactions data. Idempotent and cheap (~50k turns runs in well under a
+	Long: `Rebuilds the sessions, buckets, calibration and limit-attribution
+tables from the raw turns + compactions data. Idempotent and cheap (~50k turns runs in well under a
 second). Run on a slower cadence than ingest itself.
 
 Mostly useful when you're not running ` + "`bloodhound daemon`" + ` — the daemon
@@ -41,8 +41,9 @@ this alongside the daemon is harmless but redundant.`,
 			fmt.Fprintln(w, string(b))
 			return err
 		}
-		fmt.Fprintf(w, "aggregate: %d sessions, %d buckets, %d cal-points in %.2fs\n",
-			stats.SessionsRefreshed, stats.BucketsRebuilt, stats.CalibrationPointsBuilt, stats.ElapsedS)
+		fmt.Fprintf(w, "aggregate: %d sessions, %d buckets, %d cal-points, %d attribution rows in %.2fs\n",
+			stats.SessionsRefreshed, stats.BucketsRebuilt, stats.CalibrationPointsBuilt,
+			stats.AttributionRowsBuilt, stats.ElapsedS)
 		return err
 	},
 }

@@ -17,17 +17,19 @@ type Stats struct {
 	SessionsRefreshed      int     `json:"sessions_refreshed"`
 	BucketsRebuilt         int     `json:"buckets_rebuilt"`
 	CalibrationPointsBuilt int     `json:"calibration_points_built"`
+	AttributionRowsBuilt   int     `json:"attribution_rows_built"`
 	ElapsedS               float64 `json:"elapsed_s"`
 }
 
 // Options configures Run.
 type Options struct {
-	// SkipSessions / SkipBuckets / SkipCalibration let callers run only
-	// one phase. Mostly useful in tests; production always wants all
-	// three.
+	// SkipSessions / SkipBuckets / SkipCalibration / SkipAttribution let
+	// callers run only one phase. Mostly useful in tests; production always
+	// wants all four.
 	SkipSessions    bool
 	SkipBuckets     bool
 	SkipCalibration bool
+	SkipAttribution bool
 }
 
 // Run recomputes the materialized aggregate tables in one logical pass.
@@ -68,6 +70,16 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 			return st, fmt.Errorf("refresh calibration: %w", err)
 		}
 		st.CalibrationPointsBuilt = n
+	}
+
+	// Attribution runs last: its estimated fallback reads the calibration
+	// medians the phase above just rewrote.
+	if !opts.SkipAttribution {
+		n, err := refreshAttribution(ctx, s)
+		if err != nil {
+			return st, fmt.Errorf("refresh attribution: %w", err)
+		}
+		st.AttributionRowsBuilt = n
 	}
 
 	st.ElapsedS = time.Since(t0).Seconds()

@@ -8,7 +8,16 @@ import (
 )
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Store.ListSessions(r.Context())
+	ctx := r.Context()
+	rows, err := s.Store.ListSessions(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	// One grouped query for the whole list rather than a lookup per row:
+	// the table is a few thousand rows at most and the join would otherwise
+	// be N+1.
+	pct, err := s.Store.SessionPctTotalsAll(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -16,6 +25,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	out := make([]routes.SessionListItem, 0, len(rows))
 	for _, sess := range rows {
 		out = append(out, routes.SessionListItem{
+			Attribution:         sessionAttribution(pct[sess.SessionUUID]),
 			SessionUUID:         sess.SessionUUID,
 			Project:             sess.Project,
 			FirstTS:             time.UnixMilli(sess.FirstTSUnixMS).UTC().Format(time.RFC3339),

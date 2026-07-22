@@ -47,6 +47,34 @@ type SessionDetail = {
   cold_compaction_count: number;
   turns: TurnItem[];
   compactions: CompactionItem[];
+  attribution: SessionAttributionDetail;
+};
+
+type SessionAttributionDetail = {
+  week_pct: number;
+  five_h_pct: number;
+  five_h_peak_pct: number;
+  measured_pct: number;
+  estimated_pct: number;
+  windows_5h?: number;
+  windows_week?: number;
+  week: SessionWindowSlice[];
+  five_h: SessionWindowSlice[];
+};
+
+type SessionWindowSlice = {
+  window_start_unix_ms: number;
+  window_end_unix_ms: number;
+  inferred?: boolean;
+  partial?: boolean;
+  in_progress?: boolean;
+  pct: number;
+  measured_pct: number;
+  estimated_pct: number;
+  window_pct: number;
+  cw_tokens: number;
+  raw_tokens: number;
+  turn_count: number;
 };
 
 type TimelineEntry =
@@ -95,6 +123,16 @@ export default function SessionDetail() {
               <KV k="Output" v={fmtNumber(data.output_tokens)} />
               <KV k="Peak 5h" v={fmtNumber(data.peak_5h_raw_tokens)} accent="text-rose-500" />
               <KV k="Cache TTL" v={data.cache_ttl} mono />
+              <KV
+                k="% of week"
+                v={fmtLimitPct(data.attribution.week_pct)}
+                accent="text-sky-600 dark:text-sky-400"
+              />
+              <KV
+                k="% of 5h (peak)"
+                v={fmtLimitPct(data.attribution.five_h_peak_pct)}
+                accent="text-sky-600 dark:text-sky-400"
+              />
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3 text-sm">
               <KV k="Idle miss" v={data.idle_miss_count.toLocaleString()} accent={data.idle_miss_count > 0 ? 'text-red-500' : undefined} />
@@ -111,6 +149,8 @@ export default function SessionDetail() {
               />
             </div>
           </div>
+
+          <LimitCost attr={data.attribution} />
 
           <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 max-w-5xl overflow-x-auto">
             <table className="w-full text-sm">
@@ -186,6 +226,116 @@ export default function SessionDetail() {
       )}
     </div>
   );
+}
+
+/** What this one conversation cost against each limit meter, window by
+ *  window. The weekly view is the headline: weekly windows are long enough
+ *  that most sessions sit inside exactly one, while the 5h view shows how
+ *  the work spread across the shorter meter. */
+function LimitCost({ attr }: { attr: SessionAttributionDetail }) {
+  const nothing = attr.week.length === 0 && attr.five_h.length === 0;
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 mb-6 max-w-5xl">
+      <div className="flex items-baseline gap-2 mb-1">
+        <h2 className="text-sm font-semibold tracking-tight">Limit cost</h2>
+        <Link to="/attribution" className="text-[11px] text-zinc-500 hover:text-rose-500">
+          see all sessions →
+        </Link>
+      </div>
+      {nothing ? (
+        <p className="text-xs text-zinc-500">
+          Not attributed yet: the aggregator picks this up on its next pass
+          (every 15 minutes by default).
+        </p>
+      ) : (
+        <>
+          <p className="text-xs text-zinc-500 mb-4">
+            This session took{' '}
+            <span className="font-medium text-zinc-700 dark:text-zinc-300">
+              {fmtLimitPct(attr.week_pct)}
+            </span>{' '}
+            of the weekly limit
+            {attr.windows_5h && attr.windows_5h > 1 ? (
+              <>
+                {' '}and spread across {attr.windows_5h} five-hour windows, the
+                worst taking{' '}
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                  {fmtLimitPct(attr.five_h_peak_pct)}
+                </span>
+                .
+              </>
+            ) : (
+              <>
+                {' '}and{' '}
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                  {fmtLimitPct(attr.five_h_peak_pct)}
+                </span>{' '}
+                of its 5-hour window.
+              </>
+            )}
+            {attr.estimated_pct > 0.005 && (
+              <> {fmtLimitPct(attr.estimated_pct)} of the weekly figure is estimated.</>
+            )}
+          </p>
+          <div className="grid gap-5 md:grid-cols-2">
+            <WindowBreakdown title="Weekly windows" slices={attr.week} />
+            <WindowBreakdown title="5-hour windows" slices={attr.five_h} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** One row per window: this session's share, drawn against everything else
+ *  attributed to the same window so the bar reads as "my slice of that". */
+function WindowBreakdown({ title, slices }: { title: string; slices: SessionWindowSlice[] }) {
+  if (slices.length === 0) return null;
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">{title}</div>
+      <div className="space-y-1.5">
+        {slices.map((s) => {
+          const share = s.window_pct > 0 ? Math.min(1, s.pct / s.window_pct) : 0;
+          return (
+            <div key={s.window_start_unix_ms} className="flex items-center gap-2 text-xs">
+              <div className="w-16 shrink-0 text-zinc-500 tabular-nums">
+                {fmtWindowDate(s.window_start_unix_ms)}
+              </div>
+              <div
+                className="flex-1 h-2 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden"
+                title={`${fmtLimitPct(s.pct)} of this window, which used ${fmtLimitPct(s.window_pct)} in total · ${s.turn_count.toLocaleString()} turns`}
+              >
+                <div
+                  className="h-full rounded-full bg-sky-500/80"
+                  style={{ width: `${share * 100}%` }}
+                />
+              </div>
+              <div className="w-12 shrink-0 text-right tabular-nums text-zinc-600 dark:text-zinc-400">
+                {fmtLimitPct(s.pct)}
+              </div>
+              {s.inferred && (
+                <span className="text-[10px] text-zinc-400 shrink-0" title="estimated: no /usage readings covered this window">
+                  est
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function fmtLimitPct(n: number): string {
+  if (!n) return '0%';
+  if (n < 0.1) return `${n.toFixed(2)}%`;
+  if (n < 10) return `${n.toFixed(1)}%`;
+  return `${Math.round(n)}%`;
+}
+
+function fmtWindowDate(ms: number): string {
+  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 function entryMS(e: TimelineEntry): number {

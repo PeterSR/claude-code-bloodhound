@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
+	"github.com/PeterSR/claude-code-bloodhound/internal/attribute"
 )
 
 func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +45,24 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.FirstTS = time.UnixMilli(firstMS).UTC().Format(time.RFC3339)
 	resp.LastTS = time.UnixMilli(lastMS).UTC().Format(time.RFC3339)
+
+	// Limit attribution. A session with no attribution yet (ingested since
+	// the last aggregate pass) still renders; the panel just reads as
+	// pending rather than as zero cost.
+	totals, err := s.Store.SessionPctTotalsAll(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	resp.Attribution.SessionAttribution = sessionAttribution(totals[uuid])
+	if resp.Attribution.Week, err = s.sessionWindowSlices(ctx, uuid, attribute.BucketWeek); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if resp.Attribution.FivH, err = s.sessionWindowSlices(ctx, uuid, attribute.Bucket5h); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 
 	trows, err := s.Store.DB.QueryContext(ctx, `
 		SELECT turn_idx, ts, ts_unix_ms, model,

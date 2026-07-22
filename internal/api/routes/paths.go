@@ -12,6 +12,7 @@ const (
 	PathSessionsPrefix   = "/api/sessions/"
 	PathHistory          = "/api/history"
 	PathCapacity         = "/api/capacity"
+	PathAttribution      = "/api/attribution"
 	PathModels           = "/api/models"
 	PathPricesHeal       = "/api/prices/heal"
 	PathCompactions      = "/api/compactions"

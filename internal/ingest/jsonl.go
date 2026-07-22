@@ -25,10 +25,17 @@ type rawRecord struct {
 	UserType                string          `json:"userType,omitempty"`
 	ToolUseResult           json.RawMessage `json:"toolUseResult,omitempty"`
 	SourceToolAssistantUUID string          `json:"sourceToolAssistantUUID,omitempty"`
-	Message                 json.RawMessage `json:"message,omitempty"`
+	// RequestID identifies the API call this line belongs to. Combined with
+	// Message.ID it forms the dedupe key below: Claude Code writes one JSONL
+	// line per content block of a response (text, then each tool_use), and
+	// every line repeats the same usage object, so without this the same
+	// API charge is counted once per block instead of once per response.
+	RequestID string          `json:"requestId,omitempty"`
+	Message   json.RawMessage `json:"message,omitempty"`
 }
 
 type rawMessage struct {
+	ID      string          `json:"id"`
 	Model   string          `json:"model"`
 	Usage   *rawUsage       `json:"usage"`
 	Content json.RawMessage `json:"content"`
@@ -101,7 +108,20 @@ type FileResult struct {
 // parseFile streams one JSONL file and emits structured Turn + Compaction
 // slices. Compactions are marked confirmed=true only when the next turn's
 // prefix shrinks ≥ 30% relative to the boundary's prefix.
+//
+// Claude Code writes one JSONL line per content block of an assistant
+// response (text, then each tool_use), and every line repeats the same
+// usage object verbatim. Without deduping, a three-block response would be
+// counted as three API charges instead of one. dedupeLastIndex is a cheap
+// first pass that records the last line each API response occupies, so the
+// main loop below can skip every earlier duplicate before it touches any
+// side effect (compaction confirmation, gap_s, Classify, turnIdx).
 func parseFile(path string) (FileResult, error) {
+	dedupeLast, err := lastOccurrenceIndex(path)
+	if err != nil {
+		return FileResult{}, err
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return FileResult{}, err
@@ -142,6 +162,12 @@ func parseFile(path string) (FileResult, error) {
 		markPostCompact bool
 
 		turnIdx int
+
+		// assistantIdx counts assistant records with parseable usage, in
+		// file order, starting at 0. It is the same counter lastOccurrenceIndex
+		// used to build dedupeLast, so comparing the two tells us whether the
+		// record we're on now is the last (surviving) occurrence of its key.
+		assistantIdx int
 	)
 
 	finalizeCompaction := func(curPrefix int, confirmed bool, reason string) {
@@ -243,6 +269,20 @@ func parseFile(path string) (FileResult, error) {
 			if msg.Usage == nil {
 				continue
 			}
+
+			// Skip every occurrence of this API response except its last:
+			// keeping the last (rather than the first) matters because in
+			// the one case where duplicate lines aren't byte-identical, a
+			// streaming partial, only the final line carries the finished
+			// usage. This must happen before any side effect below (compaction
+			// confirm, gap_s, Classify, turnIdx) runs, or a duplicate would
+			// still perturb state for the surviving record.
+			cur := assistantIdx
+			assistantIdx++
+			if key := dedupeKey(msg.ID, rec.RequestID); key != "" && dedupeLast[key] != cur {
+				continue
+			}
+
 			cw5 := 0
 			cw1 := 0
 			if msg.Usage.CacheCreation != nil {
@@ -321,6 +361,70 @@ func parseFile(path string) (FileResult, error) {
 	}
 
 	return res, nil
+}
+
+// lastOccurrenceIndex makes a cheap first pass over the file and records,
+// for each dedupe key, the 0-based index (counting only assistant records
+// with parseable usage, in file order) of that key's LAST occurrence. The
+// main loop in parseFile uses this to decide, before any side effect runs,
+// whether the record it's looking at is the one that should survive.
+//
+// A second full read of the file is the simplest way to know "is this the
+// last one" while scanning forward exactly once for the real work; the
+// alternative (buffer every candidate Turn and its side effects, then
+// filter) is what the compaction/gap_s/Classify/turnIdx side effects make
+// hard to get right, per the fix note in parseFile.
+func lastOccurrenceIndex(path string) (map[string]int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+
+	last := make(map[string]int)
+	idx := 0
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec rawRecord
+		if err := json.Unmarshal(line, &rec); err != nil || rec.Type != "assistant" {
+			continue
+		}
+		var msg rawMessage
+		if err := json.Unmarshal(rec.Message, &msg); err != nil || msg.Usage == nil {
+			continue
+		}
+		if key := dedupeKey(msg.ID, rec.RequestID); key != "" {
+			last[key] = idx
+		}
+		idx++
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return last, nil
+}
+
+// dedupeKey identifies the API response a JSONL line belongs to, from
+// message.id (inside the message object) and requestId (top-level on the
+// record). message.id is the load-bearing half: without it we have nothing
+// safe to group on, so we return "" and the caller treats the record as
+// unique rather than risk merging two unrelated responses. requestId
+// narrows the key further when present; transcripts predating requestId
+// key on message.id alone.
+func dedupeKey(messageID, requestID string) string {
+	if messageID == "" {
+		return ""
+	}
+	if requestID == "" {
+		return messageID
+	}
+	return messageID + "\x00" + requestID
 }
 
 // extractUserPromptPreview pulls a single-line, length-capped preview out of

@@ -6,6 +6,7 @@ import Now from './pages/Now';
 import Trail from './pages/Trail';
 import History from './pages/History';
 import Models from './pages/Models';
+import Attribution from './pages/Attribution';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
 import Compactions from './pages/Compactions';
@@ -28,6 +29,7 @@ export default function App() {
           <Route path="trail" element={<Trail />} />
           <Route path="history" element={<History />} />
           <Route path="models" element={<Models />} />
+          <Route path="attribution" element={<Attribution />} />
           <Route path="sessions" element={<Sessions />} />
           <Route path="sessions/:uuid" element={<SessionDetail />} />
           <Route path="compactions" element={<Compactions />} />

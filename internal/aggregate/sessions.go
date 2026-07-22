@@ -4,7 +4,9 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/attribute"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
@@ -115,8 +117,10 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 		}
 	}
 
-	// Compute peak 5h window per session and build the row set.
-	const fiveHMS int64 = 5 * 3600 * 1000
+	// Compute peak 5h window per session and build the row set. Derived from
+	// attribute.SessPeriod (Anthropic's 5-hour limit window), same as
+	// buckets.go, so the two can never disagree about how long a window is.
+	const fiveHMS int64 = int64(attribute.SessPeriod / time.Millisecond)
 	type sessRow struct {
 		store.SessionRow
 	}

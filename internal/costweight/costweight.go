@@ -26,14 +26,41 @@ import (
 
 // Token-type weights, relative to one input token on the same model.
 // Mirrors Anthropic's published cache-read / cache-write / output
-// multipliers.
+// multipliers. Exported: these are facts about Anthropic's published
+// pricing, not internals of this package, and callers outside it (the
+// cold-prefix estimate in sessioninsight) need the cache-write pair
+// specifically rather than re-deriving them.
 const (
-	wInput        = 1.0
-	wOutput       = 5.0
-	wCacheRead    = 0.1
-	wCacheWrite5m = 1.25
-	wCacheWrite1h = 2.0
+	WInput        = 1.0
+	WOutput       = 5.0
+	WCacheRead    = 0.1
+	WCacheWrite5m = 1.25
+	WCacheWrite1h = 2.0
 )
+
+// CacheTTL1hSeconds / CacheTTL5mSeconds are the two cache TTLs Anthropic
+// supports, in seconds. Callers that classify a turn's or session's cache
+// state (sessioninsight.ForSession) compare an observed age against these
+// rather than carrying their own copy of the TTL numbers.
+const (
+	CacheTTL1hSeconds int64 = 3600
+	CacheTTL5mSeconds int64 = 300
+)
+
+// CacheWriteWeight returns the cache-write weight for the given TTL, in
+// seconds. Only 3600 (1h) and 300 (5m) are real Anthropic TTLs; any other
+// input (a TTL we failed to classify, or a future value this package
+// doesn't know about yet) falls back to WCacheWrite5m. 5m is Anthropic's
+// own default cache TTL, applied whenever a request does not opt into the
+// 1h extended-cache beta, so an unrecognized TTL is more likely a missing
+// or unclassified default than a misread opt-in; assuming the opt-in tier
+// would be the more surprising guess of the two.
+func CacheWriteWeight(ttlSeconds int64) float64 {
+	if ttlSeconds == CacheTTL1hSeconds {
+		return WCacheWrite1h
+	}
+	return WCacheWrite5m
+}
 
 // DefaultMultiplier is applied to any model absent from the table.
 //
@@ -68,11 +95,11 @@ func Models() []string {
 
 // CW returns cost-weighted tokens for one turn.
 func CW(model string, in, out, cacheRead, cacheWrite5m, cacheWrite1h int64) float64 {
-	typed := float64(in)*wInput +
-		float64(out)*wOutput +
-		float64(cacheRead)*wCacheRead +
-		float64(cacheWrite5m)*wCacheWrite5m +
-		float64(cacheWrite1h)*wCacheWrite1h
+	typed := float64(in)*WInput +
+		float64(out)*WOutput +
+		float64(cacheRead)*WCacheRead +
+		float64(cacheWrite5m)*WCacheWrite5m +
+		float64(cacheWrite1h)*WCacheWrite1h
 	return typed * Multiplier(model)
 }
 
@@ -93,13 +120,20 @@ func qualify(alias, col string) string {
 // This is the shape the weight estimator needs: it must observe tokens
 // *without* the model multiplier applied, or it would just re-derive its
 // own input. See learn.go.
+//
+// Built from the W* constants above (via %g, which renders e.g. 1.0 as
+// "1" and 1.25 as "1.25") rather than repeating the weights as string
+// literals, so the package doc's promise that Go and SQL cannot drift is
+// actually true.
 func TypeExprFor(alias string) string {
 	q := func(c string) string { return qualify(alias, c) }
-	return "(" + q("input_tokens") + " * 1.0" +
-		" + " + q("output_tokens") + " * 5.0" +
-		" + " + q("cache_read") + " * 0.1" +
-		" + " + q("cache_create_5m") + " * 1.25" +
-		" + " + q("cache_create_1h") + " * 2.0)"
+	return fmt.Sprintf("(%s * %g + %s * %g + %s * %g + %s * %g + %s * %g)",
+		q("input_tokens"), WInput,
+		q("output_tokens"), WOutput,
+		q("cache_read"), WCacheRead,
+		q("cache_create_5m"), WCacheWrite5m,
+		q("cache_create_1h"), WCacheWrite1h,
+	)
 }
 
 // TypeExpr is TypeExprFor with no alias — the common case.
