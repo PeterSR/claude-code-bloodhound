@@ -80,7 +80,7 @@ func TestParseFile_DedupesRepeatedContentBlocks(t *testing.T) {
 	}
 	path := writeJSONLFile(t, "session-abc12345.jsonl", records)
 
-	fr, err := parseFile(path)
+	fr, err := parseFile(path, nil)
 	if err != nil {
 		t.Fatalf("parseFile: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestParseFile_DedupesOnMessageIDWithoutRequestID(t *testing.T) {
 	}
 	path := writeJSONLFile(t, "session-abc12345.jsonl", records)
 
-	fr, err := parseFile(path)
+	fr, err := parseFile(path, nil)
 	if err != nil {
 		t.Fatalf("parseFile: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestParseFile_NoDedupeWhenIdentityMissing(t *testing.T) {
 	}
 	path := writeJSONLFile(t, "session-abc12345.jsonl", records)
 
-	fr, err := parseFile(path)
+	fr, err := parseFile(path, nil)
 	if err != nil {
 		t.Fatalf("parseFile: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestParseFile_TurnIdxStaysDenseAcrossDuplicates(t *testing.T) {
 	}
 	path := writeJSONLFile(t, "session-abc12345.jsonl", records)
 
-	fr, err := parseFile(path)
+	fr, err := parseFile(path, nil)
 	if err != nil {
 		t.Fatalf("parseFile: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestParseFile_CompactionConfirmUsesSurvivingPrefixOnly(t *testing.T) {
 	}
 	path := writeJSONLFile(t, "session-abc12345.jsonl", records)
 
-	fr, err := parseFile(path)
+	fr, err := parseFile(path, nil)
 	if err != nil {
 		t.Fatalf("parseFile: %v", err)
 	}

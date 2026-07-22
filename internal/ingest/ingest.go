@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,11 +33,15 @@ type Stats struct {
 	FilesSkippedMtime int
 	FilesSkippedSmall int
 	FilesSkippedTrail int
-	FilesParsed       int
-	TurnsAdded        int
-	CompactionsAdded  int
-	Errors            []string
-	ElapsedS          float64
+	// FilesSkippedBadParent counts subagent files whose containing directory
+	// name didn't look like a session UUID: rather than trust a malformed
+	// directory as a parent link, we skip the file and record why in Errors.
+	FilesSkippedBadParent int
+	FilesParsed           int
+	TurnsAdded            int
+	CompactionsAdded      int
+	Errors                []string
+	ElapsedS              float64
 }
 
 // Run is the one-shot ingester. Idempotent; safe to call concurrently with
@@ -75,13 +80,35 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 		trailSkip = nil
 	}
 
-	for _, p := range files {
+	for _, sf := range files {
 		if err := ctx.Err(); err != nil {
 			return st, err
 		}
 		st.FilesScanned++
+		p := sf.path
 
-		if trailSkip[sessionUUIDFromPath(p)] {
+		// A subagent transcript's parent link comes entirely from its
+		// directory name, so a garbled one (a Claude Code version change,
+		// a hand-edited directory, anything) has no safe fallback: writing
+		// a turn with a made-up parent would misattribute real spend rather
+		// than just miss it. Skip and say why, the same way a stat or parse
+		// error does below.
+		if sf.isSubagent && !looksLikeUUID(sf.parentUUID) {
+			st.FilesSkippedBadParent++
+			st.Errors = append(st.Errors, fmt.Sprintf(
+				"subagent %s: parent dir %q doesn't look like a session UUID, skipping", p, sf.parentUUID))
+			continue
+		}
+
+		// Trail's analyzer session is excluded by session UUID (see below);
+		// a subagent it dispatched has to be excluded by its PARENT's UUID
+		// instead, since the subagent's own id (the filename stem) never
+		// appears in trail_runs.
+		trailKey := sessionUUIDFromPath(p)
+		if sf.isSubagent {
+			trailKey = sf.parentUUID
+		}
+		if trailSkip[trailKey] {
 			st.FilesSkippedTrail++
 			continue
 		}
@@ -91,7 +118,14 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 			st.Errors = append(st.Errors, fmt.Sprintf("stat %s: %v", p, err))
 			continue
 		}
-		if info.Size() < opts.MinFileSize {
+		// MinFileSize guards against wasting a parse + transaction on an
+		// abandoned top-level session that's little more than the initial
+		// human message (see the field doc). A subagent transcript has no
+		// such correlation between file size and whether real spend
+		// happened: a one-exchange subagent invocation can be small and
+		// still carry a real API charge, so the guard only applies to
+		// top-level files.
+		if !sf.isSubagent && info.Size() < opts.MinFileSize {
 			st.FilesSkippedSmall++
 			continue
 		}
@@ -105,7 +139,11 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 			}
 		}
 
-		fr, err := parseFile(p)
+		var sa *subagentContext
+		if sf.isSubagent {
+			sa = &subagentContext{parentUUID: sf.parentUUID}
+		}
+		fr, err := parseFile(p, sa)
 		if err != nil {
 			st.Errors = append(st.Errors, fmt.Sprintf("parse %s: %v", p, err))
 			continue
@@ -162,13 +200,54 @@ func sessionUUIDFromPath(p string) string {
 	return strings.TrimSuffix(filepath.Base(p), ".jsonl")
 }
 
-func findSessionFiles(dir string) ([]string, error) {
-	var out []string
-	matches, err := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
+// sessionFile is one discovered JSONL transcript.
+type sessionFile struct {
+	path string
+	// isSubagent marks a file found one level deeper, at
+	// <project>/<parent-uuid>/subagents/<file>.jsonl, rather than
+	// <project>/<file>.jsonl.
+	isSubagent bool
+	// parentUUID is the directory two levels up from a subagent file (the
+	// session that dispatched it). Unset for a top-level file.
+	parentUUID string
+}
+
+// uuidRE matches a canonical 8-4-4-4-12 hex UUID. Used to validate a
+// subagent's parent-directory name before trusting it as a link.
+var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func looksLikeUUID(s string) bool {
+	return uuidRE.MatchString(s)
+}
+
+// findSessionFiles walks both the top-level session layout Claude Code has
+// always used (<project>/<session>.jsonl) and subagent transcripts, written
+// one level deeper under a "subagents" directory named for the session that
+// dispatched them (<project>/<parent-uuid>/subagents/agent-*.jsonl). The two
+// patterns are independent globs rather than one recursive walk, so adding
+// the second can't change what the first matches.
+func findSessionFiles(dir string) ([]sessionFile, error) {
+	var out []sessionFile
+
+	top, err := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
 	if err != nil {
 		return nil, err
 	}
-	out = append(out, matches...)
+	for _, p := range top {
+		out = append(out, sessionFile{path: p})
+	}
+
+	sub, err := filepath.Glob(filepath.Join(dir, "*", "*", "subagents", "*.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range sub {
+		// p = <project>/<parent-uuid>/subagents/<file>.jsonl, so the parent
+		// UUID is the directory name one level above "subagents".
+		parentUUID := filepath.Base(filepath.Dir(filepath.Dir(p)))
+		out = append(out, sessionFile{path: p, isSubagent: true, parentUUID: parentUUID})
+	}
+
 	return out, nil
 }
 
@@ -176,21 +255,23 @@ func toStoreTurns(in []Turn) []store.TurnRow {
 	out := make([]store.TurnRow, len(in))
 	for i, t := range in {
 		out[i] = store.TurnRow{
-			SessionUUID:    t.SessionUUID,
-			TurnIdx:        t.TurnIdx,
-			TS:             t.TS,
-			TSUnixMS:       t.TSUnixMS,
-			Model:          t.Model,
-			InputTokens:    t.InputTokens,
-			OutputTokens:   t.OutputTokens,
-			CacheRead:      t.CacheRead,
-			CacheCreate5m:  t.CacheCreate5m,
-			CacheCreate1h:  t.CacheCreate1h,
-			GapS:           t.GapS,
-			Classification: t.Classification,
-			PostCompact:    t.PostCompact,
-			Project:        t.Project,
-			SourcePathHash: t.SourcePathHash,
+			SessionUUID:       t.SessionUUID,
+			TurnIdx:           t.TurnIdx,
+			TS:                t.TS,
+			TSUnixMS:          t.TSUnixMS,
+			Model:             t.Model,
+			InputTokens:       t.InputTokens,
+			OutputTokens:      t.OutputTokens,
+			CacheRead:         t.CacheRead,
+			CacheCreate5m:     t.CacheCreate5m,
+			CacheCreate1h:     t.CacheCreate1h,
+			GapS:              t.GapS,
+			Classification:    t.Classification,
+			PostCompact:       t.PostCompact,
+			Project:           t.Project,
+			SourcePathHash:    t.SourcePathHash,
+			ParentSessionUUID: t.ParentSessionUUID,
+			Cwd:               t.Cwd,
 		}
 	}
 	return out

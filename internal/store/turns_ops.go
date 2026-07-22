@@ -24,6 +24,13 @@ type TurnRow struct {
 	PostCompact    bool
 	Project        string
 	SourcePathHash string
+	// ParentSessionUUID is "" for a normal top-level session, otherwise the
+	// session UUID that dispatched this turn's subagent (see 0010_*.sql).
+	ParentSessionUUID string
+	// Cwd is the JSONL record's own working directory. Kept per-turn
+	// (denormalized, like Project) because a subagent's cwd can legitimately
+	// differ from its parent's project directory.
+	Cwd string
 }
 
 // CompactionRow mirrors the `compactions` table.
@@ -101,8 +108,9 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 				input_tokens, output_tokens, cache_read,
 				cache_create_5m, cache_create_1h,
 				gap_s, classification, post_compact,
-				project, source_path_hash
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				project, source_path_hash,
+				parent_session_uuid, cwd
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		`)
 		if err != nil {
 			return err
@@ -119,6 +127,7 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 				t.CacheCreate5m, t.CacheCreate1h,
 				t.GapS, t.Classification, pc,
 				t.Project, t.SourcePathHash,
+				t.ParentSessionUUID, t.Cwd,
 			); err != nil {
 				return err
 			}

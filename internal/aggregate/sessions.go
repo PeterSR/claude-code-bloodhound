@@ -25,6 +25,11 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 		rotation     int
 		restructure  int
 		modelsSeen   map[string]bool
+		// parentSessionUUID and cwd are constant across every turn in a
+		// session (denormalized onto each turn row the same way project is),
+		// so we only need to capture them once, at accumulator creation.
+		parentSessionUUID string
+		cwd               string
 		// 5h-rolling
 		weights []int64
 		times   []int64
@@ -40,7 +45,8 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT session_uuid, project, ts_unix_ms, model,
 		       input_tokens, output_tokens, cache_read,
-		       cache_create_5m, cache_create_1h, classification
+		       cache_create_5m, cache_create_1h, classification,
+		       parent_session_uuid, cwd
 		FROM turns
 		ORDER BY session_uuid, ts_unix_ms
 	`)
@@ -54,16 +60,19 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 			uuid, project, model, class string
 			tsMS                        int64
 			in, out, cr, cw5m, cw1h     int64
+			parentUUID, cwd             string
 		)
-		if err := rows.Scan(&uuid, &project, &tsMS, &model, &in, &out, &cr, &cw5m, &cw1h, &class); err != nil {
+		if err := rows.Scan(&uuid, &project, &tsMS, &model, &in, &out, &cr, &cw5m, &cw1h, &class, &parentUUID, &cwd); err != nil {
 			return 0, err
 		}
 		a, ok := acc[uuid]
 		if !ok {
 			a = &sessAcc{
-				project:    project,
-				firstTSMS:  tsMS,
-				modelsSeen: map[string]bool{},
+				project:           project,
+				firstTSMS:         tsMS,
+				modelsSeen:        map[string]bool{},
+				parentSessionUUID: parentUUID,
+				cwd:               cwd,
 			}
 			acc[uuid] = a
 		}
@@ -162,6 +171,8 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 			ColdCompactionCount: a.coldCompactionCount,
 			CacheTTL:            ttl,
 			Models:              strings.Join(models, ","),
+			ParentSessionUUID:   a.parentSessionUUID,
+			Cwd:                 a.cwd,
 		})
 	}
 

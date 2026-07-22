@@ -1,0 +1,238 @@
+package ingest
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/PeterSR/claude-code-bloodhound/internal/store"
+)
+
+// TestLooksLikeUUID covers the guard that stops a garbled subagent parent
+// directory from being trusted as a session link (see its use in Run).
+func TestLooksLikeUUID(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"canonical lowercase", "a850d051-2b0d-455b-991c-a0a434be269f", true},
+		{"canonical uppercase", "A850D051-2B0D-455B-991C-A0A434BE269F", true},
+		{"missing dashes", "a850d0512b0d455b991ca0a434be269f", false},
+		{"subagent filename stem, not a session dir", "agent-a6e5d652439ec9e75", false},
+		{"too short", "a850d051-2b0d-455b-991c", false},
+		{"empty", "", false},
+		{"project dir name", "-home-peter-dev-personal-cad-web", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := looksLikeUUID(c.in); got != c.want {
+				t.Errorf("looksLikeUUID(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestFindSessionFiles_DiscoversSubagentsWithParentUUID covers the second
+// glob pattern added alongside the original <project>/<session>.jsonl one:
+// a subagent transcript one level deeper must be found, marked isSubagent,
+// and carry the parent UUID read off its own containing directory (two
+// levels up from the file, one up from "subagents"), all without
+// disturbing what the original pattern matches.
+func TestFindSessionFiles_DiscoversSubagentsWithParentUUID(t *testing.T) {
+	root := t.TempDir()
+	const parentUUID = "a850d051-2b0d-455b-991c-a0a434be269f"
+
+	topPath := filepath.Join(root, "proj1", "session-top.jsonl")
+	subPath := filepath.Join(root, "proj1", parentUUID, "subagents", "agent-a6e5d652439ec9e75.jsonl")
+	mustWriteFile(t, topPath, "{}\n")
+	mustWriteFile(t, subPath, "{}\n")
+
+	files, err := findSessionFiles(root)
+	if err != nil {
+		t.Fatalf("findSessionFiles: %v", err)
+	}
+
+	var gotTop, gotSub *sessionFile
+	for i := range files {
+		switch files[i].path {
+		case topPath:
+			gotTop = &files[i]
+		case subPath:
+			gotSub = &files[i]
+		}
+	}
+
+	if gotTop == nil {
+		t.Fatalf("top-level file %s not discovered", topPath)
+	}
+	if gotTop.isSubagent {
+		t.Errorf("top-level file wrongly marked isSubagent")
+	}
+
+	if gotSub == nil {
+		t.Fatalf("subagent file %s not discovered", subPath)
+	}
+	if !gotSub.isSubagent {
+		t.Errorf("subagent file not marked isSubagent")
+	}
+	if gotSub.parentUUID != parentUUID {
+		t.Errorf("parentUUID = %q, want %q", gotSub.parentUUID, parentUUID)
+	}
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// subagentJSONLRecord returns one assistant record with a cwd field set, the
+// same shape parseFile expects (built on assistantRecord/usageMap from
+// jsonl_test.go so both files agree on what a minimal valid record looks
+// like).
+func subagentJSONLRecord(ts, requestID, messageID, model, cwd string, usage map[string]any) map[string]any {
+	rec := assistantRecord(ts, requestID, messageID, model, usage)
+	rec["cwd"] = cwd
+	return rec
+}
+
+// TestRun_SubagentDiscoveryEndToEnd drives the real Run() pipeline against a
+// throwaway store and a fabricated ~/.claude/projects layout, covering the
+// two behaviors the spec calls out explicitly: a subagent under a valid
+// parent UUID is ingested with parent_session_uuid/cwd/project set correctly
+// (rather than colliding with the parent's own turn_idx sequence: see the
+// comment on session_uuid in parseFile for why sessionId can't be trusted
+// here), and a subagent under a directory that doesn't look like a session
+// UUID is skipped with a logged reason instead of writing a fabricated link.
+func TestRun_SubagentDiscoveryEndToEnd(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	t.Setenv("XDG_STATE_HOME", dataDir)
+	t.Setenv("XDG_CONFIG_HOME", dataDir)
+
+	ctx := context.Background()
+	s, err := store.Open(ctx)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.DB.Close()
+
+	projectsDir := t.TempDir()
+	const (
+		parentUUID  = "a850d051-2b0d-455b-991c-a0a434be269f"
+		badParentID = "not-a-uuid"
+		project     = "proj1"
+	)
+
+	topPath := filepath.Join(projectsDir, project, parentUUID+".jsonl")
+	goodSubPath := filepath.Join(projectsDir, project, parentUUID, "subagents", "agent-good.jsonl")
+	badSubPath := filepath.Join(projectsDir, project, badParentID, "subagents", "agent-bad.jsonl")
+
+	mustWriteJSONL(t, topPath, []map[string]any{
+		subagentJSONLRecord("2026-01-01T00:00:00Z", "req_top", "msg_top", "claude-x", "/home/x/proj1",
+			usageMap(100, 10, 0, 0, 0)),
+	})
+	mustWriteJSONL(t, goodSubPath, []map[string]any{
+		subagentJSONLRecord("2026-01-01T00:01:00Z", "req_sub", "msg_sub", "claude-haiku", "/home/x/proj1/backend",
+			usageMap(50, 5, 0, 0, 0)),
+	})
+	mustWriteJSONL(t, badSubPath, []map[string]any{
+		subagentJSONLRecord("2026-01-01T00:02:00Z", "req_bad", "msg_bad", "claude-haiku", "/home/x/proj1",
+			usageMap(50, 5, 0, 0, 0)),
+	})
+
+	stats, err := Run(ctx, s, Options{ProjectsDir: projectsDir, MinFileSize: 1})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if stats.FilesSkippedBadParent != 1 {
+		t.Errorf("FilesSkippedBadParent = %d, want 1", stats.FilesSkippedBadParent)
+	}
+	foundBadParentError := false
+	for _, e := range stats.Errors {
+		if strings.Contains(e, badParentID) {
+			foundBadParentError = true
+		}
+	}
+	if !foundBadParentError {
+		t.Errorf("expected an error message naming the bad parent dir %q, got %v", badParentID, stats.Errors)
+	}
+
+	// The bad-parent subagent must never reach the turns table.
+	var badCount int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_uuid = 'agent-bad'`).Scan(&badCount); err != nil {
+		t.Fatalf("query bad subagent turns: %v", err)
+	}
+	if badCount != 0 {
+		t.Errorf("agent-bad has %d turns, want 0 (should have been skipped, not written as garbage)", badCount)
+	}
+
+	// The valid subagent: session_uuid is its OWN filename stem (not the
+	// parent's, which is what every record's "sessionId" field actually
+	// holds, see parseFile), parent_session_uuid links back to the real
+	// parent UUID, project rolls up under the parent's project, and cwd is
+	// the record's own (which legitimately differs from the parent's).
+	var (
+		gotProject, gotParent, gotCwd string
+	)
+	err = s.DB.QueryRowContext(ctx, `
+		SELECT project, parent_session_uuid, cwd FROM turns WHERE session_uuid = 'agent-good'
+	`).Scan(&gotProject, &gotParent, &gotCwd)
+	if err != nil {
+		t.Fatalf("query good subagent turn: %v", err)
+	}
+	if gotProject != project {
+		t.Errorf("subagent project = %q, want %q", gotProject, project)
+	}
+	if gotParent != parentUUID {
+		t.Errorf("subagent parent_session_uuid = %q, want %q", gotParent, parentUUID)
+	}
+	if gotCwd != "/home/x/proj1/backend" {
+		t.Errorf("subagent cwd = %q, want its own recorded cwd", gotCwd)
+	}
+
+	// The top-level session is unaffected: no parent, and its own cwd.
+	var topParent, topCwd string
+	err = s.DB.QueryRowContext(ctx, `
+		SELECT parent_session_uuid, cwd FROM turns WHERE session_uuid = ?
+	`, parentUUID).Scan(&topParent, &topCwd)
+	if err != nil {
+		t.Fatalf("query top-level turn: %v", err)
+	}
+	if topParent != "" {
+		t.Errorf("top-level parent_session_uuid = %q, want empty", topParent)
+	}
+	if topCwd != "/home/x/proj1" {
+		t.Errorf("top-level cwd = %q, want its own recorded cwd", topCwd)
+	}
+}
+
+func mustWriteJSONL(t *testing.T, path string, records []map[string]any) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer f.Close()
+	for _, r := range records {
+		b, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("marshal record: %v", err)
+		}
+		if _, err := f.Write(append(b, '\n')); err != nil {
+			t.Fatalf("write record: %v", err)
+		}
+	}
+}

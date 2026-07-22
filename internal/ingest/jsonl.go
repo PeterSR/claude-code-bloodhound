@@ -71,6 +71,14 @@ type Turn struct {
 	PostCompact    bool
 	Project        string
 	SourcePathHash string
+	// ParentSessionUUID is "" for a turn from a normal top-level session file,
+	// otherwise the session that dispatched this turn's subagent (see
+	// subagentContext on parseFile).
+	ParentSessionUUID string
+	// Cwd is this record's own working directory (rawRecord.Cwd), denormalized
+	// onto every turn the same way Project is: a subagent's cwd can legitimately
+	// differ from its parent's project directory.
+	Cwd string
 }
 
 // UserPrompt is the persisted form of a single human-typed user message.
@@ -105,6 +113,15 @@ type FileResult struct {
 	PathHash    string
 }
 
+// subagentContext marks path as a subagent transcript
+// (<project>/<parent-uuid>/subagents/<file>.jsonl) and carries the one thing
+// its path alone doesn't give parseFile: the dispatching session's UUID
+// (the directory two levels up). nil means path is an ordinary top-level
+// session file.
+type subagentContext struct {
+	parentUUID string
+}
+
 // parseFile streams one JSONL file and emits structured Turn + Compaction
 // slices. Compactions are marked confirmed=true only when the next turn's
 // prefix shrinks ≥ 30% relative to the boundary's prefix.
@@ -116,7 +133,7 @@ type FileResult struct {
 // first pass that records the last line each API response occupies, so the
 // main loop below can skip every earlier duplicate before it touches any
 // side effect (compaction confirmation, gap_s, Classify, turnIdx).
-func parseFile(path string) (FileResult, error) {
+func parseFile(path string, sa *subagentContext) (FileResult, error) {
 	dedupeLast, err := lastOccurrenceIndex(path)
 	if err != nil {
 		return FileResult{}, err
@@ -128,8 +145,32 @@ func parseFile(path string) (FileResult, error) {
 	}
 	defer f.Close()
 
+	// session_uuid identifies the JSONL file, not the conversation it belongs
+	// to: for a subagent transcript that is deliberately NOT the record's own
+	// "sessionId" field. Verified live across every subagent transcript on
+	// disk (346 files, 0 exceptions): Claude Code stamps every sidechain
+	// record's sessionId with the PARENT session's UUID, not a distinct id
+	// for the subagent itself, so trusting it here would collide every
+	// subagent's turns onto the parent's own turn_idx sequence (and onto each
+	// other, for a session that dispatched more than one). The filename stem
+	// (agent-<agentId>, where agentId is the field that actually is unique
+	// per subagent invocation) is what's unique, and is also what the
+	// top-level case already used, so this is one rule for both.
 	sessionUUID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-	project := filepath.Base(filepath.Dir(path))
+
+	var project string
+	var parentSessionUUID string
+	if sa != nil {
+		// <project>/<parent-uuid>/subagents/<file>.jsonl: project is the
+		// containing project dir, same as the parent, so a subagent's spend
+		// rolls up under the project that dispatched it rather than under
+		// wherever its own cwd happened to point (the two can legitimately
+		// differ: a subagent working in a subdirectory of the same repo).
+		project = filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+		parentSessionUUID = sa.parentUUID
+	} else {
+		project = filepath.Base(filepath.Dir(path))
+	}
 	pathHash := hashPath(path)
 
 	res := FileResult{
@@ -327,21 +368,23 @@ func parseFile(path string) (FileResult, error) {
 
 			class := Classify(cw5, cw1, cr, gapS)
 			t := Turn{
-				SessionUUID:    sessionUUID,
-				TurnIdx:        turnIdx,
-				TS:             rec.Timestamp,
-				TSUnixMS:       tsMS,
-				Model:          msg.Model,
-				InputTokens:    in,
-				OutputTokens:   out,
-				CacheRead:      cr,
-				CacheCreate5m:  cw5,
-				CacheCreate1h:  cw1,
-				GapS:           gapS,
-				Classification: class,
-				PostCompact:    markPostCompact,
-				Project:        project,
-				SourcePathHash: pathHash,
+				SessionUUID:       sessionUUID,
+				TurnIdx:           turnIdx,
+				TS:                rec.Timestamp,
+				TSUnixMS:          tsMS,
+				Model:             msg.Model,
+				InputTokens:       in,
+				OutputTokens:      out,
+				CacheRead:         cr,
+				CacheCreate5m:     cw5,
+				CacheCreate1h:     cw1,
+				GapS:              gapS,
+				Classification:    class,
+				PostCompact:       markPostCompact,
+				Project:           project,
+				SourcePathHash:    pathHash,
+				ParentSessionUUID: parentSessionUUID,
+				Cwd:               rec.Cwd,
 			}
 			res.Turns = append(res.Turns, t)
 			turnIdx++
