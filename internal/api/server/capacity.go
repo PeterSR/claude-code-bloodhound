@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
+	"github.com/PeterSR/claude-code-bloodhound/internal/attribute"
 )
 
 const (
@@ -27,25 +28,13 @@ const (
 	// capMinSessions: below this many complete work sessions the median is too
 	// noisy to publish a sessions-per-week number.
 	capMinSessions = 3
-
-	// capWeekAhead / capSessionAhead: how far ahead of an observation its
-	// advertised reset may plausibly sit. A reset outside this window is a
-	// parse artifact (e.g. a year typo) and is ignored in favour of carrying
-	// the previous window forward. Weekly ~7d + slack; session 5h + slack.
-	capWeekAhead    = 8 * 24 * time.Hour
-	capSessionAhead = 6 * time.Hour
-
-	// capWeekMinGap / capSessionMinGap: a new window is started only when the
-	// advertised reset jumps forward by at least this much. A real reset jumps
-	// a whole period (7 days for the week, at least the 5h window for a
-	// session), while a misparsed reset shifts the boundary by minutes to a few
-	// hours; requiring a large forward jump keeps a single bad reading from
-	// fabricating a window. Both gaps sit below the real spacing and above the
-	// misparse range, and they also absorb the minute-level jitter the
-	// extractor produces (23:00 vs 22:59).
-	capWeekMinGap    = 2 * 24 * time.Hour
-	capSessionMinGap = 4 * time.Hour
 )
+
+// Window-reconstruction thresholds (how far ahead a reset may plausibly sit,
+// how far it must jump to count as a genuine rotation) are attribute's to
+// own; using attribute.WeekAhead / SessAhead / WeekMinGap / SessMinGap here
+// instead of a local copy is what keeps this reconstruction and attribute's
+// from ever disagreeing about where a window begins.
 
 // capObs is the slice of a /usage observation the capacity reconstruction
 // needs. The reset timestamps are the *advertised* boundaries from the panel,
@@ -144,6 +133,13 @@ func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
 // session. The per-session lifts telescope to the week's total peak, so a
 // week's bar never exceeds the cap.
 //
+// A week opened by a detected reset starts its peak at 0, the meter's true
+// starting value, so whatever was spent between the reset and the window's
+// first poll is counted instead of silently discarded. The leading partial
+// week (collection joined mid-flight, no reset ever observed) has no such
+// floor to reach for and baselines at its first reading instead, mirroring
+// attribute.Build's window reconstruction.
+//
 // Pure function of the observation slice (ascending by ts) so it is unit
 // tested directly, like burnSeries.
 func weeklyCapacity(obs []capObs) routes.CapacityResponse {
@@ -165,7 +161,9 @@ func weeklyCapacity(obs []capObs) routes.CapacityResponse {
 		sessIdx       int // 0 is the leading partial session; excluded from median
 		sessTotal     float64
 
-		// Running weekly peak. Reset to unknown at each new week.
+		// Running weekly peak. Reset to unknown at each new week; the first
+		// reading then seeds it at 0 for a reset-opened week, or at that
+		// reading's own value for the leading partial week (see below).
 		weekHavePeak bool
 		weekPeak     int
 
@@ -214,8 +212,8 @@ func weeklyCapacity(obs []capObs) routes.CapacityResponse {
 	for i := range obs {
 		o := obs[i]
 
-		wt, wok := parseReset(o.weekResetTS, o.tsMS, capWeekAhead)
-		st, sok := parseReset(o.sessResetTS, o.tsMS, capSessionAhead)
+		wt, wok := attribute.ParseReset(o.weekResetTS, o.tsMS, attribute.WeekAhead)
+		st, sok := attribute.ParseReset(o.sessResetTS, o.tsMS, attribute.SessAhead)
 
 		if curWeek == nil {
 			// First observation: the oldest week is partial (we joined it
@@ -229,7 +227,7 @@ func weeklyCapacity(obs []capObs) routes.CapacityResponse {
 			if wok {
 				if !haveWeekReset {
 					weekReset, haveWeekReset = wt, true // adopt after unknown start
-				} else if wt.After(weekReset.Add(capWeekMinGap)) {
+				} else if wt.After(weekReset.Add(attribute.WeekMinGap)) {
 					weekChanged = true
 				}
 			}
@@ -237,7 +235,7 @@ func weeklyCapacity(obs []capObs) routes.CapacityResponse {
 			if sok {
 				if !haveSessReset {
 					sessReset, haveSessReset = st, true
-				} else if st.After(sessReset.Add(capSessionMinGap)) {
+				} else if st.After(sessReset.Add(attribute.SessMinGap)) {
 					sessChanged = true
 				}
 			}
@@ -275,12 +273,28 @@ func weeklyCapacity(obs []capObs) routes.CapacityResponse {
 			}
 			if !weekHavePeak {
 				weekHavePeak = true
-				weekPeak = v
+				// A week opened by a detected reset genuinely started the
+				// meter at 0, so it baselines there rather than at this
+				// first reading: whatever was spent between the reset and
+				// this poll is already baked into v, and baselining at v
+				// would silently discard it. The leading partial week is
+				// different: collection joined it mid-flight, so there is
+				// no earlier reading to reach back to, and v is the best
+				// available floor.
+				entry := v
+				if !curWeek.Partial {
+					entry = 0
+				}
+				weekPeak = entry
+				if v > weekPeak {
+					weekPeak = v
+				}
 				// Baseline the slice that opened before any reading (the first
-				// slice of the week, or of a partial joined window).
+				// slice of the week, or of a partial joined window) the same
+				// way: 0 for a real reset, v for the leading partial.
 				if !sliceHaveEntry {
 					sliceHaveEntry = true
-					sliceEntry = v
+					sliceEntry = entry
 				}
 			} else if v > weekPeak {
 				weekPeak = v
@@ -320,25 +334,6 @@ func weeklyCapacity(obs []capObs) routes.CapacityResponse {
 		}
 	}
 	return out
-}
-
-// parseReset parses and validates an advertised reset timestamp. It returns
-// ok=false when the reset is missing, unparseable, or implausibly far from the
-// observation (a parse artifact), so the caller carries the previous window
-// forward instead of splitting on junk.
-func parseReset(resetTS string, tsMS int64, maxAhead time.Duration) (time.Time, bool) {
-	if resetTS == "" {
-		return time.Time{}, false
-	}
-	t, err := time.Parse(time.RFC3339, resetTS)
-	if err != nil {
-		return time.Time{}, false
-	}
-	obs := time.UnixMilli(tsMS)
-	if t.Before(obs) || t.After(obs.Add(maxAhead)) {
-		return time.Time{}, false
-	}
-	return t, true
 }
 
 // percentile does linear interpolation on an already-sorted slice. p in [0,1].

@@ -2,7 +2,9 @@ package aggregate
 
 import (
 	"context"
+	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/attribute"
 	"github.com/PeterSR/claude-code-bloodhound/internal/costweight"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
@@ -20,7 +22,11 @@ import (
 // refinement could anchor every historical bucket to nearby observation
 // resets, but the simple form already drives the UI well.
 func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
-	const fiveHMS int64 = 5 * 3600 * 1000
+	// Anthropic's 5-hour limit window, in milliseconds. Derived from
+	// attribute.SessPeriod rather than restated so this bucketing and
+	// attribute's own window reconstruction can never disagree about how
+	// long a window is.
+	const fiveHMS int64 = int64(attribute.SessPeriod / time.Millisecond)
 
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT ts_unix_ms, model,

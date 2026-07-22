@@ -127,6 +127,35 @@ func TestWeeklyCapacity_WeekResetSplits(t *testing.T) {
 	}
 }
 
+func TestWeeklyCapacity_ResetWeekCountsSpendBeforeFirstPoll(t *testing.T) {
+	// A week opened by a detected reset first polls well above zero: real
+	// spend happened between the reset and that first poll, and the reading
+	// already reflects it. The reconstruction must baseline the new week's
+	// peak at 0 (the reset itself), not at this first reading, or that
+	// pre-poll spend is silently dropped: invisible whenever a week happens
+	// to first poll at 0, but a real undercount whenever it doesn't.
+	s1 := rfc(2026, 6, 11, 6, 0)
+	wr1 := rfc(2026, 6, 11, 23, 0)
+	wr2 := rfc(2026, 6, 18, 23, 0)
+	obs := []capObs{
+		cob(at(2026, 6, 11, 0, 0), 10, true, false, s1, wr1),
+		cob(at(2026, 6, 11, 2, 0), 20, true, false, s1, wr1), // week 1: 10 -> 20
+		cob(at(2026, 6, 11, 3, 0), 18, true, false, s1, wr2), // weekly reset, first poll already at 18
+		cob(at(2026, 6, 11, 5, 0), 33, true, false, s1, wr2), // week 2 continues to 33
+	}
+	out := weeklyCapacity(obs)
+
+	if len(out.Weeks) != 2 {
+		t.Fatalf("Weeks = %d, want 2", len(out.Weeks))
+	}
+	if out.Weeks[0].TotalWeekPct != 10 {
+		t.Errorf("first week total = %v, want 10", out.Weeks[0].TotalWeekPct)
+	}
+	if out.Weeks[1].TotalWeekPct != 33 {
+		t.Errorf("second week total = %v, want 33 (baseline at the reset, not the 18 first reading)", out.Weeks[1].TotalWeekPct)
+	}
+}
+
 func TestWeeklyCapacity_NetRiseIgnoresSaturatedAndMisparse(t *testing.T) {
 	// One complete session whose net rise is 0 -> 10; a saturated spike and a
 	// misparsed dip in the middle must not distort the net.
