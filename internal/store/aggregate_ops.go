@@ -21,6 +21,12 @@ type SessionRow struct {
 	ColdCompactionCount int
 	CacheTTL            string
 	Models              string // comma-separated
+	// ParentSessionUUID is "" for a normal top-level session, otherwise the
+	// session it was dispatched as a subagent of.
+	ParentSessionUUID string
+	// Cwd is the session's own working directory (see turns.cwd for why
+	// this can't be reconstructed from Project alone).
+	Cwd string
 }
 
 // BucketRow mirrors the `buckets` table.
@@ -55,8 +61,9 @@ func (s *Store) ReplaceSessions(ctx context.Context, rows []SessionRow) error {
 			turn_count, raw_tokens, output_tokens, peak_5h_raw_tokens,
 			idle_miss_count, rotation_count, restructure_count,
 			compaction_count, cold_compaction_count,
-			cache_ttl, models
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			cache_ttl, models,
+			parent_session_uuid, cwd
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`)
 	if err != nil {
 		return err
@@ -70,6 +77,7 @@ func (s *Store) ReplaceSessions(ctx context.Context, rows []SessionRow) error {
 			r.IdleMissCount, r.RotationCount, r.RestructureCount,
 			r.CompactionCount, r.ColdCompactionCount,
 			r.CacheTTL, r.Models,
+			r.ParentSessionUUID, r.Cwd,
 		); err != nil {
 			return err
 		}

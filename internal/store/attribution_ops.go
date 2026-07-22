@@ -39,6 +39,14 @@ type AttributionRow struct {
 	TurnCount         int
 	FirstTSUnixMS     int64
 	LastTSUnixMS      int64
+	// EffectiveSessionUUID is SessionUUID unless this row belongs to a
+	// subagent, in which case it's the parent that dispatched it (the same
+	// COALESCE(NULLIF(parent_session_uuid,''), session_uuid) rule
+	// SessionPctTotalsAll and GroupAttribution already apply). Only
+	// WindowSlices populates it; every other producer of AttributionRow
+	// leaves it at its zero value because nothing downstream of them reads
+	// it.
+	EffectiveSessionUUID string
 }
 
 // ReplaceAttribution wipes and re-inserts one bucket's windows and session
@@ -137,18 +145,43 @@ type SessionPctTotals struct {
 }
 
 // SessionPctTotalsAll returns the rollup for every session that has any
-// attribution, keyed by session UUID.
+// attribution, keyed by the EFFECTIVE owner: a subagent's spend folds into
+// whichever session dispatched it (COALESCE(NULLIF(parent_session_uuid, ""),
+// session_uuid)), so a supervisor's total includes the subagents it ran and
+// a subagent looked up by its own UUID is not a separate key here.
+// session_attribution itself stays keyed by the actual spending session
+// (joined in below via sessions.parent_session_uuid), so that detail isn't
+// lost, just rolled up one level for this view.
 func (s *Store) SessionPctTotalsAll(ctx context.Context) (map[string]*SessionPctTotals, error) {
+	// per_window sums parent + subagent shares that landed in the SAME
+	// window before the outer query takes MAX() for the peak: doing that in
+	// one flat GROUP BY would instead take the largest single (session,
+	// window) row, understating a supervisor's peak by however much its
+	// subagents contributed alongside it in that window (the common case,
+	// since a supervisor typically dispatches subagents inside one 5h
+	// window rather than across a boundary).
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT session_uuid, project, bucket,
-		       SUM(measured_pct + estimated_pct) AS pct,
-		       MAX(measured_pct + estimated_pct) AS peak,
-		       SUM(measured_pct)  AS measured,
-		       SUM(estimated_pct) AS estimated,
-		       COUNT(*)           AS windows
-		FROM session_attribution
-		WHERE session_uuid <> ''
-		GROUP BY session_uuid, bucket
+		WITH per_window AS (
+			SELECT
+			    COALESCE(NULLIF(sess.parent_session_uuid, ''), sa.session_uuid) AS effective_uuid,
+			    sa.project              AS project,
+			    sa.bucket               AS bucket,
+			    sa.window_start_unix_ms AS window_start_unix_ms,
+			    SUM(sa.measured_pct)    AS measured,
+			    SUM(sa.estimated_pct)   AS estimated
+			FROM session_attribution sa
+			LEFT JOIN sessions sess ON sess.session_uuid = sa.session_uuid
+			WHERE sa.session_uuid <> ''
+			GROUP BY effective_uuid, sa.bucket, sa.window_start_unix_ms
+		)
+		SELECT effective_uuid, MAX(project) AS project, bucket,
+		       SUM(measured + estimated) AS pct,
+		       MAX(measured + estimated) AS peak,
+		       SUM(measured)  AS measured,
+		       SUM(estimated) AS estimated,
+		       COUNT(*)       AS windows
+		FROM per_window
+		GROUP BY effective_uuid, bucket
 	`)
 	if err != nil {
 		return nil, err
@@ -254,30 +287,44 @@ type AttributionGroup struct {
 
 // GroupAttribution rolls attribution up by project or by session over the
 // windows that start at or after sinceMS. by is "project" or "session".
+//
+// by=="session" groups by the EFFECTIVE owner (COALESCE(NULLIF(
+// parent_session_uuid, ""), session_uuid)) rather than the raw session_uuid,
+// so a supervisor's row includes the subagents it dispatched instead of
+// listing them as its peers. by=="project" is unaffected: a subagent already
+// carries its parent's project (see internal/ingest), so grouping by project
+// naturally already pools them, join or no join.
 func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS int64) ([]AttributionGroup, error) {
-	keyCol := "project"
+	keyCol := "sa.project"
 	if by == "session" {
-		keyCol = "session_uuid"
+		keyCol = "COALESCE(NULLIF(sess.parent_session_uuid, ''), sa.session_uuid)"
 	}
-	// MAX(project) is a plain lookup, not an aggregate choice: a session
+	// MAX(sa.project) is a plain lookup, not an aggregate choice: a session
 	// belongs to exactly one project, and grouping by project makes it the
 	// key anyway.
+	//
+	// peak here is MAX() over raw session_attribution rows, same as the
+	// project grouping already did before this change: two sessions (or a
+	// supervisor and a subagent) sharing one window were already not summed
+	// before taking the max, so this preserves that existing approximation
+	// rather than introducing a new one just for the session grouping.
 	q := `
 		SELECT ` + keyCol + ` AS k,
-		       MAX(project)                      AS project,
-		       SUM(measured_pct + estimated_pct) AS pct,
-		       SUM(measured_pct)                 AS measured,
-		       SUM(estimated_pct)                AS estimated,
-		       MAX(measured_pct + estimated_pct) AS peak,
-		       SUM(cw_tokens)                    AS cw,
-		       SUM(raw_tokens)                   AS raw,
-		       SUM(turn_count)                   AS turns,
-		       COUNT(DISTINCT session_uuid)      AS sessions,
-		       COUNT(DISTINCT window_start_unix_ms) AS windows,
-		       MIN(NULLIF(first_ts_unix_ms, 0))  AS first_ts,
-		       MAX(last_ts_unix_ms)              AS last_ts
-		FROM session_attribution
-		WHERE bucket = ? AND window_start_unix_ms >= ?
+		       MAX(sa.project)                      AS project,
+		       SUM(sa.measured_pct + sa.estimated_pct) AS pct,
+		       SUM(sa.measured_pct)                 AS measured,
+		       SUM(sa.estimated_pct)                AS estimated,
+		       MAX(sa.measured_pct + sa.estimated_pct) AS peak,
+		       SUM(sa.cw_tokens)                    AS cw,
+		       SUM(sa.raw_tokens)                   AS raw,
+		       SUM(sa.turn_count)                   AS turns,
+		       COUNT(DISTINCT sa.session_uuid)      AS sessions,
+		       COUNT(DISTINCT sa.window_start_unix_ms) AS windows,
+		       MIN(NULLIF(sa.first_ts_unix_ms, 0))  AS first_ts,
+		       MAX(sa.last_ts_unix_ms)              AS last_ts
+		FROM session_attribution sa
+		LEFT JOIN sessions sess ON sess.session_uuid = sa.session_uuid
+		WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
 		GROUP BY k
 		ORDER BY pct DESC
 	`
@@ -350,15 +397,24 @@ func (s *Store) ListLimitWindows(ctx context.Context, bucket string, sinceMS int
 // WindowSlices returns every session row for a bucket's windows starting at
 // or after sinceMS, ordered oldest window first then largest share first:
 // the shape the stacked per-window chart consumes.
+//
+// Each row also carries EffectiveSessionUUID (a LEFT JOIN to sessions, same
+// COALESCE as GroupAttribution) so a caller grouping "by session" can fold a
+// subagent's slice into its parent the way the group table beneath the
+// chart already does. The row itself stays keyed by the actual spender
+// (SessionUUID); nothing here changes what's stored, only what a consumer
+// can key its own grouping on.
 func (s *Store) WindowSlices(ctx context.Context, bucket string, sinceMS int64) ([]AttributionRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT window_start_unix_ms, session_uuid, project,
-		       measured_pct, estimated_pct,
-		       cw_tokens, raw_tokens, turn_count,
-		       first_ts_unix_ms, last_ts_unix_ms
-		FROM session_attribution
-		WHERE bucket = ? AND window_start_unix_ms >= ?
-		ORDER BY window_start_unix_ms ASC, (measured_pct + estimated_pct) DESC
+		SELECT sa.window_start_unix_ms, sa.session_uuid, sa.project,
+		       sa.measured_pct, sa.estimated_pct,
+		       sa.cw_tokens, sa.raw_tokens, sa.turn_count,
+		       sa.first_ts_unix_ms, sa.last_ts_unix_ms,
+		       COALESCE(NULLIF(sess.parent_session_uuid, ''), sa.session_uuid) AS effective_uuid
+		FROM session_attribution sa
+		LEFT JOIN sessions sess ON sess.session_uuid = sa.session_uuid
+		WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
+		ORDER BY sa.window_start_unix_ms ASC, (sa.measured_pct + sa.estimated_pct) DESC
 	`, bucket, sinceMS)
 	if err != nil {
 		return nil, err
@@ -371,7 +427,8 @@ func (s *Store) WindowSlices(ctx context.Context, bucket string, sinceMS int64) 
 		if err := rows.Scan(&r.WindowStartUnixMS, &r.SessionUUID, &r.Project,
 			&r.MeasuredPct, &r.EstimatedPct,
 			&r.CWTokens, &r.RawTokens, &r.TurnCount,
-			&r.FirstTSUnixMS, &r.LastTSUnixMS); err != nil {
+			&r.FirstTSUnixMS, &r.LastTSUnixMS,
+			&r.EffectiveSessionUUID); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

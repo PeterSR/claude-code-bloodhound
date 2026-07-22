@@ -29,6 +29,17 @@ type CompactionItem = {
   cache_state: string;
 };
 
+type SubagentSummary = {
+  session_uuid: string;
+  cwd: string;
+  first_ts: string;
+  last_ts: string;
+  turn_count: number;
+  raw_tokens: number;
+  output_tokens: number;
+  models: string;
+};
+
 type SessionDetail = {
   session_uuid: string;
   project: string;
@@ -47,6 +58,7 @@ type SessionDetail = {
   cold_compaction_count: number;
   turns: TurnItem[];
   compactions: CompactionItem[];
+  subagents: SubagentSummary[];
   attribution: SessionAttributionDetail;
 };
 
@@ -151,6 +163,8 @@ export default function SessionDetail() {
           </div>
 
           <LimitCost attr={data.attribution} />
+
+          <Subagents items={data.subagents} />
 
           <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 max-w-5xl overflow-x-auto">
             <table className="w-full text-sm">
@@ -283,6 +297,56 @@ function LimitCost({ attr }: { attr: SessionAttributionDetail }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/** What this session dispatched via the Task tool. Each subagent is a real
+ *  session of its own, its cost already rolled into the totals above, so
+ *  this answers "what did it dispatch" rather than adding another cost
+ *  total. */
+function Subagents({ items }: { items: SubagentSummary[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 mb-6 max-w-5xl">
+      <div className="flex items-baseline gap-2 mb-3">
+        <h2 className="text-sm font-semibold tracking-tight">
+          Dispatched {items.length} subagent{items.length === 1 ? '' : 's'}
+        </h2>
+        <span className="text-[11px] text-zinc-500">
+          already counted in the totals above, shown here for what they did
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="text-left uppercase tracking-wider text-zinc-500">
+            <tr>
+              <th className="pr-3 py-1 font-medium">Session</th>
+              <th className="pr-3 py-1 font-medium">Working dir</th>
+              <th className="pr-3 py-1 font-medium text-right">Turns</th>
+              <th className="pr-3 py-1 font-medium text-right">Raw tokens</th>
+              <th className="pr-3 py-1 font-medium">Models</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((sub) => (
+              <tr key={sub.session_uuid} className="border-t border-zinc-100 dark:border-zinc-800/60">
+                <td className="pr-3 py-1">
+                  <Link to={`/sessions/${sub.session_uuid}`} className="font-mono hover:text-rose-500">
+                    {sub.session_uuid.slice(0, 8)}
+                  </Link>
+                </td>
+                <td className="pr-3 py-1 font-mono truncate max-w-xs" title={sub.cwd}>
+                  {sub.cwd || '—'}
+                </td>
+                <td className="pr-3 py-1 text-right tabular-nums">{sub.turn_count.toLocaleString()}</td>
+                <td className="pr-3 py-1 text-right tabular-nums">{fmtNumber(sub.raw_tokens)}</td>
+                <td className="pr-3 py-1 font-mono">{sub.models || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

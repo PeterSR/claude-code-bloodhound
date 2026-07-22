@@ -219,20 +219,44 @@ type SessionListRow struct {
 	ColdCompactionCount int
 	CacheTTL            string
 	Models              string
+	// SubagentCount and SubagentTurnCount summarize the Task-tool sessions
+	// this one dispatched (sessions whose parent_session_uuid points back
+	// here). A subagent is an implementation detail of the session that
+	// dispatched it and its own row is excluded from ListSessions below, so
+	// these are how the list still shows that delegation happened without
+	// flooding the table with the subagents themselves.
+	SubagentCount     int
+	SubagentTurnCount int
 }
 
-// ListSessions returns every persisted session summary, ordered by most
-// recent activity first.
+// ListSessions returns every top-level session summary, ordered by most
+// recent activity first. Subagent (Task-tool) sessions are excluded: the
+// parent that dispatched them already carries their cost via the
+// effective-owner rollup in SessionPctTotalsAll, and a supervisor session
+// that fans out ten subagents would otherwise show up as eleven rows, ten
+// of them near-empty. Use SubagentCount / SubagentTurnCount to see that a
+// session delegated work, and the session-detail payload to see what it
+// dispatched.
 func (s *Store) ListSessions(ctx context.Context) ([]SessionListRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT session_uuid, project,
-		       first_ts_unix_ms, last_ts_unix_ms,
-		       turn_count, raw_tokens, output_tokens, peak_5h_raw_tokens,
-		       idle_miss_count, rotation_count, restructure_count,
-		       compaction_count, cold_compaction_count,
-		       cache_ttl, models
-		FROM sessions
-		ORDER BY last_ts_unix_ms DESC
+		SELECT s.session_uuid, s.project,
+		       s.first_ts_unix_ms, s.last_ts_unix_ms,
+		       s.turn_count, s.raw_tokens, s.output_tokens, s.peak_5h_raw_tokens,
+		       s.idle_miss_count, s.rotation_count, s.restructure_count,
+		       s.compaction_count, s.cold_compaction_count,
+		       s.cache_ttl, s.models,
+		       COALESCE(sub.subagent_count, 0), COALESCE(sub.subagent_turns, 0)
+		FROM sessions s
+		LEFT JOIN (
+			SELECT parent_session_uuid AS puuid,
+			       COUNT(*)           AS subagent_count,
+			       SUM(turn_count)     AS subagent_turns
+			FROM sessions
+			WHERE parent_session_uuid <> ''
+			GROUP BY parent_session_uuid
+		) sub ON sub.puuid = s.session_uuid
+		WHERE s.parent_session_uuid = ''
+		ORDER BY s.last_ts_unix_ms DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -248,6 +272,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]SessionListRow, error) {
 			&r.IdleMissCount, &r.RotationCount, &r.RestructureCount,
 			&r.CompactionCount, &r.ColdCompactionCount,
 			&r.CacheTTL, &r.Models,
+			&r.SubagentCount, &r.SubagentTurnCount,
 		); err != nil {
 			return nil, err
 		}
