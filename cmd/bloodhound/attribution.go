@@ -37,11 +37,16 @@ var attributionCmd = &cobra.Command{
 	Short: "Show where the /usage limit meters actually went",
 	Long: `Reads the session_attribution and limit_windows tables straight out of
 SQLite (no daemon socket needed, so this works with the daemon stopped) and
-reports how much of a limit meter each working directory or session
-consumed.
+reports how much of a limit meter each project, session, or absolute working
+directory consumed.
 
-With no subcommand this runs the rollup: one row per working directory (or
-per session with --by session) across the requested lookback window.
+With no subcommand this runs the rollup: one row per project (or per session
+with --by session, or per absolute working directory with --by cwd) across
+the requested lookback window. project is the sanitized directory name
+Claude Code invents for its transcript layout, and it is coarser than it
+looks: one project can span several literal directories (the same repo
+checked out twice, say), so --by cwd is the one that answers "how much did
+THIS directory cost", not "how much did this project cost".
 
   bloodhound attribution windows        the limit windows themselves
   bloodhound attribution session <id>   one session, window by window
@@ -50,12 +55,32 @@ per session with --by session) across the requested lookback window.
 per line, no header row. The rollup's columns, in order, are:
 
   key  pct  measured_pct  estimated_pct  peak_pct  share  sessions  windows
-  turns  cw_tokens  raw_tokens  first_ts_unix_ms  last_ts_unix_ms
+  turns  cw_tokens  raw_tokens  first_ts_unix_ms  last_ts_unix_ms  cwd
 
 All percentages are printed at 4 decimal places (%.4f), cw_tokens and
 tokens_per_pct_cw at 2 (%.2f), share as a 0 to 1 fraction at 4 decimals, and
 everything else as a plain integer. An empty key (the unattributed
-remainder) prints as a single "-".`,
+remainder) prints as a single "-", and so does cwd whenever it isn't a
+single well-defined value: with --by project (one project can span many
+directories) it is always "-"; with --by session or --by cwd it is "-" only
+when the effective owner's cwd was never captured (transcript rotated off
+disk before this column existed).
+
+Under --by cwd the key column carries the directory itself rather than a
+project name or session id, and a session whose cwd was never captured
+doesn't vanish into, or merge with, the unattributed remainder above (key
+""): it gets its own explicit bucket, key "__unknown_cwd__". The two are
+different facts, not the same gap: unattributed means no turn of ours
+explains the meter movement at all, while unknown cwd means we know exactly
+which session(s) spent it, just not where. One sentinel standing in for
+both would erase that difference from the output.
+
+cwd is appended as the 14th column (was 13 before it was added). Deliberately
+NOT added to "attribution windows" or "attribution session", whose porcelain
+column counts (8 / 8 / 11) are unchanged: those rows are already keyed by a
+session or project a caller can look up in the rollup for its cwd, so adding
+it there too would just repeat the same value on every window line instead
+of once per session.`,
 	Args: cobra.NoArgs,
 	RunE: runAttributionRollup,
 }
@@ -91,11 +116,16 @@ above), or "-" for the unattributed remainder.`,
 }
 
 var attributionSessionCmd = &cobra.Command{
-	Use:   "session <id>",
+	Use:   "session [id]",
 	Short: "Show one session's cost against both limit meters, window by window",
 	Long: `Resolves <id> as a full session UUID or a unique prefix of one (like a
 git short SHA) and walks its cost against both the weekly and the 5 hour
 meter, one line per limit window it touched.
+
+<id> can be omitted: it then defaults to "bloodhound session" (the current
+Claude Code session, read from CLAUDE_CODE_SESSION_ID), so this only works
+run from inside a session Claude Code itself spawned. Outside one, omitting
+<id> fails with the same message "bloodhound session" gives on its own.
 
 Human and JSON output always show both buckets. --bucket only narrows
 --porcelain: pass it explicitly to emit just that bucket's rows, or leave
@@ -110,7 +140,7 @@ Percentages print at 4 decimal places (%.4f), cw_tokens at 2 (%.2f),
 everything else as a plain integer. flags is "-" when nothing applies,
 otherwise a comma joined list drawn from inferred, partial, in_progress,
 hit_cap.`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: runAttributionSession,
 }
 
@@ -123,7 +153,7 @@ func init() {
 	attributionCmd.PersistentFlags().BoolVar(&attrPorcelain, "porcelain", false,
 		"emit stable, tab separated records for scripting")
 	attributionCmd.PersistentFlags().StringVar(&attrBy, "by", "project",
-		`rollup grouping, rollup only: "project" or "session"`)
+		`rollup grouping, rollup only: "project", "session", or "cwd"`)
 	attributionCmd.PersistentFlags().IntVar(&attrLimit, "limit", 20,
 		"max rollup rows in human mode, 0 for all (rollup only, ignored by --json/--porcelain)")
 
@@ -157,10 +187,10 @@ func attrResolveBucket() (string, error) {
 
 func attrResolveBy() (string, error) {
 	switch attrBy {
-	case "project", "session":
+	case "project", "session", "cwd":
 		return attrBy, nil
 	default:
-		return "", fmt.Errorf(`invalid --by %q: must be "project" or "session"`, attrBy)
+		return "", fmt.Errorf(`invalid --by %q: must be "project", "session", or "cwd"`, attrBy)
 	}
 }
 
@@ -270,9 +300,12 @@ func writeAttrRollupHuman(w io.Writer, bucket, by string, days, windowCount int,
 		rows = rows[:limit]
 	}
 
-	lastHeader := "WORKING DIR"
-	if by == "session" {
+	lastHeader := "PROJECT"
+	switch by {
+	case "session":
 		lastHeader = "SESSION"
+	case "cwd":
+		lastHeader = "WORKING DIR"
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
@@ -300,6 +333,9 @@ func rollupLastColumn(g store.AttributionGroup, by string) string {
 			first8 = first8[:8]
 		}
 		return first8 + "  " + g.Project
+	}
+	if by == "cwd" && g.Key == store.UnknownCwd {
+		return "(unknown cwd)"
 	}
 	return g.Key
 }
@@ -339,14 +375,21 @@ func writeAttrRollupPorcelain(w io.Writer, groups []store.AttributionGroup, tota
 		if key == "" {
 			key = "-"
 		}
+		// cwd is "-" both for the unattributed sentinel and for a
+		// project-keyed group (see AttributionGroup.Cwd: never a single
+		// value there by design), same placeholder convention as key.
+		cwd := g.Cwd
+		if cwd == "" {
+			cwd = "-"
+		}
 		share := 0.0
 		if totalPct > 0 {
 			share = g.Pct / totalPct
 		}
-		fmt.Fprintf(w, "%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%d\t%d\t%d\t%.2f\t%d\t%d\t%d\n",
+		fmt.Fprintf(w, "%s\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%d\t%d\t%d\t%.2f\t%d\t%d\t%d\t%s\n",
 			key, g.Pct, g.MeasuredPct, g.EstimatedPct, g.PeakPct, share,
 			g.Sessions, g.Windows, g.TurnCount, g.CWTokens, g.RawTokens,
-			g.FirstTSUnixMS, g.LastTSUnixMS)
+			g.FirstTSUnixMS, g.LastTSUnixMS, cwd)
 	}
 	return nil
 }
@@ -562,6 +605,24 @@ func runAttributionSession(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// No <id>: default to the session bloodhound itself is running inside,
+	// the same lookup "bloodhound session" does. Errors with the identical
+	// message when that variable isn't set, since the reason is the same
+	// one: this isn't running as a child of Claude Code.
+	id := ""
+	if len(args) == 1 {
+		id = args[0]
+	} else {
+		uuid, ok := currentSessionUUID()
+		if !ok {
+			return fmt.Errorf(
+				"no <id> given and not running inside a Claude Code session: %s is not set. "+
+					"Pass a session id explicitly, or run this from a process Claude Code itself spawned",
+				claudeCodeSessionEnvVar)
+		}
+		id = uuid
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	s, err := store.Open(ctx)
@@ -570,7 +631,7 @@ func runAttributionSession(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	uuid, err := s.ResolveSessionUUID(ctx, args[0])
+	uuid, err := s.ResolveSessionUUID(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -609,11 +670,20 @@ func writeAttrSessionHuman(w io.Writer, uuid string, totals *store.SessionPctTot
 	}
 
 	fmt.Fprintf(w, "session %s\n", uuid)
-	project := ""
+	project, cwd := "", ""
 	if totals != nil {
 		project = totals.Project
+		cwd = totals.Cwd
 	}
 	fmt.Fprintf(w, "  %s\n", project)
+	// "(unknown)" rather than an empty line: most often the session's
+	// transcript rotated off disk before cwd existed as a column, so there
+	// is nothing left to recover it from (see SessionPctTotals.Cwd). That's
+	// expected for a lot of history, not a sign something broke.
+	if cwd == "" {
+		cwd = "(unknown)"
+	}
+	fmt.Fprintf(w, "  %s\n", cwd)
 	if totals != nil {
 		fmt.Fprintf(w, "  %s of the weekly limit across %s windows\n",
 			fmtPct(totals.WeekPct), fmtCount(int64(totals.WindowWeek)))
@@ -654,19 +724,30 @@ func writeSessionWindowTable(w io.Writer, rows []store.AttributionRow, wins []st
 func writeAttrSessionJSON(w io.Writer, uuid string, totals *store.SessionPctTotals,
 	weekRows []store.AttributionRow, weekWindows []store.LimitWindowRow,
 	fiveHRows []store.AttributionRow, fiveHWindows []store.LimitWindowRow) error {
-	project := ""
+	project, cwd := "", ""
 	if totals != nil {
 		project = totals.Project
+		cwd = totals.Cwd
 	}
 	out := struct {
-		SessionUUID string                      `json:"session_uuid"`
-		Project     string                      `json:"project"`
-		Totals      routes.SessionAttribution   `json:"totals"`
-		Week        []routes.SessionWindowSlice `json:"week"`
-		FiveH       []routes.SessionWindowSlice `json:"five_h"`
+		SessionUUID string `json:"session_uuid"`
+		Project     string `json:"project"`
+		// Cwd sits alongside Project at the top level, the same place
+		// Project already lives, rather than only inside Totals: this
+		// envelope is CLI-bespoke (unlike Totals, which is the shared
+		// routes.SessionAttribution type also used by /api/sessions), and a
+		// reader shouldn't have to know that identity fields live in two
+		// different places in the same JSON blob depending on which one.
+		// Totals.Cwd carries the identical value; that's an intentional,
+		// harmless duplication for consumers that only look at Totals.
+		Cwd    string                      `json:"cwd,omitempty"`
+		Totals routes.SessionAttribution   `json:"totals"`
+		Week   []routes.SessionWindowSlice `json:"week"`
+		FiveH  []routes.SessionWindowSlice `json:"five_h"`
 	}{
 		SessionUUID: uuid,
 		Project:     project,
+		Cwd:         cwd,
 		Totals:      sessionAttributionFromStore(totals),
 		Week:        []routes.SessionWindowSlice{},
 		FiveH:       []routes.SessionWindowSlice{},
@@ -722,10 +803,14 @@ func bucketLabel(bucket string) string {
 }
 
 func byLabel(by string) string {
-	if by == "session" {
+	switch by {
+	case "session":
 		return "session"
+	case "cwd":
+		return "working directory"
+	default:
+		return "project"
 	}
-	return "working dir"
 }
 
 func humanKey(key string) string {
@@ -857,6 +942,7 @@ func attrGroupFromStore(g store.AttributionGroup, total float64) routes.AttrGrou
 	row := routes.AttrGroup{
 		Key:           g.Key,
 		Project:       g.Project,
+		Cwd:           g.Cwd,
 		Pct:           round2(g.Pct),
 		MeasuredPct:   round2(g.MeasuredPct),
 		EstimatedPct:  round2(g.EstimatedPct),
@@ -918,6 +1004,7 @@ func sessionAttributionFromStore(t *store.SessionPctTotals) routes.SessionAttrib
 		return routes.SessionAttribution{}
 	}
 	return routes.SessionAttribution{
+		Cwd:          t.Cwd,
 		WeekPct:      round2(t.WeekPct),
 		FiveHPct:     round2(t.FiveHPct),
 		FiveHPeakPct: round2(t.FiveHPeakPct),

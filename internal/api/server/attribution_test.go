@@ -97,3 +97,79 @@ func TestBuildAttrWindows_UnattributedStaysItsOwnBucket(t *testing.T) {
 		t.Fatalf("got %+v, want a single unattributed slice", out[0].Slices)
 	}
 }
+
+// TestBuildAttrWindows_ByCwdFoldsSubagentIntoParent is the by=="cwd"
+// counterpart of TestBuildAttrWindows_BySessionFoldsSubagentIntoParent: a
+// subagent's slice must land under its dispatcher's directory (WindowSlices
+// already resolves Cwd to the effective owner's, never the subagent's own),
+// so the chart agrees with GroupAttribution's by=="cwd" table beneath it.
+func TestBuildAttrWindows_ByCwdFoldsSubagentIntoParent(t *testing.T) {
+	windows := []store.LimitWindowRow{{StartUnixMS: 1000, EndUnixMS: 2000, AttributedPct: 25}}
+	slices := []store.AttributionRow{
+		{
+			WindowStartUnixMS: 1000, SessionUUID: "parent", EffectiveSessionUUID: "parent",
+			Project: "proj", Cwd: "/home/user/projects/myapp", MeasuredPct: 5,
+		},
+		{
+			// A subagent's own row: WindowSlices resolves its Cwd to the
+			// PARENT's directory, never wherever the subagent itself ran.
+			WindowStartUnixMS: 1000, SessionUUID: "agent-sub1", EffectiveSessionUUID: "parent",
+			Project: "proj", Cwd: "/home/user/projects/myapp", MeasuredPct: 20,
+		},
+	}
+
+	out := buildAttrWindows(windows, slices, "cwd")
+	if len(out) != 1 {
+		t.Fatalf("got %d windows, want 1", len(out))
+	}
+	got := out[0].Slices
+	if len(got) != 1 {
+		t.Fatalf("got %d slices, want 1 (parent + subagent folded together): %+v", len(got), got)
+	}
+	if got[0].Key != "/home/user/projects/myapp" {
+		t.Errorf("slice key = %q, want the shared directory", got[0].Key)
+	}
+	if got[0].Pct != 25 {
+		t.Errorf("slice pct = %v, want 25 (parent's 5 plus subagent's 20)", got[0].Pct)
+	}
+}
+
+// TestBuildAttrWindows_ByCwdUnknownGetsOwnBucket covers the other new case:
+// a real, known session whose cwd was never captured must key on
+// store.UnknownCwd, not on the empty string (which would either vanish or
+// collide with a genuinely unattributed slice sharing the same window).
+func TestBuildAttrWindows_ByCwdUnknownGetsOwnBucket(t *testing.T) {
+	windows := []store.LimitWindowRow{{StartUnixMS: 1000, EndUnixMS: 2000, AttributedPct: 10}}
+	slices := []store.AttributionRow{
+		{WindowStartUnixMS: 1000, SessionUUID: "known", EffectiveSessionUUID: "known", Cwd: "", MeasuredPct: 7},
+		{WindowStartUnixMS: 1000, SessionUUID: attribute.Unattributed, EffectiveSessionUUID: attribute.Unattributed, Cwd: "", MeasuredPct: 3},
+	}
+
+	out := buildAttrWindows(windows, slices, "cwd")
+	if len(out[0].Slices) != 2 {
+		t.Fatalf("got %d slices, want 2 (UnknownCwd and unattributed kept apart): %+v", len(out[0].Slices), out[0].Slices)
+	}
+
+	var unknownPct, unattributedPct float64
+	var sawUnknown, sawUnattributed bool
+	for _, sl := range out[0].Slices {
+		switch sl.Key {
+		case store.UnknownCwd:
+			sawUnknown, unknownPct = true, sl.Pct
+		case attribute.Unattributed:
+			sawUnattributed, unattributedPct = true, sl.Pct
+		}
+	}
+	if !sawUnknown {
+		t.Fatalf("no store.UnknownCwd slice: %+v", out[0].Slices)
+	}
+	if !sawUnattributed {
+		t.Fatalf("no unattributed slice: %+v", out[0].Slices)
+	}
+	if unknownPct != 7 {
+		t.Errorf("UnknownCwd slice pct = %v, want 7", unknownPct)
+	}
+	if unattributedPct != 3 {
+		t.Errorf("unattributed slice pct = %v, want 3", unattributedPct)
+	}
+}

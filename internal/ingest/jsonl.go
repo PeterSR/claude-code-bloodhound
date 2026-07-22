@@ -113,13 +113,20 @@ type FileResult struct {
 	PathHash    string
 }
 
-// subagentContext marks path as a subagent transcript
-// (<project>/<parent-uuid>/subagents/<file>.jsonl) and carries the one thing
-// its path alone doesn't give parseFile: the dispatching session's UUID
-// (the directory two levels up). nil means path is an ordinary top-level
-// session file.
+// subagentContext marks path as a subagent transcript, either the Task-tool
+// shape (<project>/<parent-uuid>/subagents/<file>.jsonl) or the Workflow-tool
+// shape one level deeper still
+// (<project>/<parent-uuid>/subagents/workflows/<wf-id>/agent-*.jsonl), and
+// carries the two things path alone doesn't give parseFile directly: the
+// dispatching session's UUID, and the containing project. Both are computed
+// in findSessionFiles rather than re-derived here from a fixed directory
+// depth, because the two shapes put parentUUID (and project) at different
+// depths: a depth assumption that's correct for one is wrong for the
+// other, and the depth is already known wherever the glob that found the
+// file matched. nil means path is an ordinary top-level session file.
 type subagentContext struct {
 	parentUUID string
+	project    string
 }
 
 // parseFile streams one JSONL file and emits structured Turn + Compaction
@@ -161,12 +168,13 @@ func parseFile(path string, sa *subagentContext) (FileResult, error) {
 	var project string
 	var parentSessionUUID string
 	if sa != nil {
-		// <project>/<parent-uuid>/subagents/<file>.jsonl: project is the
-		// containing project dir, same as the parent, so a subagent's spend
-		// rolls up under the project that dispatched it rather than under
-		// wherever its own cwd happened to point (the two can legitimately
-		// differ: a subagent working in a subdirectory of the same repo).
-		project = filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+		// project is the dispatching session's containing project dir
+		// (computed by findSessionFiles, see subagentContext), so a
+		// subagent's spend rolls up under the project that dispatched it
+		// rather than under wherever its own cwd happened to point (the
+		// two can legitimately differ: a subagent working in a
+		// subdirectory of the same repo).
+		project = sa.project
 		parentSessionUUID = sa.parentUUID
 	} else {
 		project = filepath.Base(filepath.Dir(path))

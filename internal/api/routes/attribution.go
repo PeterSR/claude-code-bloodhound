@@ -11,8 +11,10 @@ package routes
 type AttributionResponse struct {
 	OK     bool   `json:"ok"`
 	Bucket string `json:"bucket"` // "week" | "5h"
-	// By is how each window's slices are grouped: "project" or "session".
-	// Both rollup tables are returned regardless.
+	// By is how each window's slices are grouped: "project", "session", or
+	// "cwd". All three rollup tables (Projects, Sessions, Cwds) are
+	// returned regardless; By only selects which grouping the per-window
+	// Slices below use.
 	By         string `json:"by"`
 	WindowDays int    `json:"window_days"`
 
@@ -24,9 +26,16 @@ type AttributionResponse struct {
 
 	// Windows is the per-limit-window breakdown, oldest first.
 	Windows []AttrWindow `json:"windows"`
-	// Projects and Sessions roll the same rows up two ways, biggest first.
+	// Projects, Sessions and Cwds roll the same rows up three ways, biggest
+	// first: by the sanitized project directory Claude Code invents, by the
+	// session that spent it (a subagent's spend folded into its
+	// dispatcher's row), and by the dispatcher's own absolute working
+	// directory. Cwds is the finer-grained view Projects can't provide: one
+	// project can span several literal directories, so Projects can't say
+	// which of them actually spent a given share.
 	Projects []AttrGroup `json:"projects"`
 	Sessions []AttrGroup `json:"sessions"`
+	Cwds     []AttrGroup `json:"cwds"`
 
 	// Totals across the requested range.
 	TotalPct        float64 `json:"total_pct"`
@@ -78,6 +87,24 @@ type AttrSlice struct {
 type AttrGroup struct {
 	Key     string `json:"key"`
 	Project string `json:"project,omitempty"`
+	// Cwd is the absolute working directory behind Project's sanitized name
+	// (project only replaces "/" with "-", which a real path segment can
+	// also contain, so it can't be reversed). Populated for a session-keyed
+	// group (one owner, one directory) and for a cwd-keyed group (where
+	// it's simply the same value as Key); a project-keyed group omits it
+	// rather than pick one of the several directories that project name can
+	// legitimately span. For a group whose key is a session (or a
+	// directory) that a supervisor's subagents ran under, this is the
+	// dispatcher's own cwd, never a subagent's, even though the subagent's
+	// spend is folded into this same row.
+	//
+	// Empty when the underlying session's cwd was never captured
+	// (transcript rotated off disk before this field existed). In a
+	// cwd-keyed group that case has its own explicit key instead, the
+	// literal string "__unknown_cwd__", so a caller doesn't have to
+	// distinguish "unknown directory" from Key == "" (the unattributed
+	// remainder below): those are different facts, not the same gap.
+	Cwd string `json:"cwd,omitempty"`
 
 	Pct          float64 `json:"pct"`
 	MeasuredPct  float64 `json:"measured_pct"`
@@ -101,6 +128,15 @@ type AttrGroup struct {
 // SessionAttribution is one session's cost against both meters, embedded in
 // the session list and the session detail payload.
 type SessionAttribution struct {
+	// Cwd is the session's absolute working directory: the same value
+	// Project would reverse to if project's sanitization were reversible.
+	// For a session that dispatched subagents, this is its own cwd, never a
+	// subagent's, even though a subagent's spend rolls up into these same
+	// totals. Empty when the underlying session's cwd was never captured
+	// (transcript rotated off disk before this field existed) - render that
+	// as "unknown", not as a blank that reads like a bug.
+	Cwd string `json:"cwd,omitempty"`
+
 	// WeekPct is the session's share of the weekly limit: the headline
 	// number, since weekly windows are long enough that most sessions sit
 	// inside exactly one.

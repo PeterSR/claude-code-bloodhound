@@ -82,6 +82,58 @@ func TestFindSessionFiles_DiscoversSubagentsWithParentUUID(t *testing.T) {
 	if gotSub.parentUUID != parentUUID {
 		t.Errorf("parentUUID = %q, want %q", gotSub.parentUUID, parentUUID)
 	}
+	if gotSub.project != "proj1" {
+		t.Errorf("subagent project = %q, want %q", gotSub.project, "proj1")
+	}
+}
+
+// TestFindSessionFiles_DiscoversWorkflowAgentsWithParentUUID covers the
+// third glob, one level deeper than a plain subagent: a Workflow-tool
+// agent under <parent-uuid>/subagents/workflows/<wf-id>/agent-*.jsonl must
+// be found, marked isSubagent (reusing the same flag a Task-tool subagent
+// uses, see the field doc on sessionFile), and carry the correct parentUUID
+// and project despite sitting two directories deeper than the plain
+// subagent case: exactly the depth mismatch that broke a fixed-depth
+// assumption before this shape existed (see
+// TestParseFile_TrustsSubagentContextProjectAtAnyDepth in jsonl_test.go for
+// the parseFile side of that fix). journal.jsonl, living in the same
+// <wf-id> directory, must not be discovered at all.
+func TestFindSessionFiles_DiscoversWorkflowAgentsWithParentUUID(t *testing.T) {
+	root := t.TempDir()
+	const parentUUID = "a850d051-2b0d-455b-991c-a0a434be269f"
+
+	wfAgentPath := filepath.Join(root, "proj1", parentUUID, "subagents", "workflows", "wf_abc123", "agent-a026760a272779ef1.jsonl")
+	journalPath := filepath.Join(root, "proj1", parentUUID, "subagents", "workflows", "wf_abc123", "journal.jsonl")
+	mustWriteFile(t, wfAgentPath, "{}\n")
+	mustWriteFile(t, journalPath, `{"type":"started","agentId":"a026760a272779ef1"}`+"\n")
+
+	files, err := findSessionFiles(root)
+	if err != nil {
+		t.Fatalf("findSessionFiles: %v", err)
+	}
+
+	var gotWF *sessionFile
+	for i := range files {
+		switch files[i].path {
+		case wfAgentPath:
+			gotWF = &files[i]
+		case journalPath:
+			t.Fatalf("journal.jsonl must not be discovered as a transcript: %s", journalPath)
+		}
+	}
+
+	if gotWF == nil {
+		t.Fatalf("workflow agent file %s not discovered", wfAgentPath)
+	}
+	if !gotWF.isSubagent {
+		t.Errorf("workflow agent not marked isSubagent (it should reuse the flag, not get a separate one)")
+	}
+	if gotWF.parentUUID != parentUUID {
+		t.Errorf("parentUUID = %q, want %q", gotWF.parentUUID, parentUUID)
+	}
+	if gotWF.project != "proj1" {
+		t.Errorf("project = %q, want %q", gotWF.project, "proj1")
+	}
 }
 
 func mustWriteFile(t *testing.T, path, content string) {
@@ -213,6 +265,106 @@ func TestRun_SubagentDiscoveryEndToEnd(t *testing.T) {
 	}
 	if topCwd != "/home/x/proj1" {
 		t.Errorf("top-level cwd = %q, want its own recorded cwd", topCwd)
+	}
+}
+
+// TestRun_WorkflowAgentDiscoveryEndToEnd drives the real Run() pipeline
+// against a workflow-agent transcript (one level deeper than a plain
+// subagent) and its journal.jsonl sibling, covering the three things the
+// spec calls out for this shape specifically: the agent file is ingested
+// with parent_session_uuid/project/cwd set correctly despite the deeper
+// nesting (the project derivation bug a fixed directory-depth assumption
+// would have reintroduced here, see the comment on subagentContext), a
+// workflow agent under a bad parent directory is skipped exactly like a
+// bad-parent plain subagent, and journal.jsonl never contributes a turn
+// because it is never even discovered as a transcript.
+func TestRun_WorkflowAgentDiscoveryEndToEnd(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	t.Setenv("XDG_STATE_HOME", dataDir)
+	t.Setenv("XDG_CONFIG_HOME", dataDir)
+
+	ctx := context.Background()
+	s, err := store.Open(ctx)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.DB.Close()
+
+	projectsDir := t.TempDir()
+	const (
+		parentUUID  = "a850d051-2b0d-455b-991c-a0a434be269f"
+		badParentID = "not-a-uuid"
+		project     = "proj1"
+		wfID        = "wf_abc123"
+	)
+
+	goodWFPath := filepath.Join(projectsDir, project, parentUUID, "subagents", "workflows", wfID, "agent-good.jsonl")
+	badWFPath := filepath.Join(projectsDir, project, badParentID, "subagents", "workflows", wfID, "agent-bad.jsonl")
+	journalPath := filepath.Join(projectsDir, project, parentUUID, "subagents", "workflows", wfID, "journal.jsonl")
+
+	mustWriteJSONL(t, goodWFPath, []map[string]any{
+		subagentJSONLRecord("2026-01-01T00:03:00Z", "req_wf_good", "msg_wf_good", "claude-haiku", "/home/x/proj1/workflows",
+			usageMap(70, 7, 0, 0, 0)),
+	})
+	mustWriteJSONL(t, badWFPath, []map[string]any{
+		subagentJSONLRecord("2026-01-01T00:04:00Z", "req_wf_bad", "msg_wf_bad", "claude-haiku", "/home/x/proj1",
+			usageMap(70, 7, 0, 0, 0)),
+	})
+	// journal.jsonl: not a transcript. Written with a shape that would
+	// parse as an "assistant" record if parseFile ever saw it (it must
+	// not), so this test would fail loudly rather than quietly if the glob
+	// ever regressed to "*.jsonl".
+	mustWriteJSONL(t, journalPath, []map[string]any{
+		assistantRecord("2026-01-01T00:03:30Z", "req_journal", "msg_journal", "claude-haiku", usageMap(999, 999, 0, 0, 0)),
+	})
+
+	stats, err := Run(ctx, s, Options{ProjectsDir: projectsDir, MinFileSize: 1})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if stats.FilesSkippedBadParent != 1 {
+		t.Errorf("FilesSkippedBadParent = %d, want 1", stats.FilesSkippedBadParent)
+	}
+
+	var (
+		gotProject, gotParent, gotCwd string
+	)
+	err = s.DB.QueryRowContext(ctx, `
+		SELECT project, parent_session_uuid, cwd FROM turns WHERE session_uuid = 'agent-good'
+	`).Scan(&gotProject, &gotParent, &gotCwd)
+	if err != nil {
+		t.Fatalf("query good workflow agent turn: %v", err)
+	}
+	if gotProject != project {
+		t.Errorf("workflow agent project = %q, want %q", gotProject, project)
+	}
+	if gotParent != parentUUID {
+		t.Errorf("workflow agent parent_session_uuid = %q, want %q", gotParent, parentUUID)
+	}
+	if gotCwd != "/home/x/proj1/workflows" {
+		t.Errorf("workflow agent cwd = %q, want its own recorded cwd", gotCwd)
+	}
+
+	var badCount int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_uuid = 'agent-bad'`).Scan(&badCount); err != nil {
+		t.Fatalf("query bad workflow agent turns: %v", err)
+	}
+	if badCount != 0 {
+		t.Errorf("agent-bad has %d turns, want 0 (bad parent dir should have been skipped)", badCount)
+	}
+
+	// The 999/999 usage in journal.jsonl would be unmistakable in the sums
+	// below if it were ever ingested; confirm it never enters turns at all
+	// (not under any session_uuid, since journal.jsonl never gets a
+	// filename-stem identity of its own the way an agent file does).
+	var journalCount int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE input_tokens = 999`).Scan(&journalCount); err != nil {
+		t.Fatalf("query journal turns: %v", err)
+	}
+	if journalCount != 0 {
+		t.Errorf("journal.jsonl contributed %d turns, want 0", journalCount)
 	}
 }
 
