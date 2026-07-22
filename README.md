@@ -31,15 +31,23 @@ The opt-in **Join the pack** community-insights upload is next — see [Privacy]
 
 Three jobs, scheduled either by your OS or by a built-in scheduler:
 
-- `bloodhound poll` — drives the Claude Code TUI in a pty, parses the `/usage` panel, persists the observation.
-- `bloodhound ingest` — walks `~/.claude/projects/*.jsonl`, parses every assistant turn and compaction event into local SQLite.
-- `bloodhound aggregate` — recomputes rolling metrics (sessions, 5-hour buckets, tokens-per-1% calibration) on a slower cadence.
+- `bloodhound poll`: drives the Claude Code TUI in a pty, parses the `/usage` panel, persists the observation.
+- `bloodhound ingest`: walks `~/.claude/projects/*.jsonl`, parses every assistant turn and compaction event into local SQLite.
+- `bloodhound aggregate`: recomputes rolling metrics (sessions, 5-hour buckets, tokens-per-1% calibration, per-session limit attribution) on a slower cadence.
 
 `bloodhound daemon` runs all three on configurable intervals (defaults: poll 5m, ingest 5m, aggregate 15m) and exposes a JSON API over a unix socket at `$XDG_RUNTIME_DIR/bloodhound/api.sock` — no TCP port to conflict with anything on your box.
 
 `bloodhound-gui` is a native window that loads the dashboard and proxies its API calls to the daemon's socket. Pre-built for Linux x86_64; macOS / Windows / Linux-arm builds work in principle but aren't shipped yet (see [Platforms](#platforms)). It's a separate binary so the daemon can run headless on machines without a desktop environment.
 
 A `bloodhound status` subcommand renders one line suitable for Claude Code's statusline so you can keep an eye on your quota without leaving the terminal.
+
+## Attribution
+
+`/usage` tells you 42% of the 5-hour window is gone; it does not tell you which of the four Claude Code windows you have open spent it. Bloodhound works that out.
+
+Every time the meter moves between two observations, that movement is split across the sessions that were running in between, weighted by what each one cost, up to what those sessions could plausibly account for at what a point actually cost in that same window. So the numbers are anchored to what the panel actually reported rather than to a token-to-percent conversion, and every session in a weekly window adds up to that window's usage. Spend the meter has not reported yet (the tail since the last poll, a stretch where the bucket was saturated, history from before you installed bloodhound) is estimated instead, priced at whatever a point cost in the nearest window that could be reconciled, and stays labelled as an estimate everywhere it appears. Movement that local sessions can't plausibly account for (another box on the same account, a transcript that was never ingested) is reported as unattributed rather than quietly shared out onto whatever session happened to be running.
+
+The Attribution page rolls this up by working directory and by session, over weekly or 5-hour windows. The Sessions list carries the same figures per row, and each session's detail page breaks its cost down window by window.
 
 ## Currency
 

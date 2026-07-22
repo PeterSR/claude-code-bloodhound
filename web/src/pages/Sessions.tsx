@@ -20,11 +20,29 @@ type Session = {
   cold_compaction_count: number;
   cache_ttl: string;
   models: string;
+  attribution: SessionAttribution;
+};
+
+type SessionAttribution = {
+  week_pct: number;
+  five_h_pct: number;
+  five_h_peak_pct: number;
+  measured_pct: number;
+  estimated_pct: number;
+  windows_5h?: number;
+  windows_week?: number;
 };
 
 type SessionsResponse = { sessions: Session[]; count: number };
 
-type SortKey = 'last_ts' | 'turn_count' | 'raw_tokens' | 'peak_5h_raw_tokens' | 'compaction_count';
+type SortKey =
+  | 'last_ts'
+  | 'turn_count'
+  | 'raw_tokens'
+  | 'peak_5h_raw_tokens'
+  | 'compaction_count'
+  | 'week_pct'
+  | 'five_h_peak_pct';
 
 export default function Sessions() {
   const { data, loading, error } = useApi<SessionsResponse>('/sessions', 60_000);
@@ -59,8 +77,9 @@ export default function Sessions() {
         <h1 className="text-2xl font-semibold tracking-tight">Sessions</h1>
       </div>
       <p className="text-zinc-600 dark:text-zinc-400 max-w-2xl mb-4">
-        Every Claude Code session this machine has on disk, with peak 5-hour
-        burn and compaction breakdown. Click a header to sort.
+        Every Claude Code session this machine has on disk, with what each one
+        cost against your limits, its peak 5-hour burn, and its compaction
+        breakdown. Click a header to sort.
       </p>
 
       <div className="flex flex-wrap gap-3 items-center mb-4">
@@ -100,6 +119,8 @@ export default function Sessions() {
                 <Th>Project</Th>
                 <Th sortable={onSort('turn_count')} active={sortKey === 'turn_count'} desc={sortDesc} className="text-right">Turns</Th>
                 <Th sortable={onSort('raw_tokens')} active={sortKey === 'raw_tokens'} desc={sortDesc} className="text-right">Raw tokens</Th>
+                <Th sortable={onSort('week_pct')} active={sortKey === 'week_pct'} desc={sortDesc} className="text-right">% of week</Th>
+                <Th sortable={onSort('five_h_peak_pct')} active={sortKey === 'five_h_peak_pct'} desc={sortDesc} className="text-right">% of 5h</Th>
                 <Th sortable={onSort('peak_5h_raw_tokens')} active={sortKey === 'peak_5h_raw_tokens'} desc={sortDesc} className="text-right">Peak 5h</Th>
                 <Th className="text-right">Idle / Rot / Restruct</Th>
                 <Th sortable={onSort('compaction_count')} active={sortKey === 'compaction_count'} desc={sortDesc} className="text-right">Compactions</Th>
@@ -120,6 +141,19 @@ export default function Sessions() {
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{s.turn_count.toLocaleString()}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{fmtNumber(s.raw_tokens)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    <PctCell value={s.attribution.week_pct} estimated={s.attribution.estimated_pct} />
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    <PctCell
+                      value={s.attribution.five_h_peak_pct}
+                      title={
+                        s.attribution.five_h_pct > s.attribution.five_h_peak_pct + 0.05
+                          ? `peak window; ${fmtPct(s.attribution.five_h_pct)}% summed across ${s.attribution.windows_5h} windows`
+                          : undefined
+                      }
+                    />
+                  </td>
                   <td className="px-3 py-2 text-right tabular-nums text-rose-500">{fmtNumber(s.peak_5h_raw_tokens)}</td>
                   <td className="px-3 py-2 text-right text-xs text-zinc-500 tabular-nums">
                     {warn(s.idle_miss_count, 'text-red-500')} / {warn(s.rotation_count, 'text-amber-500')} / {warn(s.restructure_count, 'text-purple-500')}
@@ -217,5 +251,39 @@ function secondsAgo(iso: string): number {
 
 function pick(s: Session, key: SortKey): number {
   if (key === 'last_ts') return new Date(s.last_ts).getTime();
+  if (key === 'week_pct') return s.attribution.week_pct;
+  if (key === 'five_h_peak_pct') return s.attribution.five_h_peak_pct;
   return s[key];
+}
+
+/** A limit share. Dimmed when zero (not yet attributed rather than free)
+ *  and marked when part of it came from the calibration estimate. */
+function PctCell({
+  value,
+  estimated,
+  title,
+}: {
+  value: number;
+  estimated?: number;
+  title?: string;
+}) {
+  if (!value) return <span className="text-zinc-400">—</span>;
+  const partlyEstimated = (estimated ?? 0) > 0.005;
+  return (
+    <span
+      className={value >= 10 ? 'font-medium' : ''}
+      title={[title, partlyEstimated ? `includes ${fmtPct(estimated!)}% estimated` : '']
+        .filter(Boolean)
+        .join(' · ') || undefined}
+    >
+      {fmtPct(value)}%{partlyEstimated && <span className="text-zinc-400">*</span>}
+    </span>
+  );
+}
+
+function fmtPct(n: number): string {
+  if (n === 0) return '0';
+  if (n < 0.1) return n.toFixed(2);
+  if (n < 10) return n.toFixed(1);
+  return String(Math.round(n));
 }

@@ -17,6 +17,11 @@ type SessionListItem struct {
 	ColdCompactionCount int    `json:"cold_compaction_count"`
 	CacheTTL            string `json:"cache_ttl"`
 	Models              string `json:"models"`
+
+	// Attribution is this session's share of the /usage limit meters. Zero
+	// values mean the aggregator has not attributed this session yet, not
+	// that it was free.
+	Attribution SessionAttribution `json:"attribution"`
 }
 
 // SessionsResponse is the envelope returned by GET /api/sessions.
