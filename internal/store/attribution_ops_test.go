@@ -502,6 +502,103 @@ func TestWindowSlices_CwdIsParentsNotSubagents(t *testing.T) {
 	}
 }
 
+// TestSessionPctWindows_FoldsSubagentsIntoParent is the fix the task calls
+// for: SessionPctWindows must fold a subagent's spend into whichever session
+// dispatched it, the same effective-owner rule SessionPctTotalsAll already
+// applies, or the two disagree about the same session's cost. Mirrors
+// TestSessionPctTotalsAll_FoldsSubagentsIntoParent's shape (one window with
+// the parent and both subagents overlapping, a second with the parent
+// alone) so the two can be checked against each other directly.
+func TestSessionPctWindows_FoldsSubagentsIntoParent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const (
+		parent = "66666666-6666-6666-6666-666666666666"
+		sub1   = "agent-eeeeeeeeeeeeeeeee"
+		sub2   = "agent-fffffffffffffffff"
+	)
+
+	insertTestSession(t, s, parent, "proj", "")
+	insertTestSession(t, s, sub1, "proj", parent)
+	insertTestSession(t, s, sub2, "proj", parent)
+
+	insertTestWindow(t, s, "5h", 1000)
+	insertTestWindow(t, s, "5h", 2000)
+	insertTestAttribution(t, s, "5h", 1000, parent, "proj", 5, 0)
+	insertTestAttribution(t, s, "5h", 1000, sub1, "proj", 20, 0)
+	insertTestAttribution(t, s, "5h", 1000, sub2, "proj", 15, 0)
+	insertTestAttribution(t, s, "5h", 2000, parent, "proj", 8, 0)
+
+	rows, wins, err := s.SessionPctWindows(ctx, parent, "5h")
+	if err != nil {
+		t.Fatalf("SessionPctWindows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d window rows, want 2 (one per window, subagents folded rather than exploded): %+v", len(rows), rows)
+	}
+	if len(wins) != len(rows) {
+		t.Fatalf("got %d window metadata rows for %d attribution rows, want them to match", len(wins), len(rows))
+	}
+
+	if got, want := rows[0].WindowStartUnixMS, int64(1000); got != want {
+		t.Fatalf("rows[0].WindowStartUnixMS = %d, want %d (oldest first)", got, want)
+	}
+	if got, want := rows[0].MeasuredPct, 40.0; got != want {
+		t.Errorf("window 1 pct = %v, want %v (parent's 5 plus subagents' 20+15)", got, want)
+	}
+	if got, want := rows[1].MeasuredPct, 8.0; got != want {
+		t.Errorf("window 2 pct = %v, want %v (parent alone, no subagents in this window)", got, want)
+	}
+
+	// The acceptance test from the spec: the array must sum to the same
+	// figure SessionPctTotalsAll's folded total reports.
+	totals, err := s.SessionPctTotalsAll(ctx)
+	if err != nil {
+		t.Fatalf("SessionPctTotalsAll: %v", err)
+	}
+	var sum float64
+	for _, r := range rows {
+		sum += r.MeasuredPct + r.EstimatedPct
+	}
+	if got, want := sum, totals[parent].FiveHPct; got != want {
+		t.Errorf("sum of SessionPctWindows rows = %v, want %v (SessionPctTotalsAll's folded FiveHPct)", got, want)
+	}
+}
+
+// TestSessionPctWindows_SubagentOwnUUIDStaysUnfolded guards the other half
+// of the fix: querying a subagent BY ITS OWN uuid must still return its own
+// raw, unfolded row, not the row folded into its parent (which wouldn't even
+// be keyed by the subagent's uuid). This is the one reachability path
+// "attribution windows --slices" and "attribution --by session" promise in
+// their own --help text after they fold a subagent away.
+func TestSessionPctWindows_SubagentOwnUUIDStaysUnfolded(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const (
+		parent = "77777777-7777-7777-7777-777777777777"
+		sub    = "agent-ddddddddddddddddd"
+	)
+	insertTestSession(t, s, parent, "proj", "")
+	insertTestSession(t, s, sub, "proj", parent)
+
+	insertTestWindow(t, s, "5h", 3000)
+	insertTestAttribution(t, s, "5h", 3000, parent, "proj", 5, 0)
+	insertTestAttribution(t, s, "5h", 3000, sub, "proj", 20, 0)
+
+	rows, _, err := s.SessionPctWindows(ctx, sub, "5h")
+	if err != nil {
+		t.Fatalf("SessionPctWindows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows for the subagent's own uuid, want 1 (its own row, not the parent's folded one): %+v", len(rows), rows)
+	}
+	if got, want := rows[0].MeasuredPct, 20.0; got != want {
+		t.Errorf("subagent's own pct = %v, want %v (its own 20, not folded with the parent's 5)", got, want)
+	}
+}
+
 func keysOf(m map[string]*SessionPctTotals) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

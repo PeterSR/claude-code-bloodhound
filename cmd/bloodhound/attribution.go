@@ -19,9 +19,10 @@ import (
 )
 
 // Flags shared across the three commands. --bucket, --days, --json and
-// --porcelain apply to all of them. --by and --limit only mean something
-// for the rollup (the bare `attribution` command), but cobra has nowhere
-// better to declare them since all three share one persistent flag set.
+// --porcelain apply to all of them. --by, --limit, --per-window and --window
+// only mean something for the rollup (the bare `attribution` command), but
+// cobra has nowhere better to declare them since all three share one
+// persistent flag set.
 var (
 	attrBucket    string
 	attrDays      int
@@ -30,6 +31,8 @@ var (
 	attrBy        string
 	attrLimit     int
 	attrSlices    bool
+	attrPerWindow bool
+	attrWindow    string
 )
 
 var attributionCmd = &cobra.Command{
@@ -50,6 +53,22 @@ THIS directory cost", not "how much did this project cost".
 
   bloodhound attribution windows        the limit windows themselves
   bloodhound attribution session <id>   one session, window by window
+
+The rollup's own Pct sums every limit window inside the lookback, which is
+the wrong number to denominate a grant against once the range spans more
+than one: a 5h rollup over --days 7 sums roughly 30 windows, so its Pct
+answers "how much this week", never "how much of my current 5h budget".
+Two flags narrow it to the grant currency, "share of one window":
+
+  --window current    keep only the single currently open window
+  --per-window         add each group's per-window breakdown as an array
+
+--window current's "in progress" comes from limit_windows, never inferred
+from the wall clock: the 5h window is usage-triggered, not aligned to a
+fixed schedule, so a caller can't derive "is this the open window" from the
+current time on its own. Combine the two to see a group's share of just the
+open window; use --per-window alone to see its rate across every window in
+the lookback instead of only the current one.
 
 --porcelain output is a stable parsing contract: tab separated, one record
 per line, no header row. The rollup's columns, in order, are:
@@ -80,7 +99,20 @@ NOT added to "attribution windows" or "attribution session", whose porcelain
 column counts (8 / 8 / 11) are unchanged: those rows are already keyed by a
 session or project a caller can look up in the rollup for its cwd, so adding
 it there too would just repeat the same value on every window line instead
-of once per session.`,
+of once per session.
+
+--porcelain --per-window is a DIFFERENT record shape, not the 14 columns
+above with extra fields tacked on: a per-group array doesn't fit a flat row,
+so it emits one row per (group, window) instead of one row per group.
+Columns, in order (10 columns):
+
+  key  window_start_unix_ms  window_end_unix_ms  in_progress  pct
+  measured_pct  estimated_pct  turns  cw_tokens  raw_tokens
+
+key is the same value the plain rollup's key column would print for that
+group (including "-" for the unattributed remainder); in_progress is "1" or
+"0". Percentages print at 4 decimal places (%.4f), cw_tokens at 2 (%.2f),
+everything else as a plain integer.`,
 	Args: cobra.NoArgs,
 	RunE: runAttributionRollup,
 }
@@ -156,6 +188,10 @@ func init() {
 		`rollup grouping, rollup only: "project", "session", or "cwd"`)
 	attributionCmd.PersistentFlags().IntVar(&attrLimit, "limit", 20,
 		"max rollup rows in human mode, 0 for all (rollup only, ignored by --json/--porcelain)")
+	attributionCmd.PersistentFlags().BoolVar(&attrPerWindow, "per-window", false,
+		"rollup only: add each group's per-window breakdown, its share of one window at a time")
+	attributionCmd.PersistentFlags().StringVar(&attrWindow, "window", "",
+		`rollup only: "current" keeps only the single currently open window`)
 
 	attributionWindowsCmd.Flags().BoolVar(&attrSlices, "slices", false,
 		"expand to one record per (window, slice) instead of one per window")
@@ -194,6 +230,20 @@ func attrResolveBy() (string, error) {
 	}
 }
 
+// attrResolveWindow validates --window, rollup only. "" means no filter (the
+// ordinary --days lookback); "current" is the only other value understood
+// today, so anything else is rejected rather than silently ignored, unlike
+// the API's equally permissive but error-free query param of the same name
+// (a CLI typo deserves a message; a stray query string does not).
+func attrResolveWindow() (string, error) {
+	switch attrWindow {
+	case "", "current":
+		return attrWindow, nil
+	default:
+		return "", fmt.Errorf(`invalid --window %q: must be "current" (or omit it for the full --days lookback)`, attrWindow)
+	}
+}
+
 // attrDaysOrDefault validates --days and, when it's the 0 sentinel,
 // resolves it to the bucket's default lookback.
 func attrDaysOrDefault(bucket string) (int, error) {
@@ -229,6 +279,10 @@ func runAttributionRollup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	windowFilter, err := attrResolveWindow()
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -240,13 +294,50 @@ func runAttributionRollup(cmd *cobra.Command, args []string) error {
 
 	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 
-	groups, err := s.GroupAttribution(ctx, bucket, by, since)
-	if err != nil {
-		return err
-	}
 	windows, err := s.ListLimitWindows(ctx, bucket, since)
 	if err != nil {
 		return err
+	}
+
+	// --window current narrows everything below to the single open window.
+	// Found from the --days-scoped list just fetched when that already
+	// reaches far enough back; --days describes how far the ordinary
+	// (unfiltered) rollup looks, not a bound on how old the open window can
+	// be, so a narrow --days (--days 7 on a week bucket, say) could
+	// otherwise miss a window that's genuinely still open just because its
+	// start predates the cutoff. attrCurrentWindowSince is independent of
+	// --days for exactly that reason.
+	windowOpen := true
+	if windowFilter == "current" {
+		curWindows := windows
+		if curSince := attrCurrentWindowSince(bucket); curSince < since {
+			if curWindows, err = s.ListLimitWindows(ctx, bucket, curSince); err != nil {
+				return err
+			}
+		}
+		if cur := attrCurrentWindow(curWindows); cur != nil {
+			// A window's own start can never be in the future, so using it
+			// as the new "since" is exactly "only this window": nothing
+			// newer exists to leak back in.
+			since = cur.StartUnixMS
+			windows = []store.LimitWindowRow{*cur}
+		} else {
+			windowOpen = false
+			windows = []store.LimitWindowRow{}
+		}
+	}
+
+	var groups []store.AttributionGroup
+	var slices []store.AttributionRow
+	if windowOpen {
+		if groups, err = s.GroupAttribution(ctx, bucket, by, since); err != nil {
+			return err
+		}
+		if attrPerWindow {
+			if slices, err = s.WindowSlices(ctx, bucket, since); err != nil {
+				return err
+			}
+		}
 	}
 
 	var totalPct, measuredPct, estimatedPct, unattributedPct float64
@@ -267,27 +358,145 @@ func runAttributionRollup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	var perWindow map[string][]routes.AttrGroupWindow
+	if attrPerWindow {
+		perWindow = buildAttrGroupWindows(windows, slices, by)
+	}
+
 	w := cmd.OutOrStdout()
 	switch {
 	case attrJSON:
-		return writeAttrRollupJSON(w, bucket, by, days, tokensPerPctCW,
-			totalPct, measuredPct, estimatedPct, unattributedPct, groups)
+		return writeAttrRollupJSON(w, bucket, by, days, windowFilter, tokensPerPctCW,
+			totalPct, measuredPct, estimatedPct, unattributedPct, groups, perWindow)
 	case attrPorcelain:
+		if attrPerWindow {
+			return writeAttrRollupPorcelainPerWindow(w, groups, perWindow)
+		}
 		return writeAttrRollupPorcelain(w, groups, totalPct)
 	default:
 		return writeAttrRollupHuman(w, bucket, by, days, len(windows), tokensPerPctCW,
-			totalPct, measuredPct, estimatedPct, unattributedPct, groups, attrLimit)
+			totalPct, measuredPct, estimatedPct, unattributedPct, groups, attrLimit,
+			windowFilter, windowOpen, perWindow)
 	}
 }
 
+// attrCurrentWindowSince is how far back "--window current" is guaranteed
+// to search for the open window, regardless of --days: doubled past each
+// bucket's real span as slack for a window that ran unusually long or a
+// late aggregator pass, so the search only ever widens past whatever --days
+// already covers, never narrows it.
+func attrCurrentWindowSince(bucket string) int64 {
+	if bucket == attribute.Bucket5h {
+		return time.Now().Add(-10 * time.Hour).UnixMilli()
+	}
+	return time.Now().Add(-14 * 24 * time.Hour).UnixMilli()
+}
+
+// attrCurrentWindow returns the one in-progress window in a bucket's list,
+// or nil when none is open. Walked from the end because ListLimitWindows
+// returns oldest first, so the open window - if there is one - is always
+// the last entry.
+func attrCurrentWindow(windows []store.LimitWindowRow) *store.LimitWindowRow {
+	for i := len(windows) - 1; i >= 0; i-- {
+		if windows[i].InProgress {
+			return &windows[i]
+		}
+	}
+	return nil
+}
+
+// rollupGroupKey derives the grouping key one WindowSlices row contributes
+// under a "by" mode, matching GroupAttribution's own SQL exactly (mirrored
+// here rather than imported: internal/api/server's version is unexported,
+// same reason the store-row conversions at the bottom of this file are
+// duplicated rather than shared, see that section's comment).
+func rollupGroupKey(r store.AttributionRow, by string) string {
+	key := r.EffectiveSessionUUID
+	if by == "project" {
+		key = r.Project
+	}
+	if by == "cwd" {
+		key = r.Cwd
+	}
+	switch {
+	case r.SessionUUID == attribute.Unattributed:
+		key = attribute.Unattributed
+	case by == "cwd" && r.Cwd == "":
+		key = store.UnknownCwd
+	}
+	return key
+}
+
+// buildAttrGroupWindows groups WindowSlices rows by (group key, window),
+// the transpose of the per-window slices GroupAttribution and the rollup
+// otherwise show: one array per GROUP instead of one array per window. This
+// is what --per-window adds, and it's cheap because windows/slices are
+// already fetched for the ordinary rollup call.
+func buildAttrGroupWindows(windows []store.LimitWindowRow, slices []store.AttributionRow, by string) map[string][]routes.AttrGroupWindow {
+	type agg struct {
+		measured, estimated, cw float64
+		raw                     int64
+		turns                   int
+	}
+	byWindow := map[int64]map[string]*agg{}
+	for _, r := range slices {
+		key := rollupGroupKey(r, by)
+		m, ok := byWindow[r.WindowStartUnixMS]
+		if !ok {
+			m = map[string]*agg{}
+			byWindow[r.WindowStartUnixMS] = m
+		}
+		a, ok := m[key]
+		if !ok {
+			a = &agg{}
+			m[key] = a
+		}
+		a.measured += r.MeasuredPct
+		a.estimated += r.EstimatedPct
+		a.cw += r.CWTokens
+		a.raw += r.RawTokens
+		a.turns += r.TurnCount
+	}
+
+	// windows is oldest first (ListLimitWindows' own contract), so ranging
+	// over it in order is what keeps every group's per-window array
+	// ascending too, without a second sort pass.
+	out := map[string][]routes.AttrGroupWindow{}
+	for _, win := range windows {
+		for key, a := range byWindow[win.StartUnixMS] {
+			out[key] = append(out[key], routes.AttrGroupWindow{
+				WindowStartUnixMS: win.StartUnixMS,
+				WindowEndUnixMS:   win.EndUnixMS,
+				InProgress:        win.InProgress,
+				Pct:               round2(a.measured + a.estimated),
+				MeasuredPct:       round2(a.measured),
+				EstimatedPct:      round2(a.estimated),
+				CWTokens:          round2(a.cw),
+				RawTokens:         a.raw,
+				TurnCount:         a.turns,
+			})
+		}
+	}
+	return out
+}
+
 func writeAttrRollupHuman(w io.Writer, bucket, by string, days, windowCount int, tokensPerPctCW float64,
-	totalPct, measuredPct, estimatedPct, unattributedPct float64, groups []store.AttributionGroup, limit int) error {
+	totalPct, measuredPct, estimatedPct, unattributedPct float64, groups []store.AttributionGroup, limit int,
+	windowFilter string, windowOpen bool, perWindow map[string][]routes.AttrGroupWindow) error {
 	if len(groups) == 0 {
+		if windowFilter == "current" && !windowOpen {
+			fmt.Fprintf(w, "no %s window is currently open.\n", bucketLabel(bucket))
+			return nil
+		}
 		fmt.Fprintf(w, "nothing attributed yet for the %s bucket in the last %d days. Run `bloodhound aggregate` to build it.\n", bucket, days)
 		return nil
 	}
 
-	fmt.Fprintf(w, "%s, by %s, last %d days across %d windows\n", bucketLabel(bucket), byLabel(by), days, windowCount)
+	if windowFilter == "current" {
+		fmt.Fprintf(w, "%s, by %s, current window only\n", bucketLabel(bucket), byLabel(by))
+	} else {
+		fmt.Fprintf(w, "%s, by %s, last %d days across %d windows\n", bucketLabel(bucket), byLabel(by), days, windowCount)
+	}
 	fmt.Fprintf(w, "  %s attributed, %s measured, %s estimated, %s unattributed\n",
 		fmtPct(totalPct), fmtPct(measuredPct), fmtPct(estimatedPct), fmtPct(unattributedPct))
 	if tokensPerPctCW > 0 {
@@ -319,6 +528,26 @@ func writeAttrRollupHuman(w io.Writer, bucket, by string, days, windowCount int,
 			fmtPct(g.Pct), fmtPct(share), fmtPct(g.PeakPct),
 			fmtCount(int64(g.Sessions)), fmtCount(int64(g.TurnCount)),
 			rollupLastColumn(g, by))
+		if perWindow != nil {
+			// Flush around the per-window detail lines the same way
+			// "attribution windows --slices" does: their key column can be a
+			// full UUID, much wider than this table's own columns, and
+			// interleaving them in the same tabwriter would stretch every
+			// other group row to match.
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			for _, pw := range perWindow[g.Key] {
+				mark := ""
+				if pw.InProgress {
+					mark = " (in progress)"
+				}
+				fmt.Fprintf(tw, "    %s\t%s%s\n", formatLocalTime(pw.WindowStartUnixMS), fmtPct(pw.Pct), mark)
+			}
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+		}
 	}
 	return tw.Flush()
 }
@@ -340,12 +569,14 @@ func rollupLastColumn(g store.AttributionGroup, by string) string {
 	return g.Key
 }
 
-func writeAttrRollupJSON(w io.Writer, bucket, by string, days int, tokensPerPctCW,
-	totalPct, measuredPct, estimatedPct, unattributedPct float64, groups []store.AttributionGroup) error {
+func writeAttrRollupJSON(w io.Writer, bucket, by string, days int, windowFilter string, tokensPerPctCW,
+	totalPct, measuredPct, estimatedPct, unattributedPct float64, groups []store.AttributionGroup,
+	perWindow map[string][]routes.AttrGroupWindow) error {
 	out := struct {
 		Bucket          string             `json:"bucket"`
 		By              string             `json:"by"`
 		Days            int                `json:"days"`
+		Window          string             `json:"window,omitempty"`
 		TokensPerPctCW  float64            `json:"tokens_per_pct_cw"`
 		TotalPct        float64            `json:"total_pct"`
 		MeasuredPct     float64            `json:"measured_pct"`
@@ -356,6 +587,7 @@ func writeAttrRollupJSON(w io.Writer, bucket, by string, days int, tokensPerPctC
 		Bucket:          bucket,
 		By:              by,
 		Days:            days,
+		Window:          windowFilter,
 		TokensPerPctCW:  round2(tokensPerPctCW),
 		TotalPct:        round2(totalPct),
 		MeasuredPct:     round2(measuredPct),
@@ -364,7 +596,11 @@ func writeAttrRollupJSON(w io.Writer, bucket, by string, days int, tokensPerPctC
 		Groups:          []routes.AttrGroup{},
 	}
 	for _, g := range groups {
-		out.Groups = append(out.Groups, attrGroupFromStore(g, totalPct))
+		row := attrGroupFromStore(g, totalPct)
+		if perWindow != nil {
+			row.PerWindow = perWindow[g.Key]
+		}
+		out.Groups = append(out.Groups, row)
 	}
 	return writeJSONOut(w, out)
 }
@@ -390,6 +626,31 @@ func writeAttrRollupPorcelain(w io.Writer, groups []store.AttributionGroup, tota
 			key, g.Pct, g.MeasuredPct, g.EstimatedPct, g.PeakPct, share,
 			g.Sessions, g.Windows, g.TurnCount, g.CWTokens, g.RawTokens,
 			g.FirstTSUnixMS, g.LastTSUnixMS, cwd)
+	}
+	return nil
+}
+
+// writeAttrRollupPorcelainPerWindow is --porcelain --per-window's own record
+// form, not the 14-column rollup form above with fields appended: a
+// per-group array of windows doesn't fit a flat row, so this emits one row
+// per (group, window) instead of one row per group. 10 columns, in order:
+// key, window_start_unix_ms, window_end_unix_ms, in_progress, pct,
+// measured_pct, estimated_pct, turns, cw_tokens, raw_tokens.
+func writeAttrRollupPorcelainPerWindow(w io.Writer, groups []store.AttributionGroup, perWindow map[string][]routes.AttrGroupWindow) error {
+	for _, g := range groups {
+		key := g.Key
+		if key == "" {
+			key = "-"
+		}
+		for _, pw := range perWindow[g.Key] {
+			inProgress := 0
+			if pw.InProgress {
+				inProgress = 1
+			}
+			fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%.4f\t%.4f\t%.4f\t%d\t%.2f\t%d\n",
+				key, pw.WindowStartUnixMS, pw.WindowEndUnixMS, inProgress,
+				pw.Pct, pw.MeasuredPct, pw.EstimatedPct, pw.TurnCount, pw.CWTokens, pw.RawTokens)
+		}
 	}
 	return nil
 }

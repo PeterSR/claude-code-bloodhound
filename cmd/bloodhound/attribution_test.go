@@ -143,6 +143,109 @@ func TestAttrResolveBy_AcceptsCwd(t *testing.T) {
 	}
 }
 
+// TestAttrResolveWindow_AcceptsCurrentOnly is the CLI-side guard for
+// --window: "" and "current" resolve, anything else is rejected rather than
+// silently ignored (unlike the API's equally permissive query param of the
+// same name), since a CLI typo deserves a message.
+func TestAttrResolveWindow_AcceptsCurrentOnly(t *testing.T) {
+	orig := attrWindow
+	defer func() { attrWindow = orig }()
+
+	for _, valid := range []string{"", "current"} {
+		attrWindow = valid
+		got, err := attrResolveWindow()
+		if err != nil {
+			t.Errorf("attrResolveWindow() with --window %q: unexpected error %v", valid, err)
+		}
+		if got != valid {
+			t.Errorf("attrResolveWindow() with --window %q = %q, want %q", valid, got, valid)
+		}
+	}
+
+	attrWindow = "bogus"
+	if _, err := attrResolveWindow(); err == nil {
+		t.Fatalf("attrResolveWindow() with --window \"bogus\": want an error")
+	} else if !strings.Contains(err.Error(), "current") {
+		t.Errorf("attrResolveWindow() error %q, want it to mention \"current\"", err.Error())
+	}
+}
+
+// TestAttrCurrentWindow finds the one in-progress window in a bucket's
+// list, or reports none: the same lookup --window current relies on to
+// scope the rollup to a single window.
+func TestAttrCurrentWindow(t *testing.T) {
+	wins := []store.LimitWindowRow{
+		{StartUnixMS: 1000, InProgress: false},
+		{StartUnixMS: 2000, InProgress: true},
+	}
+	got := attrCurrentWindow(wins)
+	if got == nil || got.StartUnixMS != 2000 {
+		t.Fatalf("attrCurrentWindow = %+v, want the window starting at 2000", got)
+	}
+
+	none := []store.LimitWindowRow{{StartUnixMS: 1000, InProgress: false}}
+	if got := attrCurrentWindow(none); got != nil {
+		t.Errorf("attrCurrentWindow with no open window = %+v, want nil", got)
+	}
+}
+
+// TestBuildAttrGroupWindows_FoldsSubagentIntoParent is the CLI-side twin of
+// the server package's test of the same shape: --per-window must fold a
+// subagent's slice into its parent's array, the same effective-owner rule
+// the rest of the rollup already applies, or --per-window would disagree
+// with the plain rollup about where a window's spend went.
+func TestBuildAttrGroupWindows_FoldsSubagentIntoParent(t *testing.T) {
+	windows := []store.LimitWindowRow{
+		{StartUnixMS: 1000, EndUnixMS: 2000, InProgress: false},
+		{StartUnixMS: 2000, EndUnixMS: 3000, InProgress: true},
+	}
+	slices := []store.AttributionRow{
+		{WindowStartUnixMS: 1000, SessionUUID: "parent", EffectiveSessionUUID: "parent", MeasuredPct: 5, TurnCount: 2},
+		{WindowStartUnixMS: 1000, SessionUUID: "agent-sub1", EffectiveSessionUUID: "parent", MeasuredPct: 20, TurnCount: 7},
+		{WindowStartUnixMS: 2000, SessionUUID: "parent", EffectiveSessionUUID: "parent", MeasuredPct: 8, TurnCount: 1},
+	}
+
+	out := buildAttrGroupWindows(windows, slices, "session")
+	pw, ok := out["parent"]
+	if !ok || len(pw) != 2 {
+		t.Fatalf("got %+v, want 2 window entries under \"parent\"", out)
+	}
+	if pw[0].WindowStartUnixMS != 1000 || pw[0].Pct != 25 {
+		t.Errorf("pw[0] = %+v, want window 1000 with pct 25 (5 + 20)", pw[0])
+	}
+	if pw[1].WindowStartUnixMS != 2000 || pw[1].Pct != 8 || !pw[1].InProgress {
+		t.Errorf("pw[1] = %+v, want window 2000, pct 8, in progress", pw[1])
+	}
+	if _, ok := out["agent-sub1"]; ok {
+		t.Errorf("subagent must not have its own key in the per-group map: %+v", out)
+	}
+}
+
+// TestRollupGroupKey_MatchesEachByMode checks the key derivation
+// buildAttrGroupWindows depends on for all three groupings plus both
+// sentinels, since a wrong key here would silently orphan a --per-window
+// array from its group (map lookups don't fail loudly on a mismatched key).
+func TestRollupGroupKey_MatchesEachByMode(t *testing.T) {
+	cases := []struct {
+		name string
+		row  store.AttributionRow
+		by   string
+		want string
+	}{
+		{"project", store.AttributionRow{SessionUUID: "sess", Project: "proj", EffectiveSessionUUID: "sess", Cwd: "/x"}, "project", "proj"},
+		{"session", store.AttributionRow{SessionUUID: "sess", Project: "proj", EffectiveSessionUUID: "sess", Cwd: "/x"}, "session", "sess"},
+		{"cwd", store.AttributionRow{SessionUUID: "sess", Project: "proj", EffectiveSessionUUID: "sess", Cwd: "/x"}, "cwd", "/x"},
+		{"cwd unknown", store.AttributionRow{SessionUUID: "known", EffectiveSessionUUID: "known", Cwd: ""}, "cwd", store.UnknownCwd},
+		{"unattributed session", store.AttributionRow{SessionUUID: attribute.Unattributed, EffectiveSessionUUID: attribute.Unattributed}, "session", attribute.Unattributed},
+		{"unattributed cwd", store.AttributionRow{SessionUUID: attribute.Unattributed, EffectiveSessionUUID: attribute.Unattributed}, "cwd", attribute.Unattributed},
+	}
+	for _, c := range cases {
+		if got := rollupGroupKey(c.row, c.by); got != c.want {
+			t.Errorf("%s: rollupGroupKey(%+v, %q) = %q, want %q", c.name, c.row, c.by, got, c.want)
+		}
+	}
+}
+
 // TestRollupLastColumn_CwdUnknownBucketIsLabeled makes sure the human-mode
 // rollup renders store.UnknownCwd as a readable label, distinct from the
 // unattributed sentinel's own "(unattributed)" and from a real directory,

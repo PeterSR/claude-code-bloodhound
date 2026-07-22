@@ -37,6 +37,14 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 	case "cwd":
 		by = "cwd"
 	}
+	// per_window and window=current are additive, presentation-only knobs
+	// over the same rows the plain rollup already fetches: neither changes
+	// what attrGroups queries, only what this handler does with the result,
+	// so they're read permissively (same style as by/bucket above) rather
+	// than 400ing on an unrecognised value.
+	perWindow := r.URL.Query().Get("per_window") != ""
+	windowCurrent := r.URL.Query().Get("window") == "current"
+
 	// A weekly view wants months; a 5h view wants days. Same knob, very
 	// different useful defaults.
 	defDays := 56
@@ -62,6 +70,37 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// window=current narrows every query below to the single open window.
+	// Found from the window_days-scoped list just fetched when that already
+	// reaches far enough back; window_days describes how far the ordinary
+	// (unfiltered) rollup looks, not a bound on how old the open window can
+	// be, so a narrow window_days could otherwise miss a window that's
+	// genuinely still open just because its start predates the cutoff.
+	windowOpen := true
+	if windowCurrent {
+		out.Window = "current"
+		curWindows := windows
+		if curSince := currentWindowSince(bucket); curSince < since {
+			if curWindows, err = s.Store.ListLimitWindows(ctx, bucket, curSince); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+		}
+		if cur := currentLimitWindow(curWindows); cur != nil {
+			// A window's own start can never be in the future, so using it
+			// as the new "since" is exactly "only this window": nothing
+			// newer exists to leak in. No open window (aggregate hasn't run
+			// yet, or genuinely nothing is open right now) degrades to an
+			// honestly empty response rather than silently falling back to
+			// the full range.
+			since = cur.StartUnixMS
+			windows = []store.LimitWindowRow{*cur}
+		} else {
+			windowOpen = false
+			windows = []store.LimitWindowRow{}
+		}
+	}
+
 	// Report the rate the estimate actually ran at: the newest window that
 	// moved enough to price itself. The calibration median is only the
 	// last-resort fallback, and it reads several times too cheap (it prices
@@ -82,24 +121,39 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 			out.TokensPerPctCW = round2(cw)
 		}
 	}
-	slices, err := s.Store.WindowSlices(ctx, bucket, since)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
+
+	var slices []store.AttributionRow
+	if windowOpen {
+		if slices, err = s.Store.WindowSlices(ctx, bucket, since); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
 	}
 	out.Windows = buildAttrWindows(windows, slices, by)
 
-	if out.Projects, err = s.attrGroups(ctx, bucket, "project", since); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
+	if windowOpen {
+		if out.Projects, err = s.attrGroups(ctx, bucket, "project", since); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if out.Sessions, err = s.attrGroups(ctx, bucket, "session", since); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if out.Cwds, err = s.attrGroups(ctx, bucket, "cwd", since); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
 	}
-	if out.Sessions, err = s.attrGroups(ctx, bucket, "session", since); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	if out.Cwds, err = s.attrGroups(ctx, bucket, "cwd", since); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
+
+	// per_window is attached to all three rollups regardless of "by" (same
+	// "always populate all three" choice attrGroups' callers already made
+	// above): it's cheap, since it's grouping data already fetched for
+	// Windows above, not a new query per rollup.
+	if perWindow {
+		attachPerWindow(out.Projects, windows, slices, "project")
+		attachPerWindow(out.Sessions, windows, slices, "session")
+		attachPerWindow(out.Cwds, windows, slices, "cwd")
 	}
 
 	for _, g := range out.Projects {
@@ -155,6 +209,129 @@ func (s *Server) attrGroups(ctx context.Context, bucket, by string, since int64)
 	return out, nil
 }
 
+// attrGroupKey derives the grouping key (and human label) one slice
+// contributes under a "by" mode, exactly the way GroupAttribution's SQL
+// derives the same group's key: shared by buildAttrWindows (one slice array
+// per window) and buildAttrGroupWindows (one window array per group) so the
+// two can't drift apart on what a key means, and so a key here always finds
+// its matching group in Projects/Sessions/Cwds.
+func attrGroupKey(sl store.AttributionRow, by string) (key, label string) {
+	key, label = sl.EffectiveSessionUUID, sl.EffectiveSessionUUID
+	if by == "project" {
+		key, label = sl.Project, sl.Project
+	}
+	if by == "cwd" {
+		key, label = sl.Cwd, sl.Cwd
+	}
+	switch {
+	case sl.SessionUUID == attribute.Unattributed:
+		// The remainder is neither a project, a session, nor a cwd; give
+		// it one stable key across every grouping so the UI can style it
+		// as the gap it is.
+		key, label = attribute.Unattributed, ""
+	case by == "cwd" && sl.Cwd == "":
+		// A real, known session (or supervisor plus subagents) whose
+		// cwd was never captured: distinguishable from the unattributed
+		// remainder above, same UnknownCwd sentinel GroupAttribution's
+		// by=="cwd" rollup uses for the identical row.
+		key, label = store.UnknownCwd, store.UnknownCwd
+	}
+	return key, label
+}
+
+// currentWindowSince is how far back window=current is guaranteed to search
+// for the open window, regardless of window_days: doubled past each
+// bucket's real span as slack for a window that ran unusually long or a
+// late aggregator pass, so the search only ever widens past whatever
+// window_days already covers, never narrows it.
+func currentWindowSince(bucket string) int64 {
+	if bucket == attribute.Bucket5h {
+		return time.Now().Add(-10 * time.Hour).UnixMilli()
+	}
+	return time.Now().Add(-14 * 24 * time.Hour).UnixMilli()
+}
+
+// currentLimitWindow returns the one in-progress window in a bucket's list,
+// or nil when none is open (aggregate hasn't run since the last reset, or
+// the requested lookback doesn't reach it). Walked from the end because
+// ListLimitWindows/GroupAttribution both return oldest first, so the open
+// window - if there is one - is always the last entry, not because
+// "in progress" implies "most recent" in general.
+func currentLimitWindow(windows []store.LimitWindowRow) *store.LimitWindowRow {
+	for i := len(windows) - 1; i >= 0; i-- {
+		if windows[i].InProgress {
+			return &windows[i]
+		}
+	}
+	return nil
+}
+
+// buildAttrGroupWindows is buildAttrWindows transposed: one array per GROUP
+// (keyed exactly like attrGroupKey/GroupAttribution) instead of one array
+// per window. This is what a rollup's Pct can't answer on its own once a
+// range spans more than one window - Pct there sums every window in range,
+// so it can say "how much this week" but never "how much of my current 5h
+// budget" - and it's cheap because it reuses the same windows/slices data
+// buildAttrWindows already has, rather than a second query.
+func buildAttrGroupWindows(windows []store.LimitWindowRow, slices []store.AttributionRow, by string) map[string][]routes.AttrGroupWindow {
+	type agg struct {
+		measured, estimated, cw float64
+		raw                     int64
+		turns                   int
+	}
+	byWindow := map[int64]map[string]*agg{}
+	for _, sl := range slices {
+		key, _ := attrGroupKey(sl, by)
+		m, ok := byWindow[sl.WindowStartUnixMS]
+		if !ok {
+			m = map[string]*agg{}
+			byWindow[sl.WindowStartUnixMS] = m
+		}
+		a, ok := m[key]
+		if !ok {
+			a = &agg{}
+			m[key] = a
+		}
+		a.measured += sl.MeasuredPct
+		a.estimated += sl.EstimatedPct
+		a.cw += sl.CWTokens
+		a.raw += sl.RawTokens
+		a.turns += sl.TurnCount
+	}
+
+	// windows is already oldest first (ListLimitWindows/WindowSlices' own
+	// contract), so ranging over it in order, rather than sorting each key's
+	// slice afterwards, is what keeps every group's PerWindow ascending too.
+	out := map[string][]routes.AttrGroupWindow{}
+	for _, win := range windows {
+		for key, a := range byWindow[win.StartUnixMS] {
+			out[key] = append(out[key], routes.AttrGroupWindow{
+				WindowStartUnixMS: win.StartUnixMS,
+				WindowEndUnixMS:   win.EndUnixMS,
+				InProgress:        win.InProgress,
+				Pct:               round2(a.measured + a.estimated),
+				MeasuredPct:       round2(a.measured),
+				EstimatedPct:      round2(a.estimated),
+				CWTokens:          round2(a.cw),
+				RawTokens:         a.raw,
+				TurnCount:         a.turns,
+			})
+		}
+	}
+	return out
+}
+
+// attachPerWindow fills each group's PerWindow from the same window/slice
+// data the stacked chart already computed for this response; groups is
+// mutated in place since routes.AttrGroup is returned by value from
+// attrGroups and this is the one place that needs to add to it afterwards.
+func attachPerWindow(groups []routes.AttrGroup, windows []store.LimitWindowRow, slices []store.AttributionRow, by string) {
+	perGroup := buildAttrGroupWindows(windows, slices, by)
+	for i := range groups {
+		groups[i].PerWindow = perGroup[groups[i].Key]
+	}
+}
+
 // buildAttrWindows joins each window to its slices, regrouped by project, by
 // session's effective owner, or by that same effective owner's cwd, and
 // folds the long tail into one "other" entry so the stack still sums to the
@@ -181,26 +358,7 @@ func buildAttrWindows(windows []store.LimitWindowRow, slices []store.Attribution
 	}
 	byWindow := map[int64]map[string]*agg{}
 	for _, sl := range slices {
-		key, label := sl.EffectiveSessionUUID, sl.EffectiveSessionUUID
-		if by == "project" {
-			key, label = sl.Project, sl.Project
-		}
-		if by == "cwd" {
-			key, label = sl.Cwd, sl.Cwd
-		}
-		switch {
-		case sl.SessionUUID == attribute.Unattributed:
-			// The remainder is neither a project, a session, nor a cwd; give
-			// it one stable key across every grouping so the UI can style it
-			// as the gap it is.
-			key, label = attribute.Unattributed, ""
-		case by == "cwd" && sl.Cwd == "":
-			// A real, known session (or supervisor plus subagents) whose
-			// cwd was never captured: distinguishable from the unattributed
-			// remainder above, same UnknownCwd sentinel GroupAttribution's
-			// by=="cwd" rollup uses for the identical row.
-			key, label = store.UnknownCwd, store.UnknownCwd
-		}
+		key, label := attrGroupKey(sl, by)
 		m, ok := byWindow[sl.WindowStartUnixMS]
 		if !ok {
 			m = map[string]*agg{}

@@ -17,6 +17,11 @@ type AttributionResponse struct {
 	// Slices below use.
 	By         string `json:"by"`
 	WindowDays int    `json:"window_days"`
+	// Window is "current" when the request narrowed everything below to the
+	// single open limit window (?window=current), "" otherwise (the normal
+	// WindowDays lookback). Echoed back so a caller can tell which scope a
+	// given response used without having to remember what it asked for.
+	Window string `json:"window,omitempty"`
 
 	// TokensPerPctCW is what one point of this meter cost most recently,
 	// reconciled over a whole observed window. This is the rate the
@@ -123,6 +128,39 @@ type AttrGroup struct {
 
 	FirstTSUnixMS int64 `json:"first_ts_unix_ms,omitempty"`
 	LastTSUnixMS  int64 `json:"last_ts_unix_ms,omitempty"`
+
+	// PerWindow is this group's share of each individual limit window in the
+	// range, rather than summed across all of them the way Pct is: the
+	// denominator a grant needs is "share of one window", and Pct can't
+	// provide it once a range spans more than one (a 5h rollup over --days 7
+	// sums roughly 30 windows, so Pct there answers "how much this week",
+	// never "how much of my current budget"). Only populated when asked for
+	// (CLI --per-window, API ?per_window=1); nil otherwise, same convention
+	// as the rest of this response's optional detail.
+	PerWindow []AttrGroupWindow `json:"per_window,omitempty"`
+}
+
+// AttrGroupWindow is one grouping key's share of a single limit window: the
+// per-group element of AttrGroup.PerWindow.
+type AttrGroupWindow struct {
+	WindowStartUnixMS int64 `json:"window_start_unix_ms"`
+	WindowEndUnixMS   int64 `json:"window_end_unix_ms"`
+	// InProgress comes straight from limit_windows, never inferred from the
+	// wall clock: the 5h window is usage-triggered rather than aligned to a
+	// fixed schedule, so "is this the open window" isn't something a caller
+	// could derive from the current time on its own.
+	InProgress bool `json:"in_progress,omitempty"`
+
+	// Pct is this group's share of THIS window alone, the grant-currency
+	// figure PerWindow exists to provide. MeasuredPct / EstimatedPct split
+	// it the same way the rest of this file's percentages do.
+	Pct          float64 `json:"pct"`
+	MeasuredPct  float64 `json:"measured_pct"`
+	EstimatedPct float64 `json:"estimated_pct"`
+
+	CWTokens  float64 `json:"cw_tokens"`
+	RawTokens int64   `json:"raw_tokens"`
+	TurnCount int     `json:"turn_count"`
 }
 
 // SessionAttribution is one session's cost against both meters, embedded in
