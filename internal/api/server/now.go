@@ -12,14 +12,15 @@ import (
 )
 
 // handleNow serves pool state (percentage, window reset, burn rate,
-// saturation, last-poll age) plus a few UI-only additions the Now page
-// needs on top of it. The pool state itself comes from nowstate.Compute,
-// the same function `bloodhound now` calls straight against SQLite — so
-// this handler and that CLI command can't drift on the numbers a consumer
-// might be comparing across the two. Everything after the Compute call
-// here (config-forwarded hints, chart history, recent-sessions panel) is
-// UI-specific and deliberately outside what nowstate computes; see that
-// package's doc comment for why.
+// saturation, last-poll age, and the poll-interval/stale-after config
+// hints) plus a few UI-only additions the Now page needs on top of it. The
+// pool state itself, hints included, comes from nowstate.Compute, the same
+// function `bloodhound now` calls straight against SQLite: this handler
+// and that CLI command can't drift on the numbers a consumer might be
+// comparing across the two. Everything after the Compute call here
+// (active-session threshold, recent-session window, chart history,
+// recent-sessions panel) is UI-specific and deliberately outside what
+// nowstate computes; see that package's doc comment for why.
 func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
@@ -32,8 +33,6 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 
 	recentWindowS := 86400
 	if cfg, err := config.Load(); err == nil {
-		out.PollIntervalS = cfg.PollIntervalS
-		out.StaleAfterS = cfg.StaleAfterS
 		out.ActiveSessionThresholdS = cfg.ActiveSessionThresholdS
 		out.RecentSessionWindowS = cfg.RecentSessionWindowS
 		if cfg.RecentSessionWindowS > 0 {

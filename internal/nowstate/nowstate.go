@@ -11,12 +11,18 @@
 // out of sync with the endpoint a downstream consumer might be comparing
 // it against.
 //
-// Deliberately out of scope: config-forwarded UI hints (poll interval,
-// stale-after threshold, ...), the in-window chart history, and the
-// recent-sessions panel. Those are additions the Now page layers on top of
-// this computation for its own purposes; they aren't part of what a
-// consumer means by "pool state," and the HTTP handler still adds them
-// itself after calling Compute.
+// PollIntervalS and StaleAfterS are the one pair of config-forwarded hints
+// this package DOES set: a consumer comparing `bloodhound now --json`
+// against GET /api/now needs both surfaces to agree on them, which is
+// exactly the gap this file was extended to close, so Compute loads
+// config and fills them in itself rather than leaving it to each caller.
+//
+// Everything else config-forwarded (active-session threshold,
+// recent-session window), the in-window chart history, and the
+// recent-sessions panel stay genuinely out of scope. Those are additions
+// the Now page layers on top of this computation for its own purposes;
+// they aren't part of what a consumer means by "pool state," and the HTTP
+// handler still adds them itself after calling Compute.
 package nowstate
 
 import (
@@ -24,16 +30,29 @@ import (
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
+	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
 // Compute builds the pool-state fields of the /api/now payload: OK,
-// Session, Week, LastPoll, and NowMS. Session/Week are nil when the latest
-// observation didn't carry that bucket's percentage (never captured yet,
-// or a misparse); LastPoll is nil only when there is no observation at
-// all.
+// Session, Week, LastPoll, NowMS, PollIntervalS, and StaleAfterS.
+// Session/Week are nil when the latest observation didn't carry that
+// bucket's percentage (never captured yet, or a misparse); LastPoll is nil
+// only when there is no observation at all.
+//
+// The last two fields come from config.Load(), read here rather than
+// passed in so the HTTP handler and the CLI can't each roll their own copy
+// (see the package comment). A config problem (a corrupt file; a missing
+// one already returns Default() with no error) must not fail pool state
+// along with it, so on error both are just left at zero rather than
+// aborting the computation.
 func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowResponse, error) {
 	out := &routes.NowResponse{NowMS: now.UnixMilli()}
+
+	if cfg, err := config.Load(); err == nil {
+		out.PollIntervalS = cfg.PollIntervalS
+		out.StaleAfterS = cfg.StaleAfterS
+	}
 
 	obs, err := s.LatestUsage(ctx)
 	if err != nil {

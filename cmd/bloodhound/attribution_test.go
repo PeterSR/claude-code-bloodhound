@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/attribute"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
@@ -244,6 +249,69 @@ func TestRollupGroupKey_MatchesEachByMode(t *testing.T) {
 			t.Errorf("%s: rollupGroupKey(%+v, %q) = %q, want %q", c.name, c.row, c.by, got, c.want)
 		}
 	}
+}
+
+// TestRunAttributionRollup_WindowCurrentEmptyIsNotAnError pins down the
+// behaviour documented in attributionCmd's Long text: against a database
+// with no open window, --window current must exit 0 with an empty group
+// list, never an error. A consumer now depends on this (see the docs
+// added alongside this test), so a later change that turns "no open
+// window" into an error path needs to break this test on purpose, not by
+// accident.
+func TestRunAttributionRollup_WindowCurrentEmptyIsNotAnError(t *testing.T) {
+	origBucket, origWindow, origJSON, origPorcelain, origBy, origDays, origLimit, origPerWindow :=
+		attrBucket, attrWindow, attrJSON, attrPorcelain, attrBy, attrDays, attrLimit, attrPerWindow
+	defer func() {
+		attrBucket, attrWindow, attrJSON, attrPorcelain, attrBy, attrDays, attrLimit, attrPerWindow =
+			origBucket, origWindow, origJSON, origPorcelain, origBy, origDays, origLimit, origPerWindow
+	}()
+
+	openTestStore(t) // empty DB: no limit_windows rows at all, so nothing is "open"
+	attrBucket = attribute.Bucket5h
+	attrWindow = "current"
+	attrBy = "project"
+	attrDays = 0
+	attrLimit = 20
+	attrPerWindow = false
+
+	t.Run("human", func(t *testing.T) {
+		attrJSON, attrPorcelain = false, false
+		var buf bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+		if err := runAttributionRollup(cmd, nil); err != nil {
+			t.Fatalf("runAttributionRollup returned %v, want nil (exit 0)", err)
+		}
+		if want := "no 5 hour limit window is currently open.\n"; buf.String() != want {
+			t.Errorf("output = %q, want %q", buf.String(), want)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		attrJSON, attrPorcelain = true, false
+		var buf bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+		if err := runAttributionRollup(cmd, nil); err != nil {
+			t.Fatalf("runAttributionRollup returned %v, want nil (exit 0)", err)
+		}
+		var out struct {
+			TotalPct float64            `json:"total_pct"`
+			Groups   []routes.AttrGroup `json:"groups"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+			t.Fatalf("unmarshal JSON output: %v\noutput was:\n%s", err, buf.String())
+		}
+		if out.TotalPct != 0 {
+			t.Errorf("total_pct = %v, want 0", out.TotalPct)
+		}
+		if out.Groups == nil {
+			t.Fatal("groups = null, want an empty array (\"groups\": [])")
+		}
+		if len(out.Groups) != 0 {
+			t.Errorf("groups = %+v, want empty", out.Groups)
+		}
+	})
 }
 
 // TestRollupLastColumn_CwdUnknownBucketIsLabeled makes sure the human-mode
