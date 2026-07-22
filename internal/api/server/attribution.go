@@ -147,8 +147,18 @@ func (s *Server) attrGroups(ctx context.Context, bucket, by string, since int64)
 }
 
 // buildAttrWindows joins each window to its slices, regrouped by project or
-// left per session, and folds the long tail into one "other" entry so the
-// stack still sums to the window total.
+// by session's effective owner, and folds the long tail into one "other"
+// entry so the stack still sums to the window total.
+//
+// by=="session" groups on EffectiveSessionUUID rather than the raw
+// SessionUUID, so a subagent's slice folds into whoever dispatched it
+// before this ever reaches foldTail. Without that, a subagent could show
+// as its own slice in this stacked chart while GroupAttribution (the table
+// directly beneath it) already folds that same spend into the parent, and
+// the two would stop summing to the same number for the same window.
+// by=="project" doesn't need this: a subagent already carries its parent's
+// project (see internal/ingest), so grouping by project pools them
+// naturally, same as GroupAttribution's comment notes for that case.
 func buildAttrWindows(windows []store.LimitWindowRow, slices []store.AttributionRow, by string) []routes.AttrWindow {
 	type agg struct {
 		label                        string
@@ -157,7 +167,7 @@ func buildAttrWindows(windows []store.LimitWindowRow, slices []store.Attribution
 	}
 	byWindow := map[int64]map[string]*agg{}
 	for _, sl := range slices {
-		key, label := sl.SessionUUID, sl.SessionUUID
+		key, label := sl.EffectiveSessionUUID, sl.EffectiveSessionUUID
 		if by == "project" {
 			key, label = sl.Project, sl.Project
 		}

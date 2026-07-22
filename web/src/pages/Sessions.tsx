@@ -20,6 +20,8 @@ type Session = {
   cold_compaction_count: number;
   cache_ttl: string;
   models: string;
+  subagent_count: number;
+  subagent_turn_count: number;
   attribution: SessionAttribution;
 };
 
@@ -136,7 +138,17 @@ export default function Sessions() {
                   <td className="px-3 py-2 font-mono text-xs text-zinc-700 dark:text-zinc-300">
                     <Link to={`/sessions/${s.session_uuid}`} className="hover:text-rose-500">
                       <div className="truncate max-w-xs" title={s.project}>{stripProject(s.project)}</div>
-                      <div className="text-[10px] text-zinc-500">{s.session_uuid.slice(0, 8)}</div>
+                      <div className="text-[10px] text-zinc-500 flex items-center gap-1">
+                        {s.session_uuid.slice(0, 8)}
+                        {s.subagent_count > 0 && (
+                          <span
+                            className="text-zinc-400"
+                            title={`dispatched ${s.subagent_count} subagent${s.subagent_count === 1 ? '' : 's'}, ${s.subagent_turn_count.toLocaleString()} turns`}
+                          >
+                            · {s.subagent_count} sub
+                          </span>
+                        )}
+                      </div>
                     </Link>
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{s.turn_count.toLocaleString()}</td>

@@ -39,6 +39,14 @@ type AttributionRow struct {
 	TurnCount         int
 	FirstTSUnixMS     int64
 	LastTSUnixMS      int64
+	// EffectiveSessionUUID is SessionUUID unless this row belongs to a
+	// subagent, in which case it's the parent that dispatched it (the same
+	// COALESCE(NULLIF(parent_session_uuid,''), session_uuid) rule
+	// SessionPctTotalsAll and GroupAttribution already apply). Only
+	// WindowSlices populates it; every other producer of AttributionRow
+	// leaves it at its zero value because nothing downstream of them reads
+	// it.
+	EffectiveSessionUUID string
 }
 
 // ReplaceAttribution wipes and re-inserts one bucket's windows and session
@@ -389,15 +397,24 @@ func (s *Store) ListLimitWindows(ctx context.Context, bucket string, sinceMS int
 // WindowSlices returns every session row for a bucket's windows starting at
 // or after sinceMS, ordered oldest window first then largest share first:
 // the shape the stacked per-window chart consumes.
+//
+// Each row also carries EffectiveSessionUUID (a LEFT JOIN to sessions, same
+// COALESCE as GroupAttribution) so a caller grouping "by session" can fold a
+// subagent's slice into its parent the way the group table beneath the
+// chart already does. The row itself stays keyed by the actual spender
+// (SessionUUID); nothing here changes what's stored, only what a consumer
+// can key its own grouping on.
 func (s *Store) WindowSlices(ctx context.Context, bucket string, sinceMS int64) ([]AttributionRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT window_start_unix_ms, session_uuid, project,
-		       measured_pct, estimated_pct,
-		       cw_tokens, raw_tokens, turn_count,
-		       first_ts_unix_ms, last_ts_unix_ms
-		FROM session_attribution
-		WHERE bucket = ? AND window_start_unix_ms >= ?
-		ORDER BY window_start_unix_ms ASC, (measured_pct + estimated_pct) DESC
+		SELECT sa.window_start_unix_ms, sa.session_uuid, sa.project,
+		       sa.measured_pct, sa.estimated_pct,
+		       sa.cw_tokens, sa.raw_tokens, sa.turn_count,
+		       sa.first_ts_unix_ms, sa.last_ts_unix_ms,
+		       COALESCE(NULLIF(sess.parent_session_uuid, ''), sa.session_uuid) AS effective_uuid
+		FROM session_attribution sa
+		LEFT JOIN sessions sess ON sess.session_uuid = sa.session_uuid
+		WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
+		ORDER BY sa.window_start_unix_ms ASC, (sa.measured_pct + sa.estimated_pct) DESC
 	`, bucket, sinceMS)
 	if err != nil {
 		return nil, err
@@ -410,7 +427,8 @@ func (s *Store) WindowSlices(ctx context.Context, bucket string, sinceMS int64) 
 		if err := rows.Scan(&r.WindowStartUnixMS, &r.SessionUUID, &r.Project,
 			&r.MeasuredPct, &r.EstimatedPct,
 			&r.CWTokens, &r.RawTokens, &r.TurnCount,
-			&r.FirstTSUnixMS, &r.LastTSUnixMS); err != nil {
+			&r.FirstTSUnixMS, &r.LastTSUnixMS,
+			&r.EffectiveSessionUUID); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

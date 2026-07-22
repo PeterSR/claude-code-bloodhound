@@ -20,9 +20,32 @@ type SessionDetailResponse struct {
 	Turns               []TurnItem       `json:"turns"`
 	Compactions         []CompactionItem `json:"compactions"`
 
+	// Subagents lists the Task-tool sessions this one dispatched, oldest
+	// first. This is the reachability path for subagent detail now that
+	// ListSessions excludes them from the top-level list: "what did this
+	// session dispatch" is answered here rather than by hunting for their
+	// rows in /api/sessions.
+	Subagents []SubagentSummary `json:"subagents"`
+
 	// Attribution is what this one conversation cost against the 5h and
-	// weekly limits, both in total and window by window.
+	// weekly limits, both in total and window by window. It already
+	// includes any subagents listed above (see store.SessionPctTotalsAll's
+	// effective-owner rollup), so this total and the sum of what's shown
+	// per subagent are the same number looked at two ways.
 	Attribution SessionAttributionDetail `json:"attribution"`
+}
+
+// SubagentSummary is one Task-tool session dispatched by the session this
+// payload describes.
+type SubagentSummary struct {
+	SessionUUID  string `json:"session_uuid"`
+	Cwd          string `json:"cwd"`
+	FirstTS      string `json:"first_ts"`
+	LastTS       string `json:"last_ts"`
+	TurnCount    int    `json:"turn_count"`
+	RawTokens    int64  `json:"raw_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	Models       string `json:"models"`
 }
 
 // TurnItem is the on-the-wire shape for a single turn.

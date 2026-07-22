@@ -46,6 +46,42 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	resp.FirstTS = time.UnixMilli(firstMS).UTC().Format(time.RFC3339)
 	resp.LastTS = time.UnixMilli(lastMS).UTC().Format(time.RFC3339)
 
+	// Subagents this session dispatched. ListSessions hides these rows from
+	// the top-level list; this is where they're still reachable.
+	srows, err := s.Store.DB.QueryContext(ctx, `
+		SELECT session_uuid, cwd, first_ts_unix_ms, last_ts_unix_ms,
+		       turn_count, raw_tokens, output_tokens, models
+		FROM sessions
+		WHERE parent_session_uuid = ?
+		ORDER BY first_ts_unix_ms ASC
+	`, uuid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	defer srows.Close()
+	resp.Subagents = []routes.SubagentSummary{}
+	for srows.Next() {
+		var (
+			sub               routes.SubagentSummary
+			subFirst, subLast int64
+		)
+		if err := srows.Scan(
+			&sub.SessionUUID, &sub.Cwd, &subFirst, &subLast,
+			&sub.TurnCount, &sub.RawTokens, &sub.OutputTokens, &sub.Models,
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		sub.FirstTS = time.UnixMilli(subFirst).UTC().Format(time.RFC3339)
+		sub.LastTS = time.UnixMilli(subLast).UTC().Format(time.RFC3339)
+		resp.Subagents = append(resp.Subagents, sub)
+	}
+	if err := srows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
 	// Limit attribution. A session with no attribution yet (ingested since
 	// the last aggregate pass) still renders; the panel just reads as
 	// pending rather than as zero cost.

@@ -18,9 +18,17 @@ type SessionListItem struct {
 	CacheTTL            string `json:"cache_ttl"`
 	Models              string `json:"models"`
 
+	// SubagentCount / SubagentTurnCount summarize the Task-tool sessions
+	// this one dispatched. This list only ever contains top-level sessions
+	// (see store.ListSessions); a subagent's own detail lives on its
+	// parent's /api/sessions/{uuid} payload, not as a row here.
+	SubagentCount     int `json:"subagent_count"`
+	SubagentTurnCount int `json:"subagent_turn_count"`
+
 	// Attribution is this session's share of the /usage limit meters. Zero
 	// values mean the aggregator has not attributed this session yet, not
-	// that it was free.
+	// that it was free. It already includes any subagents dispatched (see
+	// store.SessionPctTotalsAll's effective-owner rollup).
 	Attribution SessionAttribution `json:"attribution"`
 }
 
