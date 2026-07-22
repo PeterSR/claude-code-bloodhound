@@ -424,11 +424,46 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 	// resolves cwdExpr to that same owner's single cwd, so MAX() just reads
 	// it back rather than choosing among genuinely different values.
 	//
-	// peak here is MAX() over raw session_attribution rows, same as the
-	// project grouping already did before this change: two sessions (or a
-	// supervisor and a subagent) sharing one window were already not summed
-	// before taking the max, so this preserves that existing approximation
-	// rather than introducing a new one just for the session grouping.
+	// peak is the largest share this group took in any single window, which
+	// by=="project" and by=="cwd" get wrong if computed as a plain MAX()
+	// over raw session_attribution rows: a project or directory pools many
+	// distinct sessions, so that MAX() picks whichever single session was
+	// biggest across the group's whole history, not the group's own worst
+	// window (measured live: a project with exactly one window in range and
+	// 116 sessions inside it reported peak_pct 9.4 against a pct of 37.1 -
+	// one window in range means peak must equal the total by definition,
+	// and 9.4 was just the largest session's own share). joinedPeaks below
+	// sums every row sharing (key, window) first, then maxes across those
+	// window sums instead of across raw rows.
+	//
+	// by=="session" keeps the plain MAX() over raw rows: it already keys on
+	// the effective owner, one entry per (real) session_uuid contributing
+	// to a window, so unlike project/cwd there's no widening effect on the
+	// same measurement, only the longstanding case where a supervisor and
+	// its own subagents land in the same window and aren't summed before
+	// the max (documented on SessionPctTotalsAll's own FiveHPeakPct). Left
+	// as-is here rather than folded into the same fix, so a consumer already
+	// depending on this number sees it unchanged.
+	peakExpr := "MAX(sa.measured_pct + sa.estimated_pct)"
+	joinedPeaks := ""
+	if by == "project" || by == "cwd" {
+		peakExpr = "peaks.peak"
+		joinedPeaks = `
+			JOIN (
+				SELECT k, MAX(window_pct) AS peak FROM (
+					SELECT ` + keyCol + ` AS k,
+					       sa.window_start_unix_ms AS window_start_unix_ms,
+					       SUM(sa.measured_pct + sa.estimated_pct) AS window_pct
+					FROM session_attribution sa
+					LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
+					LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
+					WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
+					GROUP BY k, sa.window_start_unix_ms
+				)
+				GROUP BY k
+			) peaks ON peaks.k = ` + keyCol + `
+		`
+	}
 	q := `
 		SELECT ` + keyCol + ` AS k,
 		       MAX(sa.project)                      AS project,
@@ -436,7 +471,7 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 		       SUM(sa.measured_pct + sa.estimated_pct) AS pct,
 		       SUM(sa.measured_pct)                 AS measured,
 		       SUM(sa.estimated_pct)                AS estimated,
-		       MAX(sa.measured_pct + sa.estimated_pct) AS peak,
+		       ` + peakExpr + `                     AS peak,
 		       SUM(sa.cw_tokens)                    AS cw,
 		       SUM(sa.raw_tokens)                   AS raw,
 		       SUM(sa.turn_count)                   AS turns,
@@ -447,11 +482,16 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 		FROM session_attribution sa
 		LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
 		LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
+		` + joinedPeaks + `
 		WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
 		GROUP BY k
 		ORDER BY pct DESC
 	`
-	rows, err := s.DB.QueryContext(ctx, q, bucket, sinceMS)
+	args := []any{bucket, sinceMS}
+	if joinedPeaks != "" {
+		args = []any{bucket, sinceMS, bucket, sinceMS}
+	}
+	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
