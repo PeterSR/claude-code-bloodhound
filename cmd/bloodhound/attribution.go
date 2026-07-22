@@ -37,11 +37,16 @@ var attributionCmd = &cobra.Command{
 	Short: "Show where the /usage limit meters actually went",
 	Long: `Reads the session_attribution and limit_windows tables straight out of
 SQLite (no daemon socket needed, so this works with the daemon stopped) and
-reports how much of a limit meter each working directory or session
-consumed.
+reports how much of a limit meter each project, session, or absolute working
+directory consumed.
 
-With no subcommand this runs the rollup: one row per working directory (or
-per session with --by session) across the requested lookback window.
+With no subcommand this runs the rollup: one row per project (or per session
+with --by session, or per absolute working directory with --by cwd) across
+the requested lookback window. project is the sanitized directory name
+Claude Code invents for its transcript layout, and it is coarser than it
+looks: one project can span several literal directories (the same repo
+checked out twice, say), so --by cwd is the one that answers "how much did
+THIS directory cost", not "how much did this project cost".
 
   bloodhound attribution windows        the limit windows themselves
   bloodhound attribution session <id>   one session, window by window
@@ -57,8 +62,18 @@ tokens_per_pct_cw at 2 (%.2f), share as a 0 to 1 fraction at 4 decimals, and
 everything else as a plain integer. An empty key (the unattributed
 remainder) prints as a single "-", and so does cwd whenever it isn't a
 single well-defined value: with --by project (one project can span many
-directories) it is always "-"; with --by session it is "-" only for a
-session whose transcript rotated off disk before this column existed.
+directories) it is always "-"; with --by session or --by cwd it is "-" only
+when the effective owner's cwd was never captured (transcript rotated off
+disk before this column existed).
+
+Under --by cwd the key column carries the directory itself rather than a
+project name or session id, and a session whose cwd was never captured
+doesn't vanish into, or merge with, the unattributed remainder above (key
+""): it gets its own explicit bucket, key "__unknown_cwd__". The two are
+different facts, not the same gap: unattributed means no turn of ours
+explains the meter movement at all, while unknown cwd means we know exactly
+which session(s) spent it, just not where. One sentinel standing in for
+both would erase that difference from the output.
 
 cwd is appended as the 14th column (was 13 before it was added). Deliberately
 NOT added to "attribution windows" or "attribution session", whose porcelain
@@ -138,7 +153,7 @@ func init() {
 	attributionCmd.PersistentFlags().BoolVar(&attrPorcelain, "porcelain", false,
 		"emit stable, tab separated records for scripting")
 	attributionCmd.PersistentFlags().StringVar(&attrBy, "by", "project",
-		`rollup grouping, rollup only: "project" or "session"`)
+		`rollup grouping, rollup only: "project", "session", or "cwd"`)
 	attributionCmd.PersistentFlags().IntVar(&attrLimit, "limit", 20,
 		"max rollup rows in human mode, 0 for all (rollup only, ignored by --json/--porcelain)")
 
@@ -172,10 +187,10 @@ func attrResolveBucket() (string, error) {
 
 func attrResolveBy() (string, error) {
 	switch attrBy {
-	case "project", "session":
+	case "project", "session", "cwd":
 		return attrBy, nil
 	default:
-		return "", fmt.Errorf(`invalid --by %q: must be "project" or "session"`, attrBy)
+		return "", fmt.Errorf(`invalid --by %q: must be "project", "session", or "cwd"`, attrBy)
 	}
 }
 
@@ -285,9 +300,12 @@ func writeAttrRollupHuman(w io.Writer, bucket, by string, days, windowCount int,
 		rows = rows[:limit]
 	}
 
-	lastHeader := "WORKING DIR"
-	if by == "session" {
+	lastHeader := "PROJECT"
+	switch by {
+	case "session":
 		lastHeader = "SESSION"
+	case "cwd":
+		lastHeader = "WORKING DIR"
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
@@ -315,6 +333,9 @@ func rollupLastColumn(g store.AttributionGroup, by string) string {
 			first8 = first8[:8]
 		}
 		return first8 + "  " + g.Project
+	}
+	if by == "cwd" && g.Key == store.UnknownCwd {
+		return "(unknown cwd)"
 	}
 	return g.Key
 }
@@ -782,10 +803,14 @@ func bucketLabel(bucket string) string {
 }
 
 func byLabel(by string) string {
-	if by == "session" {
+	switch by {
+	case "session":
 		return "session"
+	case "cwd":
+		return "working directory"
+	default:
+		return "project"
 	}
-	return "working dir"
 }
 
 func humanKey(key string) string {

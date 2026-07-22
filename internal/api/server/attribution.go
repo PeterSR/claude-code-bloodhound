@@ -31,8 +31,11 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 		bucket = attribute.Bucket5h
 	}
 	by := "project"
-	if r.URL.Query().Get("by") == "session" {
+	switch r.URL.Query().Get("by") {
+	case "session":
 		by = "session"
+	case "cwd":
+		by = "cwd"
 	}
 	// A weekly view wants months; a 5h view wants days. Same knob, very
 	// different useful defaults.
@@ -51,6 +54,7 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 		Windows:    []routes.AttrWindow{},
 		Projects:   []routes.AttrGroup{},
 		Sessions:   []routes.AttrGroup{},
+		Cwds:       []routes.AttrGroup{},
 	}
 	windows, err := s.Store.ListLimitWindows(ctx, bucket, since)
 	if err != nil {
@@ -90,6 +94,10 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if out.Sessions, err = s.attrGroups(ctx, bucket, "session", since); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if out.Cwds, err = s.attrGroups(ctx, bucket, "cwd", since); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
@@ -147,9 +155,10 @@ func (s *Server) attrGroups(ctx context.Context, bucket, by string, since int64)
 	return out, nil
 }
 
-// buildAttrWindows joins each window to its slices, regrouped by project or
-// by session's effective owner, and folds the long tail into one "other"
-// entry so the stack still sums to the window total.
+// buildAttrWindows joins each window to its slices, regrouped by project, by
+// session's effective owner, or by that same effective owner's cwd, and
+// folds the long tail into one "other" entry so the stack still sums to the
+// window total.
 //
 // by=="session" groups on EffectiveSessionUUID rather than the raw
 // SessionUUID, so a subagent's slice folds into whoever dispatched it
@@ -160,6 +169,10 @@ func (s *Server) attrGroups(ctx context.Context, bucket, by string, since int64)
 // by=="project" doesn't need this: a subagent already carries its parent's
 // project (see internal/ingest), so grouping by project pools them
 // naturally, same as GroupAttribution's comment notes for that case.
+// by=="cwd" groups on Cwd (WindowSlices resolves it the same effective-owner
+// way as EffectiveSessionUUID), with store.UnknownCwd standing in for a real
+// session whose cwd was never captured, the same bucket GroupAttribution's
+// by=="cwd" mode uses, so the chart and the table beneath it agree there too.
 func buildAttrWindows(windows []store.LimitWindowRow, slices []store.AttributionRow, by string) []routes.AttrWindow {
 	type agg struct {
 		label                        string
@@ -172,11 +185,21 @@ func buildAttrWindows(windows []store.LimitWindowRow, slices []store.Attribution
 		if by == "project" {
 			key, label = sl.Project, sl.Project
 		}
-		if sl.SessionUUID == attribute.Unattributed {
-			// The remainder is neither a project nor a session; give it one
-			// stable key in both groupings so the UI can style it as the gap
-			// it is.
+		if by == "cwd" {
+			key, label = sl.Cwd, sl.Cwd
+		}
+		switch {
+		case sl.SessionUUID == attribute.Unattributed:
+			// The remainder is neither a project, a session, nor a cwd; give
+			// it one stable key across every grouping so the UI can style it
+			// as the gap it is.
 			key, label = attribute.Unattributed, ""
+		case by == "cwd" && sl.Cwd == "":
+			// A real, known session (or supervisor plus subagents) whose
+			// cwd was never captured: distinguishable from the unattributed
+			// remainder above, same UnknownCwd sentinel GroupAttribution's
+			// by=="cwd" rollup uses for the identical row.
+			key, label = store.UnknownCwd, store.UnknownCwd
 		}
 		m, ok := byWindow[sl.WindowStartUnixMS]
 		if !ok {

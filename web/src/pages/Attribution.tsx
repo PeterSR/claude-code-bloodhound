@@ -6,7 +6,7 @@ import ReloadButton from '../components/ReloadButton';
 import { fmtNumber } from '../lib/format';
 
 type Bucket = 'week' | '5h';
-type GroupBy = 'project' | 'session';
+type GroupBy = 'project' | 'session' | 'cwd';
 
 type AttrSlice = {
   key: string;
@@ -35,6 +35,7 @@ type AttrWindow = {
 type AttrGroup = {
   key: string;
   project?: string;
+  cwd?: string;
   pct: number;
   measured_pct: number;
   estimated_pct: number;
@@ -58,6 +59,7 @@ type AttributionResponse = {
   windows: AttrWindow[];
   projects: AttrGroup[];
   sessions: AttrGroup[];
+  cwds: AttrGroup[];
   total_pct: number;
   measured_pct: number;
   estimated_pct: number;
@@ -69,6 +71,12 @@ const UNATTRIBUTED = '';
 /** Server-side per-window tail fold. Unmapped by colorOf, so it lands in
  *  the same neutral slot as everything past the eighth series. */
 const SERVER_OTHER = '__other__';
+/** Mirrors store.UnknownCwd: a real, known session (or supervisor plus
+ *  subagents) whose cwd was never captured. Distinct from UNATTRIBUTED,
+ *  which is a fact about meter movement, not about any session - this is
+ *  "we know exactly who spent it, just not where". Only meaningful when
+ *  by === 'cwd'. */
+const UNKNOWN_CWD = '__unknown_cwd__';
 
 /** How many series get their own colour before the tail folds into "other". */
 const SERIES_SLOTS = 8;
@@ -100,7 +108,7 @@ export default function Attribution() {
     60_000,
   );
 
-  const groups = data ? (by === 'project' ? data.projects : data.sessions) : [];
+  const groups = data ? (by === 'project' ? data.projects : by === 'cwd' ? data.cwds : data.sessions) : [];
 
   // Colour follows the entity across the whole range, not its rank inside
   // one window, so a project keeps its hue even in the weeks it barely
@@ -155,7 +163,8 @@ export default function Attribution() {
           value={by}
           onChange={(v) => setBy(v as GroupBy)}
           options={[
-            { value: 'project', label: 'By working dir' },
+            { value: 'project', label: 'By project' },
+            { value: 'cwd', label: 'By working dir' },
             { value: 'session', label: 'By session' },
           ]}
         />
@@ -207,14 +216,14 @@ export default function Attribution() {
 
           <Section
             title={bucket === 'week' ? 'Weekly windows' : '5-hour windows'}
-            subtitle={`Each bar is one limit window filled toward its 100% cap, segmented by ${by === 'project' ? 'working directory' : 'session'}.`}
+            subtitle={`Each bar is one limit window filled toward its 100% cap, segmented by ${byNoun(by)}.`}
           >
             <WindowStacks windows={data.windows} colorOf={colorOf} by={by} />
             <Legend items={legend} colorOf={colorOf} by={by} foldedCount={foldedCount} />
           </Section>
 
           <Section
-            title={by === 'project' ? 'By working directory' : 'By session'}
+            title={`By ${byNoun(by)}`}
             subtitle={
               bucket === 'week'
                 ? 'Share of the weekly limit, summed over every weekly window in range.'
@@ -354,7 +363,9 @@ function GroupTable({
       <table className="w-full text-sm">
         <thead className="text-left text-xs uppercase tracking-wider text-zinc-500 border-b border-zinc-200 dark:border-zinc-800">
           <tr>
-            <th className="px-3 py-2 font-medium">{by === 'project' ? 'Working dir' : 'Session'}</th>
+            <th className="px-3 py-2 font-medium">
+              {by === 'project' ? 'Project' : by === 'cwd' ? 'Working dir' : 'Session'}
+            </th>
             <th className="px-3 py-2 font-medium text-right">
               % of {bucket === 'week' ? 'week' : '5h'}
             </th>
@@ -362,7 +373,7 @@ function GroupTable({
             <th className="px-3 py-2 font-medium text-right">Peak window</th>
             <th className="px-3 py-2 font-medium text-right">Est.</th>
             <th className="px-3 py-2 font-medium text-right">
-              {by === 'project' ? 'Sessions' : 'Windows'}
+              {by === 'session' ? 'Windows' : 'Sessions'}
             </th>
             <th className="px-3 py-2 font-medium text-right">Turns</th>
             <th className="px-3 py-2 font-medium text-right">Weighted tokens</th>
@@ -371,6 +382,7 @@ function GroupTable({
         <tbody>
           {groups.map((g) => {
             const unattributed = g.key === UNATTRIBUTED;
+            const unknownCwd = by === 'cwd' && g.key === UNKNOWN_CWD;
             return (
               <tr
                 key={g.key || 'unattributed'}
@@ -400,14 +412,14 @@ function GroupTable({
                       </Link>
                     ) : (
                       <span
-                        className={`font-mono text-xs truncate max-w-md ${unattributed ? 'text-zinc-500 italic' : ''}`}
-                        title={g.key}
+                        className={`font-mono text-xs truncate max-w-md ${unattributed || unknownCwd ? 'text-zinc-500 italic' : ''}`}
+                        title={unattributed ? 'unattributed' : unknownCwd ? 'cwd not captured for these sessions' : g.key}
                       >
                         {displayKey(g, by)}
                       </span>
                     )}
                   </div>
-                  {by === 'session' && g.project && (
+                  {(by === 'session' || by === 'cwd') && g.project && (
                     <div className="text-[10px] text-zinc-500 ml-4.5 truncate max-w-xs" title={g.project}>
                       {stripProject(g.project)}
                     </div>
@@ -432,7 +444,7 @@ function GroupTable({
                   {g.estimated_pct > 0 ? `${fmtPct(g.estimated_pct)}%` : '—'}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">
-                  {by === 'project' ? g.sessions.toLocaleString() : g.windows.toLocaleString()}
+                  {by === 'session' ? g.windows.toLocaleString() : g.sessions.toLocaleString()}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">
                   {g.turn_count > 0 ? g.turn_count.toLocaleString() : '—'}
@@ -527,14 +539,28 @@ function Empty({ hint }: { hint: string }) {
   );
 }
 
+/** The noun for a grouping mode, used in section titles and subtitles. */
+function byNoun(by: GroupBy): string {
+  if (by === 'cwd') return 'working directory';
+  if (by === 'session') return 'session';
+  return 'project';
+}
+
 function displayKey(g: AttrGroup, by: GroupBy): string {
   if (g.key === UNATTRIBUTED) return 'unattributed';
+  if (by === 'cwd') return g.key === UNKNOWN_CWD ? 'unknown directory' : stripCwd(g.key);
   return by === 'project' ? stripProject(g.key) : g.key.slice(0, 8);
 }
 
 /** Projects arrive as the sanitized absolute path; show the tail of it. */
 function stripProject(p: string): string {
   return p.replace(/^-?home-[^-]+-dev-/, '').replace(/^-+/, '');
+}
+
+/** Cwds arrive as a real absolute path; shorten the home directory the way
+ *  a shell prompt would, so a long path doesn't dominate the table. */
+function stripCwd(p: string): string {
+  return p.replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
 }
 
 function windowTitle(w: AttrWindow): string {
@@ -557,7 +583,11 @@ function sliceTitle(w: AttrWindow, s: AttrSlice, by: GroupBy): string {
         ? 'other'
         : by === 'project'
           ? stripProject(s.label)
-          : s.label.slice(0, 8);
+          : by === 'cwd'
+            ? s.key === UNKNOWN_CWD
+              ? 'unknown directory'
+              : stripCwd(s.label)
+            : s.label.slice(0, 8);
   const bits = [`${name}: ${fmtPct(s.pct)}%`];
   if (s.turn_count > 0) bits.push(`${s.turn_count.toLocaleString()} turns`);
   if (s.estimated_pct > 0) bits.push(`${fmtPct(s.estimated_pct)}% estimated`);

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/attribute"
@@ -113,5 +114,53 @@ func TestFoldSlicesByEffectiveOwner_NoSubagentsUnaffected(t *testing.T) {
 	}
 	if out[0].SessionUUID != "b" || out[0].MeasuredPct != 9 {
 		t.Errorf("out[0] = %+v, want b/9 first (largest share)", out[0])
+	}
+}
+
+// TestAttrResolveBy_AcceptsCwd is the CLI-side guard for the third grouping:
+// --by cwd must resolve like "project" and "session" already do, and
+// anything else must still be rejected with a message naming all three.
+func TestAttrResolveBy_AcceptsCwd(t *testing.T) {
+	orig := attrBy
+	defer func() { attrBy = orig }()
+
+	for _, valid := range []string{"project", "session", "cwd"} {
+		attrBy = valid
+		got, err := attrResolveBy()
+		if err != nil {
+			t.Errorf("attrResolveBy() with --by %q: unexpected error %v", valid, err)
+		}
+		if got != valid {
+			t.Errorf("attrResolveBy() with --by %q = %q, want %q", valid, got, valid)
+		}
+	}
+
+	attrBy = "bogus"
+	if _, err := attrResolveBy(); err == nil {
+		t.Fatalf("attrResolveBy() with --by \"bogus\": want an error")
+	} else if !strings.Contains(err.Error(), "cwd") {
+		t.Errorf("attrResolveBy() error %q, want it to mention \"cwd\" as a valid option", err.Error())
+	}
+}
+
+// TestRollupLastColumn_CwdUnknownBucketIsLabeled makes sure the human-mode
+// rollup renders store.UnknownCwd as a readable label, distinct from the
+// unattributed sentinel's own "(unattributed)" and from a real directory,
+// so a reader scanning the last column can tell all three apart at a
+// glance.
+func TestRollupLastColumn_CwdUnknownBucketIsLabeled(t *testing.T) {
+	unknown := store.AttributionGroup{Key: store.UnknownCwd}
+	if got, want := rollupLastColumn(unknown, "cwd"), "(unknown cwd)"; got != want {
+		t.Errorf("rollupLastColumn(UnknownCwd, \"cwd\") = %q, want %q", got, want)
+	}
+
+	unattributed := store.AttributionGroup{Key: attribute.Unattributed}
+	if got, want := rollupLastColumn(unattributed, "cwd"), "(unattributed)"; got != want {
+		t.Errorf("rollupLastColumn(unattributed, \"cwd\") = %q, want %q", got, want)
+	}
+
+	real := store.AttributionGroup{Key: "/home/user/projects/myapp"}
+	if got, want := rollupLastColumn(real, "cwd"), "/home/user/projects/myapp"; got != want {
+		t.Errorf("rollupLastColumn(real cwd, \"cwd\") = %q, want %q", got, want)
 	}
 }
