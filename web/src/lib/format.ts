@@ -8,6 +8,21 @@ export function fmtNumber(n: number | bigint): string {
   return Math.round(n).toString();
 }
 
+/** An exact count (turns, sessions, windows, compactions), thousands
+ *  grouped with a literal comma, pinned to the "en-US" locale rather than
+ *  `toLocaleString()`'s default of whatever the viewer's own locale is.
+ *  fmtNumber above already spells its decimal point as '.' ("237.67M"); a
+ *  locale that also uses '.' as its own thousands separator (as on this
+ *  machine) turns an exact count like 4337 into "4.337", which reads as a
+ *  fraction sitting next to a token figure that uses the same character
+ *  for something else entirely. A comma can never collide with that
+ *  decimal point. (A narrow no-break space would dodge the collision too,
+ *  but disappears outright in some fonts, so comma it is.)
+ */
+export function fmtCount(n: number): string {
+  return Math.round(n).toLocaleString('en-US');
+}
+
 /** Friendly absolute display: "Apr 29, 7:30 AM". */
 export function fmtAbs(iso: string): string {
   if (!iso) return '—';

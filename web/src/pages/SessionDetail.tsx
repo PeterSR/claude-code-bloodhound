@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ChevronLeft, Files } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
-import { fmtAbs, fmtNumber, fmtRel } from '../lib/format';
+import { fmtAbs, fmtCount, fmtNumber, fmtRel } from '../lib/format';
 
 type TurnItem = {
   turn_idx: number;
@@ -129,7 +129,7 @@ export default function SessionDetail() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 text-sm">
               <KV k="First" v={fmtAbs(data.first_ts)} />
               <KV k="Last" v={`${fmtAbs(data.last_ts)} (${fmtRel((Date.now() - new Date(data.last_ts).getTime()) / 1000)})`} />
-              <KV k="Turns" v={data.turn_count.toLocaleString()} />
+              <KV k="Turns" v={fmtCount(data.turn_count)} />
               <KV k="Models" v={data.models} mono />
               <KV k="Raw tokens" v={fmtNumber(data.raw_tokens)} />
               <KV k="Output" v={fmtNumber(data.output_tokens)} />
@@ -147,9 +147,9 @@ export default function SessionDetail() {
               />
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3 text-sm">
-              <KV k="Idle miss" v={data.idle_miss_count.toLocaleString()} accent={data.idle_miss_count > 0 ? 'text-red-500' : undefined} />
-              <KV k="Rotation" v={data.rotation_count.toLocaleString()} accent={data.rotation_count > 0 ? 'text-amber-500' : undefined} />
-              <KV k="Restructure" v={data.restructure_count.toLocaleString()} accent={data.restructure_count > 0 ? 'text-purple-500' : undefined} />
+              <KV k="Idle miss" v={fmtCount(data.idle_miss_count)} accent={data.idle_miss_count > 0 ? 'text-red-500' : undefined} />
+              <KV k="Rotation" v={fmtCount(data.rotation_count)} accent={data.rotation_count > 0 ? 'text-amber-500' : undefined} />
+              <KV k="Restructure" v={fmtCount(data.restructure_count)} accent={data.restructure_count > 0 ? 'text-purple-500' : undefined} />
               <KV
                 k="Compactions"
                 v={
@@ -339,7 +339,7 @@ function Subagents({ items }: { items: SubagentSummary[] }) {
                 <td className="pr-3 py-1 font-mono truncate max-w-xs" title={sub.cwd}>
                   {sub.cwd || '—'}
                 </td>
-                <td className="pr-3 py-1 text-right tabular-nums">{sub.turn_count.toLocaleString()}</td>
+                <td className="pr-3 py-1 text-right tabular-nums">{fmtCount(sub.turn_count)}</td>
                 <td className="pr-3 py-1 text-right tabular-nums">{fmtNumber(sub.raw_tokens)}</td>
                 <td className="pr-3 py-1 font-mono">{sub.models || '—'}</td>
               </tr>
@@ -368,7 +368,7 @@ function WindowBreakdown({ title, slices }: { title: string; slices: SessionWind
               </div>
               <div
                 className="flex-1 h-2 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden"
-                title={`${fmtLimitPct(s.pct)} of this window, which used ${fmtLimitPct(s.window_pct)} in total · ${s.turn_count.toLocaleString()} turns`}
+                title={`${fmtLimitPct(s.pct)} of this window, which used ${fmtLimitPct(s.window_pct)} in total · ${fmtCount(s.turn_count)} turns`}
               >
                 <div
                   className="h-full rounded-full bg-sky-500/80"

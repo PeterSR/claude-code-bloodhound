@@ -3,7 +3,7 @@ import { PieChart } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import ReloadButton from '../components/ReloadButton';
-import { fmtNumber } from '../lib/format';
+import { fmtCount, fmtNumber } from '../lib/format';
 
 type Bucket = 'week' | '5h';
 type GroupBy = 'project' | 'session' | 'cwd';
@@ -81,13 +81,24 @@ const UNKNOWN_CWD = '__unknown_cwd__';
 /** How many series get their own colour before the tail folds into "other". */
 const SERIES_SLOTS = 8;
 
+/** Sentinel "days" value standing in for `?window=current`: the single open
+ *  limit window rather than a day-count lookback. Kept in the same RANGES
+ *  table (and the same `days` state) as the real day counts so the segmented
+ *  control's selection logic doesn't need a second, parallel notion of
+ *  "what's picked" - only the fetch and the render below branch on it. -1 is
+ *  safe as a sentinel because a real window_days is clamped to [1, 365]
+ *  server-side, so it can never collide with a real value. */
+const CURRENT_WINDOW = -1;
+
 const RANGES: Record<Bucket, { days: number; label: string }[]> = {
   week: [
+    { days: CURRENT_WINDOW, label: 'This week' },
     { days: 28, label: '4 weeks' },
     { days: 56, label: '8 weeks' },
     { days: 182, label: '6 months' },
   ],
   '5h': [
+    { days: CURRENT_WINDOW, label: 'Current window' },
     { days: 2, label: '2 days' },
     { days: 7, label: '7 days' },
     { days: 30, label: '30 days' },
@@ -99,12 +110,24 @@ export default function Attribution() {
   const [by, setBy] = useState<GroupBy>('project');
   // Kept per bucket: "8 weeks" and "8 days" are not the same question, and
   // switching meters shouldn't silently reinterpret the range.
-  const [weekDays, setWeekDays] = useState(56);
+  //
+  // Weekly defaults to the current window rather than a lookback: "how am I
+  // doing right now" is the more common question than "how did the last two
+  // months look", and it's the one range whose headline is directly
+  // comparable to /usage's own number (bounded by 100, never summed across
+  // several windows). 5h keeps a real day-range default instead - a 5-hour
+  // window turns over so often that "current window" alone is a much
+  // thinner slice of the story there, and a returning user is more often
+  // mid-analysis of a burn pattern spanning several of them.
+  const [weekDays, setWeekDays] = useState(CURRENT_WINDOW);
   const [fiveHDays, setFiveHDays] = useState(7);
   const days = bucket === 'week' ? weekDays : fiveHDays;
+  const isCurrent = days === CURRENT_WINDOW;
 
   const { data, error, loading, refreshing, refresh } = useApi<AttributionResponse>(
-    `/attribution?bucket=${bucket}&by=${by}&window_days=${days}`,
+    isCurrent
+      ? `/attribution?bucket=${bucket}&by=${by}&window=current`
+      : `/attribution?bucket=${bucket}&by=${by}&window_days=${days}`,
     60_000,
   );
 
@@ -113,7 +136,11 @@ export default function Attribution() {
   // Colour follows the entity across the whole range, not its rank inside
   // one window, so a project keeps its hue even in the weeks it barely
   // shows up. Everything past the eighth slot shares the neutral "other".
-  const colorOf = useMemo(() => {
+  // isColored is exposed alongside colorOf so callers can tell "this key
+  // got a real colour" apart from "this key fell through to the shared
+  // other-var(--series-other) default" - colorOf alone can't distinguish
+  // the two, and the per-window fold below needs exactly that distinction.
+  const { colorOf, isColored } = useMemo(() => {
     const m = new Map<string, string>();
     let slot = 0;
     for (const g of groups) {
@@ -122,7 +149,10 @@ export default function Attribution() {
       slot += 1;
       m.set(g.key, `var(--series-${slot})`);
     }
-    return (key: string) => m.get(key) ?? 'var(--series-other)';
+    return {
+      colorOf: (key: string) => m.get(key) ?? 'var(--series-other)',
+      isColored: (key: string) => m.has(key),
+    };
   }, [groups]);
 
   const legend = useMemo(
@@ -181,16 +211,26 @@ export default function Attribution() {
       {loading && !data && <div className="text-sm text-zinc-500">Loading…</div>}
 
       {data && data.windows.length === 0 && (
-        <Empty hint="Nothing attributed in this range yet. The aggregator fills this in as the daemon collects /usage readings alongside your sessions." />
+        <Empty
+          hint={
+            isCurrent
+              ? `No ${meter} window is currently open right now. This section fills in the moment the daemon's next /usage poll opens one.`
+              : 'Nothing attributed in this range yet. The aggregator fills this in as the daemon collects /usage readings alongside your sessions.'
+          }
+        />
       )}
 
       {data && data.windows.length > 0 && (
         <>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-6">
             <Tile
-              label={`Total ${bucket === 'week' ? 'weekly' : '5h'} limit spent`}
+              label={isCurrent ? `This ${bucket === 'week' ? 'week' : 'window'} so far` : `Total ${bucket === 'week' ? 'weekly' : '5h'} limit spent`}
               value={`${fmtPct(data.total_pct)}%`}
-              hint={`across ${data.windows.length} ${bucket === 'week' ? 'weekly' : '5-hour'} window${data.windows.length === 1 ? '' : 's'}`}
+              hint={
+                isCurrent
+                  ? 'the open window only, so this reads the same as /usage'
+                  : `across ${data.windows.length} ${bucket === 'week' ? 'weekly' : '5-hour'} window${data.windows.length === 1 ? '' : 's'}`
+              }
             />
             <Tile
               label="Measured"
@@ -216,18 +256,34 @@ export default function Attribution() {
 
           <Section
             title={bucket === 'week' ? 'Weekly windows' : '5-hour windows'}
-            subtitle={`Each bar is one limit window filled toward its 100% cap, segmented by ${byNoun(by)}.`}
+            subtitle={
+              isCurrent
+                ? `The window that's currently open, filled toward its 100% cap and segmented by ${byNoun(by)}.`
+                : `Each bar is one limit window filled toward its 100% cap, segmented by ${byNoun(by)}.`
+            }
           >
-            <WindowStacks windows={data.windows} colorOf={colorOf} by={by} />
+            {isCurrent ? (
+              // A vertical stack sized for a row of eight has nothing to
+              // compare a single bar against, so it reads as a mistake
+              // ("why is there only one") rather than a chart. A full-width
+              // horizontal bar is the one-window analogue of the same
+              // stacked-segment idea and fills its space on purpose instead
+              // of floating alone in it.
+              <CurrentWindowBar window={data.windows[0]} colorOf={colorOf} isColored={isColored} by={by} />
+            ) : (
+              <WindowStacks windows={data.windows} colorOf={colorOf} isColored={isColored} by={by} />
+            )}
             <Legend items={legend} colorOf={colorOf} by={by} foldedCount={foldedCount} />
           </Section>
 
           <Section
             title={`By ${byNoun(by)}`}
             subtitle={
-              bucket === 'week'
-                ? 'Share of the weekly limit, summed over every weekly window in range.'
-                : 'Share of the 5-hour limit. A total over 100% means the work spanned several windows; peak is the worst single one.'
+              isCurrent
+                ? `Share of the ${bucket === 'week' ? 'weekly' : '5-hour'} limit's currently open window.`
+                : bucket === 'week'
+                  ? 'Share of the weekly limit, summed over every weekly window in range.'
+                  : 'Share of the 5-hour limit. A total over 100% means the work spanned several windows; peak is the worst single one.'
             }
           >
             <GroupTable groups={groups} colorOf={colorOf} by={by} bucket={bucket} />
@@ -238,14 +294,79 @@ export default function Attribution() {
   );
 }
 
+/** A rendered slice after foldOtherSlices: identical to what the server
+ *  sent, except the merged "other" entry (key === SERVER_OTHER) carries
+ *  foldedCount, how many distinct groups were summed into it - information
+ *  the merge would otherwise throw away. */
+type RenderSlice = AttrSlice & { foldedCount?: number };
+
+/** Folds every slice that doesn't get its own colour into one "other"
+ *  segment, so a window with a long uncoloured tail draws a single grey
+ *  block instead of one sliver per group.
+ *
+ *  colorOf/isColored rank groups across the whole selected range, not per
+ *  window, so a single window can easily hold far more uncoloured groups
+ *  than coloured ones: measured on a real by=cwd, 8-week range, one window
+ *  shipped 21 slices and only 4 matched a top-8 range group - the other 17
+ *  each drew as their own 2px-gapped grey sliver. Stacked that thin and
+ *  that densely, the gaps between unrelated slices read as the same hatch
+ *  texture the caption reserves for the unattributed sentinel, which was
+ *  actively misleading on an account where unattributed is 0%. The
+ *  sentinel is left untouched by this fold: it's a different fact (meter
+ *  movement no session explains) from "many small groups", and staying
+ *  its own hatched segment is the point.
+ *
+ *  Also swallows whatever the server itself already folded past
+ *  attrMaxSlices (key === SERVER_OTHER): that's just one more uncoloured
+ *  entry from this function's point of view, so it merges into the same
+ *  bucket with no special case, though its own foldedCount only ever
+ *  contributes 1 - the server doesn't say how many groups its own fold
+ *  represents, so a window that trips both folds slightly undercounts
+ *  foldedCount by however many the server had already combined.
+ *
+ *  Re-sorted afterward so the stack still reads biggest-first once the
+ *  fold changes what the largest remaining entries are. */
+function foldOtherSlices(slices: AttrSlice[], isColored: (key: string) => boolean): RenderSlice[] {
+  const kept: RenderSlice[] = [];
+  let other: RenderSlice | null = null;
+  for (const s of slices) {
+    if (s.key === UNATTRIBUTED || isColored(s.key)) {
+      kept.push(s);
+      continue;
+    }
+    if (!other) {
+      other = {
+        key: SERVER_OTHER,
+        label: 'other',
+        pct: 0,
+        measured_pct: 0,
+        estimated_pct: 0,
+        cw_tokens: 0,
+        turn_count: 0,
+        foldedCount: 0,
+      };
+      kept.push(other);
+    }
+    other.pct += s.pct;
+    other.measured_pct += s.measured_pct;
+    other.estimated_pct += s.estimated_pct;
+    other.cw_tokens += s.cw_tokens;
+    other.turn_count += s.turn_count;
+    other.foldedCount = (other.foldedCount ?? 0) + 1;
+  }
+  return kept.sort((a, b) => b.pct - a.pct);
+}
+
 /** One bar per limit window, stacked bottom-up biggest first. */
 function WindowStacks({
   windows,
   colorOf,
+  isColored,
   by,
 }: {
   windows: AttrWindow[];
   colorOf: (key: string) => string;
+  isColored: (key: string) => boolean;
   by: GroupBy;
 }) {
   const TRACK = 170; // px; the full track height is 100% of the window
@@ -254,6 +375,7 @@ function WindowStacks({
       <div className="flex items-end gap-1.5 pt-2 pb-1 min-w-fit">
         {windows.map((w) => {
           const faded = w.partial || w.inferred;
+          const slices = foldOtherSlices(w.slices, isColored);
           return (
             <div key={w.start_unix_ms} className="flex flex-col items-center gap-1 shrink-0">
               <div
@@ -264,10 +386,10 @@ function WindowStacks({
                 {/* 2px of surface between fills so adjacent segments never
                     read as one block; the topmost gets the rounded data end. */}
                 <div className="absolute inset-x-0 bottom-0 flex flex-col-reverse gap-[2px]">
-                  {w.slices.map((s, i) => (
+                  {slices.map((s, i) => (
                     <div
                       key={s.key || 'unattributed'}
-                      className={`shrink-0 ${i === w.slices.length - 1 ? 'rounded-t-[3px]' : ''}`}
+                      className={`shrink-0 ${i === slices.length - 1 ? 'rounded-t-[3px]' : ''}`}
                       style={{
                         height: Math.max(1, (s.pct / 100) * TRACK),
                         background:
@@ -300,7 +422,73 @@ function WindowStacks({
       <div className="text-[10px] text-zinc-400 mt-3 leading-relaxed max-w-3xl">
         Faded bars are estimated only (no /usage readings covered them) or
         partial (collection began mid-window). A rose line marks a window that
-        hit the cap. Hatched segments are unattributed.
+        hit the cap. Grey folds every group outside the legend's top 8 into
+        one "other" segment per window; hatched segments are unattributed.
+      </div>
+    </div>
+  );
+}
+
+/** The single-window analogue of WindowStacks: current-window mode has
+ *  exactly one window to show, and a lone narrow bar sitting in a chart
+ *  sized for eight reads as a rendering mistake rather than a deliberate
+ *  view. A full-width horizontal 100%-cap track fills the same space on
+ *  purpose instead. Shares foldOtherSlices with WindowStacks so the two
+ *  views can never disagree about what "other" means. */
+function CurrentWindowBar({
+  window: w,
+  colorOf,
+  isColored,
+  by,
+}: {
+  window: AttrWindow;
+  colorOf: (key: string) => string;
+  isColored: (key: string) => boolean;
+  by: GroupBy;
+}) {
+  const slices = foldOtherSlices(w.slices, isColored);
+  const faded = w.partial || w.inferred;
+  return (
+    <div className="max-w-3xl">
+      <div
+        className="relative h-9 rounded-md bg-zinc-100 dark:bg-zinc-800 overflow-hidden"
+        title={windowTitle(w)}
+      >
+        {/* Same 2px surface-gap convention as WindowStacks; this track
+            fills left to right instead of bottom-up, so the rounded data
+            end belongs to the first (biggest) segment instead of the last. */}
+        <div className="absolute inset-y-0 left-0 flex gap-[2px]">
+          {slices.map((s, i) => (
+            <div
+              key={s.key || 'unattributed'}
+              className={`shrink-0 h-full ${i === 0 ? 'rounded-l-[7px]' : ''}`}
+              style={{
+                width: `${Math.max(s.pct > 0 ? 0.4 : 0, s.pct)}%`,
+                background:
+                  s.key === UNATTRIBUTED
+                    ? 'repeating-linear-gradient(45deg, var(--series-other) 0 3px, transparent 3px 6px)'
+                    : colorOf(s.key),
+                opacity: faded ? 0.45 : 1,
+              }}
+              title={sliceTitle(w, s, by)}
+            />
+          ))}
+        </div>
+        {w.hit_cap && (
+          <div className="absolute inset-y-0 right-0 w-[3px] bg-rose-500" title="Hit the cap" />
+        )}
+      </div>
+      <div className="flex items-center justify-between text-[10px] text-zinc-400 mt-1.5">
+        <span>
+          {fmtWindowLabel(w.start_unix_ms)} to now
+          {faded && ' · estimated only'}
+        </span>
+        <span className="tabular-nums">{Math.round(w.attributed_pct)}% of the cap</span>
+      </div>
+      <div className="text-[10px] text-zinc-400 mt-3 leading-relaxed max-w-3xl">
+        Grey folds every group outside the legend's top 8 into one "other"
+        segment. Hatched segments are unattributed; a rose edge means this
+        window hit the cap.
       </div>
     </div>
   );
@@ -444,10 +632,10 @@ function GroupTable({
                   {g.estimated_pct > 0 ? `${fmtPct(g.estimated_pct)}%` : '—'}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">
-                  {by === 'session' ? g.windows.toLocaleString() : g.sessions.toLocaleString()}
+                  {by === 'session' ? fmtCount(g.windows) : fmtCount(g.sessions)}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">
-                  {g.turn_count > 0 ? g.turn_count.toLocaleString() : '—'}
+                  {g.turn_count > 0 ? fmtCount(g.turn_count) : '—'}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">
                   {g.cw_tokens > 0 ? fmtNumber(g.cw_tokens) : '—'}
@@ -575,12 +763,15 @@ function windowTitle(w: AttrWindow): string {
   return parts.join(' · ');
 }
 
-function sliceTitle(w: AttrWindow, s: AttrSlice, by: GroupBy): string {
+function sliceTitle(w: AttrWindow, s: RenderSlice, by: GroupBy): string {
   const name =
     s.key === UNATTRIBUTED
       ? 'unattributed'
       : s.key === SERVER_OTHER
-        ? 'other'
+        ? // foldedCount is how many groups foldOtherSlices summed into this
+          // one segment - the count the merge would otherwise have thrown
+          // away, and the reason a single grey block still says something.
+          `other (${s.foldedCount ?? 0} group${s.foldedCount === 1 ? '' : 's'})`
         : by === 'project'
           ? stripProject(s.label)
           : by === 'cwd'
@@ -589,7 +780,7 @@ function sliceTitle(w: AttrWindow, s: AttrSlice, by: GroupBy): string {
               : stripCwd(s.label)
             : s.label.slice(0, 8);
   const bits = [`${name}: ${fmtPct(s.pct)}%`];
-  if (s.turn_count > 0) bits.push(`${s.turn_count.toLocaleString()} turns`);
+  if (s.turn_count > 0) bits.push(`${fmtCount(s.turn_count)} turns`);
   if (s.estimated_pct > 0) bits.push(`${fmtPct(s.estimated_pct)}% estimated`);
   return `${fmtWindowLabel(w.start_unix_ms)} · ${bits.join(' · ')}`;
 }
