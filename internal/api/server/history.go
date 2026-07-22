@@ -41,13 +41,19 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	// Pct-burned heatmap from session_pct deltas across adjacent
 	// observations. Skipped if either side is saturated (pct doesn't
-	// move while capped) or b is right after a reset (rolled back to 0).
+	// move while capped), either side is a flagged misparse (otherwise a
+	// misparse's recovery back up to the real value reads as burned
+	// percent, double-counting a dip that never happened), or b is right
+	// after a reset (rolled back to 0).
 	for i := 1; i < len(out.Observations); i++ {
 		a, b := out.Observations[i-1], out.Observations[i]
 		if a.SessionPct == nil || b.SessionPct == nil {
 			continue
 		}
 		if a.SessionSaturated || b.SessionSaturated {
+			continue
+		}
+		if !a.SessionValid || !b.SessionValid {
 			continue
 		}
 		if b.SessionReset {

@@ -100,16 +100,30 @@ func (s *Server) recentSessionInsights(ctx context.Context, now time.Time, windo
 // queryNowHistory returns the pct + saturated series for one bucket within
 // [startMS, endMS]. Errors collapse to an empty result — the chart is
 // non-essential and we'd rather render the gauges than fail the page.
+//
+// Filtering only parse_ok let a flagged misparse (a >100 reading, or a dip
+// that recovers next poll) through to the Now page's chart and its
+// least-squares projection, so pct_valid = 1 is required here too.
+//
+// Saturated readings are a different case: they are real data, not junk,
+// so they stay in this result set with their flag carried through — the
+// chart shades those periods from routes.NowHistoryPoint.Saturated. What
+// they must not do is drag the fitted slope toward zero right when the
+// user is actually burning fastest, but that guard belongs to the fit
+// itself (Now.tsx), not to what the endpoint returns. Same reasoning
+// burnSeries and pctSince apply to their own inputs, just split across the
+// wire instead of filtered out entirely.
 func (s *Server) queryNowHistory(ctx context.Context, isSession bool, startMS, endMS int64) []routes.NowHistoryPoint {
-	pctCol, satCol := "session_pct", "session_saturated"
+	pctCol, satCol, validCol := "session_pct", "session_saturated", "session_pct_valid"
 	if !isSession {
-		pctCol, satCol = "week_pct", "week_saturated"
+		pctCol, satCol, validCol = "week_pct", "week_saturated", "week_pct_valid"
 	}
 	rows, err := s.Store.DB.QueryContext(ctx, `
 		SELECT ts_unix_ms, `+pctCol+`, `+satCol+`
 		FROM usage_observations
 		WHERE ts_unix_ms BETWEEN ? AND ?
 		  AND parse_ok = 1
+		  AND `+validCol+` = 1
 		ORDER BY ts_unix_ms ASC
 	`, startMS, endMS)
 	if err != nil {

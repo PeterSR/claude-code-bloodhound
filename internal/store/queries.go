@@ -101,20 +101,33 @@ type PctPoint struct {
 // SessionPctSinceLastReset returns session %s since the most recent
 // session_reset_detected, ordered by time. Used for burn-rate projection.
 func (s *Store) SessionPctSinceLastReset(ctx context.Context) ([]PctPoint, error) {
-	return s.pctSince(ctx, "session_pct", "session_reset_detected")
+	return s.pctSince(ctx, "session_pct", "session_pct_valid", "session_saturated", "session_reset_detected")
 }
 
 // WeekPctSinceLastReset is the week analog of SessionPctSinceLastReset.
 func (s *Store) WeekPctSinceLastReset(ctx context.Context) ([]PctPoint, error) {
-	return s.pctSince(ctx, "week_pct", "week_reset_detected")
+	return s.pctSince(ctx, "week_pct", "week_pct_valid", "week_saturated", "week_reset_detected")
 }
 
-func (s *Store) pctSince(ctx context.Context, pctCol, resetCol string) ([]PctPoint, error) {
+// pctSince feeds slopeOver (burn.go) and etaToLimit (the statusline): an
+// endpoint-to-endpoint slope has no chance to notice a bad endpoint the way
+// a smoothed series can, so a single flagged misparse or saturated reading
+// at either end of the window would otherwise silently poison the rate.
+// The valid/saturated filters mirror the guards burnSeries already applies
+// to the same two columns.
+//
+// ts_unix_ms >= (not >) the last reset: a reset is detected AT a reading,
+// which is also the new window's first point. Excluding it with a strict
+// `>` discarded that point, so every window projected a rate over one fewer
+// observation than it actually had.
+func (s *Store) pctSince(ctx context.Context, pctCol, validCol, saturatedCol, resetCol string) ([]PctPoint, error) {
 	q := `
 		SELECT ts_unix_ms, ` + pctCol + `
 		FROM usage_observations
 		WHERE ` + pctCol + ` IS NOT NULL
-		  AND ts_unix_ms > COALESCE(
+		  AND ` + validCol + ` = 1
+		  AND ` + saturatedCol + ` = 0
+		  AND ts_unix_ms >= COALESCE(
 		       (SELECT MAX(ts_unix_ms) FROM usage_observations WHERE ` + resetCol + ` = 1),
 		       0)
 		ORDER BY ts_unix_ms ASC

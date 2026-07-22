@@ -387,14 +387,22 @@ function WindowCard({
     ) as Array<HistoryPoint & { pct: number }>;
     const lastObs = obsValid.length ? obsValid[obsValid.length - 1] : null;
 
+    // The meter doesn't move while saturated, so a run of pinned readings
+    // is a real observation but not a real slope: fitting through it drags
+    // the line toward zero right when the user is actually burning
+    // fastest. Excluded from the regression only, not from lastObs (the
+    // last reading is still the true current position) or from the raw
+    // series drawn on the chart.
+    const fitCandidates = obsValid.filter((p) => !p.saturated);
+
     let fit:
       | { slopePctPerH: number; fromS: number; toS: number; n: number }
       | null = null;
     if (lastObs) {
       const lastS = lastObs.ts_unix_ms / 1000;
       const cutS = lastS - fitWindowS;
-      let slice = obsValid.filter((p) => p.ts_unix_ms / 1000 >= cutS);
-      if (slice.length < 3) slice = obsValid.slice(-3);
+      let slice = fitCandidates.filter((p) => p.ts_unix_ms / 1000 >= cutS);
+      if (slice.length < 3) slice = fitCandidates.slice(-3);
       if (slice.length >= 2) {
         const n = slice.length;
         const x0 = slice[0].ts_unix_ms / 1000;
