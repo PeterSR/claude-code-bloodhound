@@ -1,27 +1,12 @@
+// Package server: burn.go holds burnSeries, the chart-facing burn-rate
+// series used by the history endpoint (see history.go). The single-point
+// "current burn rate" computation that used to live alongside it here
+// (storeIface, readPoints, slopeOver) moved to internal/nowstate, which
+// both this daemon and the `bloodhound now` CLI command call — see that
+// package's doc comment for why. burnSeries stayed: it's chart-specific
+// (a value per history point, not one current value) and history.go is
+// its only caller, so there was nothing to single-source.
 package server
-
-import (
-	"context"
-
-	"github.com/PeterSR/claude-code-bloodhound/internal/store"
-)
-
-// burnPoint is a tiny local alias so the now-handler isn't tightly coupled
-// to a specific store type in tests.
-type burnPoint = store.PctPoint
-
-// storeIface exposes the queries readPoints needs.
-type storeIface interface {
-	SessionPctSinceLastReset(ctx context.Context) ([]store.PctPoint, error)
-	WeekPctSinceLastReset(ctx context.Context) ([]store.PctPoint, error)
-}
-
-func readPoints(ctx context.Context, s storeIface, session bool) ([]burnPoint, error) {
-	if session {
-		return s.SessionPctSinceLastReset(ctx)
-	}
-	return s.WeekPctSinceLastReset(ctx)
-}
 
 const msPerHour = float64(3600 * 1000)
 
@@ -124,30 +109,4 @@ func burnSeries(pts []ratePoint, lookbackMS int64) []*float64 {
 		out[i] = &rate
 	}
 	return out
-}
-
-// slopeOver returns (slope, ok) over the most recent contiguous segment of
-// up-to-1-hour points. Two or more points required.
-func slopeOver(points []burnPoint) (slopePctPerHour float64, ok bool) {
-	if len(points) < 2 {
-		return 0, false
-	}
-	last := points[len(points)-1]
-	const oneHourMS = int64(3600 * 1000)
-	cut := last.TSUnixMS - oneHourMS
-	var window []burnPoint
-	for _, p := range points {
-		if p.TSUnixMS >= cut {
-			window = append(window, p)
-		}
-	}
-	if len(window) < 2 {
-		window = points[len(points)-2:]
-	}
-	a, b := window[0], window[len(window)-1]
-	dtH := float64(b.TSUnixMS-a.TSUnixMS) / 3600 / 1000
-	if dtH <= 0 {
-		return 0, false
-	}
-	return float64(b.Pct-a.Pct) / dtH, true
 }

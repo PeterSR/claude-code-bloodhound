@@ -7,13 +7,29 @@ import (
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
+	"github.com/PeterSR/claude-code-bloodhound/internal/nowstate"
 	"github.com/PeterSR/claude-code-bloodhound/internal/sessioninsight"
 )
 
+// handleNow serves pool state (percentage, window reset, burn rate,
+// saturation, last-poll age) plus a few UI-only additions the Now page
+// needs on top of it. The pool state itself comes from nowstate.Compute,
+// the same function `bloodhound now` calls straight against SQLite — so
+// this handler and that CLI command can't drift on the numbers a consumer
+// might be comparing across the two. Everything after the Compute call
+// here (config-forwarded hints, chart history, recent-sessions panel) is
+// UI-specific and deliberately outside what nowstate computes; see that
+// package's doc comment for why.
 func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
-	out := routes.NowResponse{NowMS: now.UnixMilli()}
+
+	out, err := nowstate.Compute(ctx, s.Store, now)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
 	recentWindowS := 86400
 	if cfg, err := config.Load(); err == nil {
 		out.PollIntervalS = cfg.PollIntervalS
@@ -25,52 +41,29 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	obs, err := s.Store.LatestUsage(ctx)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	if obs == nil {
-		writeJSON(w, http.StatusOK, out)
-		return
-	}
-	out.OK = obs.ParseOK
-	out.LastPoll = &routes.NowPoll{
-		TSISO:    obs.TSISO,
-		AgeS:     (out.NowMS - obs.TSUnixMS) / 1000,
-		ParseOK:  obs.ParseOK,
-		ElapsedS: obs.ElapsedS,
-	}
-
-	if obs.SessionPct != nil {
-		ws := buildWindow(*obs.SessionPct, obs.SessionResetTSISO, 5*time.Hour, obs.SessionResetDetected, now)
-		ws.Saturated = obs.SessionSaturated
-		fillBurn(ctx, s.Store, ws, *obs.SessionPct, true, now)
-		out.Session = ws
-		if ws.WindowStartTSISO != "" {
-			if start, err := time.Parse(time.RFC3339, ws.WindowStartTSISO); err == nil {
+	// History and recent-sessions only mean anything once there's at least
+	// one observation to anchor a window to — out.LastPoll != nil is that
+	// same condition nowstate.Compute already checked (mirrors the
+	// pre-extraction "obs == nil" early return this handler used to make
+	// itself).
+	if out.LastPoll != nil {
+		if out.Session != nil && out.Session.WindowStartTSISO != "" {
+			if start, err := time.Parse(time.RFC3339, out.Session.WindowStartTSISO); err == nil {
 				out.SessionHistory = s.queryNowHistory(ctx, true, start.UnixMilli(), now.UnixMilli())
 			}
 		}
-	}
-
-	if obs.WeekPct != nil {
-		ws := buildWindow(*obs.WeekPct, obs.WeekResetTSISO, 7*24*time.Hour, obs.WeekResetDetected, now)
-		ws.Saturated = obs.WeekSaturated
-		fillBurn(ctx, s.Store, ws, *obs.WeekPct, false, now)
-		out.Week = ws
-		if ws.WindowStartTSISO != "" {
-			if start, err := time.Parse(time.RFC3339, ws.WindowStartTSISO); err == nil {
+		if out.Week != nil && out.Week.WindowStartTSISO != "" {
+			if start, err := time.Parse(time.RFC3339, out.Week.WindowStartTSISO); err == nil {
 				out.WeekHistory = s.queryNowHistory(ctx, false, start.UnixMilli(), now.UnixMilli())
 			}
 		}
-	}
 
-	// Per-turn-derived insights for up to 10 most-recent sessions.
-	// tokens_per_pct_cw drives the % estimates; pulled once and reused
-	// across cards for consistency.
-	tokensPerPct, _, _, hasCal, _ := s.Store.LatestCalibrationMedian(ctx, "session", 10)
-	out.RecentSessions = s.recentSessionInsights(ctx, now, recentWindowS, tokensPerPct, hasCal)
+		// Per-turn-derived insights for up to 10 most-recent sessions.
+		// tokens_per_pct_cw drives the % estimates; pulled once and reused
+		// across cards for consistency.
+		tokensPerPct, _, _, hasCal, _ := s.Store.LatestCalibrationMedian(ctx, "session", 10)
+		out.RecentSessions = s.recentSessionInsights(ctx, now, recentWindowS, tokensPerPct, hasCal)
+	}
 
 	writeJSON(w, http.StatusOK, out)
 }
@@ -149,63 +142,11 @@ func (s *Server) queryNowHistory(ctx context.Context, isSession bool, startMS, e
 	return out
 }
 
-func buildWindow(pct int, resetISO string, span time.Duration, resetDetected bool, now time.Time) *routes.NowWindow {
-	ws := &routes.NowWindow{Pct: pct, ResetDetected: resetDetected}
-	if resetISO == "" {
-		return ws
-	}
-	t, err := time.Parse(time.RFC3339, resetISO)
-	if err != nil {
-		return ws
-	}
-	ws.ResetTSISO = t.UTC().Format(time.RFC3339)
-	ws.WindowStartTSISO = t.Add(-span).UTC().Format(time.RFC3339)
-	if d := t.Sub(now); d > 0 {
-		ws.TimeToResetMS = d.Milliseconds()
-	}
-	return ws
-}
-
-// fillBurn populates BurnOK / BurnPctPerHour and (only when actionable)
-// LimitOK / LimitETAMS / LimitETATS.
-func fillBurn(ctx context.Context, s storeIface, ws *routes.NowWindow, pct int, isSession bool, now time.Time) {
-	var pts []burnPoint
-	var err error
-	if isSession {
-		pts, err = readPoints(ctx, s, true)
-	} else {
-		pts, err = readPoints(ctx, s, false)
-	}
-	if err != nil || len(pts) < 2 {
-		return
-	}
-
-	slope, ok := slopeOver(pts)
-	if !ok {
-		return
-	}
-	ws.BurnPctPerHour = round2(slope)
-	ws.BurnOK = true
-
-	if slope <= 0.05 {
-		return
-	}
-	remaining := 100 - pct
-	if remaining <= 0 {
-		return
-	}
-	etaMS := int64(float64(remaining) / slope * 3600 * 1000)
-	// Suppress when the projected limit is after the natural reset — not
-	// actionable, and tends to be noisy when the burn-rate window is
-	// short.
-	if ws.TimeToResetMS > 0 && etaMS >= ws.TimeToResetMS {
-		return
-	}
-	ws.LimitOK = true
-	ws.LimitETAMS = etaMS
-	ws.LimitETATS = now.Add(time.Duration(etaMS) * time.Millisecond).UTC().Format(time.RFC3339)
-}
-
+// round2 rounds to 2 decimal places. Used package-wide (attribution.go,
+// history.go, models.go, ...), not just here — buildWindow and fillBurn
+// used to live in this file too and called it, but both moved to
+// internal/nowstate (which keeps its own copy; see that package's
+// comment).
 func round2(f float64) float64 {
 	return float64(int(f*100+0.5)) / 100
 }
