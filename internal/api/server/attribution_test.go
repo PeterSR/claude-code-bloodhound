@@ -134,6 +134,130 @@ func TestBuildAttrWindows_ByCwdFoldsSubagentIntoParent(t *testing.T) {
 	}
 }
 
+// TestBuildAttrGroupWindows_BySessionFoldsSubagentIntoParent is
+// buildAttrWindows's fold test transposed: buildAttrGroupWindows must fold a
+// subagent's slice into its parent's per-window array the same way
+// buildAttrWindows already folds it into the parent's per-window slice, so
+// --per-window can't disagree with the ordinary rollup (or the stacked
+// chart) about where a window's spend went.
+func TestBuildAttrGroupWindows_BySessionFoldsSubagentIntoParent(t *testing.T) {
+	windows := []store.LimitWindowRow{
+		{StartUnixMS: 1000, EndUnixMS: 2000, InProgress: false},
+		{StartUnixMS: 2000, EndUnixMS: 3000, InProgress: true},
+	}
+	slices := []store.AttributionRow{
+		{WindowStartUnixMS: 1000, SessionUUID: "parent", EffectiveSessionUUID: "parent", MeasuredPct: 5, TurnCount: 2},
+		{WindowStartUnixMS: 1000, SessionUUID: "agent-sub1", EffectiveSessionUUID: "parent", MeasuredPct: 20, TurnCount: 7},
+		{WindowStartUnixMS: 2000, SessionUUID: "parent", EffectiveSessionUUID: "parent", MeasuredPct: 8, TurnCount: 1},
+	}
+
+	out := buildAttrGroupWindows(windows, slices, "session")
+	pw, ok := out["parent"]
+	if !ok {
+		t.Fatalf("no per-window array for %q: %+v", "parent", out)
+	}
+	if len(pw) != 2 {
+		t.Fatalf("got %d window entries, want 2 (one per window, subagent folded rather than exploded): %+v", len(pw), pw)
+	}
+	if got, want := pw[0].WindowStartUnixMS, int64(1000); got != want {
+		t.Fatalf("pw[0].WindowStartUnixMS = %d, want %d (oldest first)", got, want)
+	}
+	if got, want := pw[0].Pct, 25.0; got != want {
+		t.Errorf("window 1 pct = %v, want %v (parent's 5 plus subagent's 20)", got, want)
+	}
+	if got := pw[0].InProgress; got {
+		t.Errorf("window 1 InProgress = %v, want false", got)
+	}
+	if got, want := pw[1].Pct, 8.0; got != want {
+		t.Errorf("window 2 pct = %v, want %v (parent alone)", got, want)
+	}
+	if got := pw[1].InProgress; !got {
+		t.Errorf("window 2 InProgress = %v, want true", got)
+	}
+
+	if _, ok := out["agent-sub1"]; ok {
+		t.Errorf("subagent %q must not have its own per-window array; its cost belongs under the parent's key", "agent-sub1")
+	}
+
+	// The whole point: sum(PerWindow) must equal the same window's slice in
+	// buildAttrWindows, so the two views of the same data can't disagree.
+	byWin := buildAttrWindows(windows, slices, "session")
+	var sum float64
+	for _, e := range pw {
+		sum += e.Pct
+	}
+	var wantSum float64
+	for _, w := range byWin {
+		for _, sl := range w.Slices {
+			if sl.Key == "parent" {
+				wantSum += sl.Pct
+			}
+		}
+	}
+	if sum != wantSum {
+		t.Errorf("sum of PerWindow = %v, want %v (buildAttrWindows' parent slices summed)", sum, wantSum)
+	}
+}
+
+// TestBuildAttrGroupWindows_ByProjectUnaffected mirrors
+// TestBuildAttrWindows_ByProjectUnaffected: a subagent already inherits its
+// parent's project, so by=="project" pools them without any fold logic.
+func TestBuildAttrGroupWindows_ByProjectUnaffected(t *testing.T) {
+	windows := []store.LimitWindowRow{{StartUnixMS: 1000, EndUnixMS: 2000}}
+	slices := []store.AttributionRow{
+		{WindowStartUnixMS: 1000, SessionUUID: "parent", EffectiveSessionUUID: "parent", Project: "proj", MeasuredPct: 5},
+		{WindowStartUnixMS: 1000, SessionUUID: "agent-sub1", EffectiveSessionUUID: "parent", Project: "proj", MeasuredPct: 20},
+	}
+	out := buildAttrGroupWindows(windows, slices, "project")
+	pw, ok := out["proj"]
+	if !ok || len(pw) != 1 || pw[0].Pct != 25 {
+		t.Fatalf("got %+v, want a single 'proj' window entry with pct 25", out)
+	}
+}
+
+// TestBuildAttrGroupWindows_UnattributedAndUnknownCwdStayDistinct guards the
+// two sentinels the same way TestBuildAttrWindows_ByCwdUnknownGetsOwnBucket
+// does for buildAttrWindows: they must not collide, and neither must be
+// dropped, when transposed into the per-group view.
+func TestBuildAttrGroupWindows_UnattributedAndUnknownCwdStayDistinct(t *testing.T) {
+	windows := []store.LimitWindowRow{{StartUnixMS: 1000, EndUnixMS: 2000}}
+	slices := []store.AttributionRow{
+		{WindowStartUnixMS: 1000, SessionUUID: "known", EffectiveSessionUUID: "known", Cwd: "", MeasuredPct: 7},
+		{WindowStartUnixMS: 1000, SessionUUID: attribute.Unattributed, EffectiveSessionUUID: attribute.Unattributed, Cwd: "", MeasuredPct: 3},
+	}
+	out := buildAttrGroupWindows(windows, slices, "cwd")
+	if len(out) != 2 {
+		t.Fatalf("got %d keys, want 2 (UnknownCwd and unattributed kept apart): %+v", len(out), out)
+	}
+	if pw, ok := out[store.UnknownCwd]; !ok || len(pw) != 1 || pw[0].Pct != 7 {
+		t.Errorf("UnknownCwd entry = %+v, want a single window with pct 7", pw)
+	}
+	if pw, ok := out[attribute.Unattributed]; !ok || len(pw) != 1 || pw[0].Pct != 3 {
+		t.Errorf("unattributed entry = %+v, want a single window with pct 3", pw)
+	}
+}
+
+// TestCurrentLimitWindow finds the one in-progress window, or reports none.
+func TestCurrentLimitWindow(t *testing.T) {
+	windows := []store.LimitWindowRow{
+		{StartUnixMS: 1000, InProgress: false},
+		{StartUnixMS: 2000, InProgress: false},
+		{StartUnixMS: 3000, InProgress: true},
+	}
+	got := currentLimitWindow(windows)
+	if got == nil || got.StartUnixMS != 3000 {
+		t.Fatalf("currentLimitWindow = %+v, want the window starting at 3000", got)
+	}
+
+	none := []store.LimitWindowRow{{StartUnixMS: 1000, InProgress: false}}
+	if got := currentLimitWindow(none); got != nil {
+		t.Errorf("currentLimitWindow with no open window = %+v, want nil", got)
+	}
+	if got := currentLimitWindow(nil); got != nil {
+		t.Errorf("currentLimitWindow(nil) = %+v, want nil", got)
+	}
+}
+
 // TestBuildAttrWindows_ByCwdUnknownGetsOwnBucket covers the other new case:
 // a real, known session whose cwd was never captured must key on
 // store.UnknownCwd, not on the empty string (which would either vanish or

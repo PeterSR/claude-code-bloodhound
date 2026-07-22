@@ -248,21 +248,46 @@ func (s *Store) SessionPctTotalsAll(ctx context.Context) (map[string]*SessionPct
 
 // SessionPctWindows returns one session's per-window slices for a bucket,
 // oldest first: the "over time" view of a single conversation.
+//
+// uuid is matched two ways at once, unioned by the WHERE clause below rather
+// than picked between: as the EFFECTIVE owner (COALESCE(NULLIF(
+// parent_session_uuid,”), session_uuid), the same fold SessionPctTotalsAll
+// and GroupAttribution already apply), so a supervisor's array includes the
+// subagents it dispatched instead of only its own direct rows; and as the
+// row's own raw session_uuid, so a subagent looked up by its own uuid still
+// gets its own unfolded detail, the one reachability path
+// "attribution windows --slices" and "attribution --by session" promise
+// (they fold subagents away, and point back here for their own view).
+// A subagent never dispatches further subagents in this schema (parent_
+// session_uuid always names the top-level session, see the workflow-agent
+// ingest comment), so the two conditions can't both match distinct rows for
+// the same call and double-count: querying a parent folds its children in,
+// querying a child returns only itself.
+//
+// Before this fold, totals.week_pct (from SessionPctTotalsAll) and the sum
+// of week[].pct here could disagree by however much the session's subagents
+// spent, which is exactly the bug: a supervisor with 114 subagents reported
+// 9.70% here against a totals.week_pct of 38.45%. Grouping by window here
+// (rather than returning one row per contributing session_uuid) is what
+// collapses those 114 rows back down to the single window they share.
 func (s *Store) SessionPctWindows(ctx context.Context, uuid, bucket string) ([]AttributionRow, []LimitWindowRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT a.window_start_unix_ms, a.project,
-		       a.measured_pct, a.estimated_pct,
-		       a.cw_tokens, a.raw_tokens, a.turn_count,
-		       a.first_ts_unix_ms, a.last_ts_unix_ms,
+		SELECT a.window_start_unix_ms, MAX(a.project) AS project,
+		       SUM(a.measured_pct) AS measured_pct, SUM(a.estimated_pct) AS estimated_pct,
+		       SUM(a.cw_tokens) AS cw_tokens, SUM(a.raw_tokens) AS raw_tokens, SUM(a.turn_count) AS turn_count,
+		       MIN(NULLIF(a.first_ts_unix_ms, 0)) AS first_ts_unix_ms, MAX(a.last_ts_unix_ms) AS last_ts_unix_ms,
 		       w.end_unix_ms, w.inferred, w.partial, w.in_progress,
 		       w.measured_pct, w.attributed_pct, w.peak_pct, w.hit_cap,
 		       w.tokens_per_pct_cw
 		FROM session_attribution a
+		LEFT JOIN sessions sess ON sess.session_uuid = a.session_uuid
 		JOIN limit_windows w
 		  ON w.bucket = a.bucket AND w.start_unix_ms = a.window_start_unix_ms
-		WHERE a.session_uuid = ? AND a.bucket = ?
+		WHERE a.bucket = ?
+		  AND (COALESCE(NULLIF(sess.parent_session_uuid, ''), a.session_uuid) = ? OR a.session_uuid = ?)
+		GROUP BY a.window_start_unix_ms
 		ORDER BY a.window_start_unix_ms ASC
-	`, uuid, bucket)
+	`, bucket, uuid, uuid)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -276,17 +301,19 @@ func (s *Store) SessionPctWindows(ctx context.Context, uuid, bucket string) ([]A
 		r := AttributionRow{Bucket: bucket, SessionUUID: uuid}
 		w := LimitWindowRow{Bucket: bucket}
 		var inferred, partial, inProgress, hitCap int
+		var firstTS sql.NullInt64
 		if err := rows.Scan(
 			&r.WindowStartUnixMS, &r.Project,
 			&r.MeasuredPct, &r.EstimatedPct,
 			&r.CWTokens, &r.RawTokens, &r.TurnCount,
-			&r.FirstTSUnixMS, &r.LastTSUnixMS,
+			&firstTS, &r.LastTSUnixMS,
 			&w.EndUnixMS, &inferred, &partial, &inProgress,
 			&w.MeasuredPct, &w.AttributedPct, &w.PeakPct, &hitCap,
 			&w.TokensPerPctCW,
 		); err != nil {
 			return nil, nil, err
 		}
+		r.FirstTSUnixMS = firstTS.Int64
 		w.StartUnixMS = r.WindowStartUnixMS
 		w.Inferred, w.Partial, w.InProgress, w.HitCap = inferred == 1, partial == 1, inProgress == 1, hitCap == 1
 		out = append(out, r)
