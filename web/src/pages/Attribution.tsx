@@ -222,34 +222,51 @@ export default function Attribution() {
 
       {data && data.windows.length > 0 && (
         <>
+          {/* Tiles 1 and 4 are points of the meter itself (bounded by 100 in
+              current-window mode, summable past it in multi-window mode);
+              tiles 2 and 3 are a share OF TILE 1's number, a different and
+              much smaller denominator. Four identically styled cards in a
+              row invited reading all four against the same scale (a user
+              asked what "Measured 100%" meant, on a week where the
+              attributed total itself was well under 100 - the measured
+              share of THAT was 100%, not 100% of the weekly limit). Measured
+              and Estimated stay four-across for layout, but render
+              `sub` (smaller, lighter number) and spell out their own
+              denominator in both the value and the hint, tying back to the
+              literal number tile 1 shows, in both current-window and
+              multi-window mode alike. Total and Unattributed keep full
+              weight and stay phrased as "points of the {meter}" so a reader
+              never has to guess which of the two scales a given tile is on. */}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-6">
             <Tile
               label={isCurrent ? `This ${bucket === 'week' ? 'week' : 'window'} so far` : `Total ${bucket === 'week' ? 'weekly' : '5h'} limit spent`}
               value={`${fmtPct(data.total_pct)}%`}
               hint={
                 isCurrent
-                  ? 'the open window only, so this reads the same as /usage'
-                  : `across ${data.windows.length} ${bucket === 'week' ? 'weekly' : '5-hour'} window${data.windows.length === 1 ? '' : 's'}`
+                  ? `points of the ${meter}: the open window only, so this reads the same as /usage`
+                  : `points of the ${meter}, summed across ${data.windows.length} window${data.windows.length === 1 ? '' : 's'}`
               }
             />
             <Tile
+              sub
               label="Measured"
-              value={`${pctOf(data.measured_pct, data.total_pct)}%`}
-              hint="anchored to observed meter movement"
+              value={`${pctOf(data.measured_pct, data.total_pct)}% of that`}
+              hint={`Share of the ${fmtPct(data.total_pct)}% attributed above that's anchored to observed meter movement, not of the ${meter} itself.`}
             />
             <Tile
+              sub
               label="Estimated"
-              value={`${pctOf(data.estimated_pct, data.total_pct)}%`}
+              value={`${pctOf(data.estimated_pct, data.total_pct)}% of that`}
               hint={
                 data.tokens_per_pct_cw
-                  ? `priced at ≈${fmtNumber(data.tokens_per_pct_cw)} weighted tokens per point`
-                  : 'no calibration yet'
+                  ? `Share of the ${fmtPct(data.total_pct)}% attributed above, priced at ≈${fmtNumber(data.tokens_per_pct_cw)} weighted tokens per point.`
+                  : `Share of the ${fmtPct(data.total_pct)}% attributed above; no calibration yet.`
               }
             />
             <Tile
               label="Unattributed"
               value={`${fmtPct(data.unattributed_pct)}%`}
-              hint="meter movement no session on this machine explains"
+              hint={`Points of the ${meter} that no session on this machine explains.`}
               accent={data.unattributed_pct > 0.05 * data.total_pct ? 'text-amber-500' : undefined}
             />
           </div>
@@ -456,13 +473,31 @@ function CurrentWindowBar({
       >
         {/* Same 2px surface-gap convention as WindowStacks; this track
             fills left to right instead of bottom-up, so the rounded data
-            end belongs to the first (biggest) segment instead of the last. */}
-        <div className="absolute inset-y-0 left-0 flex gap-[2px]">
+            end belongs to the first (biggest) segment instead of the last.
+            inset-0 (not inset-y-0 left-0) is load-bearing: a flex container
+            with no right edge has no width to resolve percentages against,
+            so it shrinks to fit its content and every child's `${pct}%`
+            resolves against that collapsed box instead of the track. The
+            visible symptom was a bar reporting 88% while filling about 3%
+            of the track: the segments were sized correctly relative to
+            EACH OTHER, just against the wrong total width. */}
+        <div className="absolute inset-0 flex gap-[2px]">
           {slices.map((s, i) => (
             <div
               key={s.key || 'unattributed'}
               className={`shrink-0 h-full ${i === 0 ? 'rounded-l-[7px]' : ''}`}
               style={{
+                // The 0.4% floor keeps a sub-pixel slice from disappearing
+                // outright; on a fixed-width track a slice under ~0.3% of
+                // the cap otherwise rounds to 0px. It can push the drawn
+                // total slightly past the true fill, but only by however
+                // many slices got floored, and foldOtherSlices already caps
+                // that count at the legend's top 8 plus one merged "other"
+                // plus the unattributed sentinel - worst case, an ~4pp
+                // overshoot on a track that's read at a glance, not
+                // measured with a ruler. Losing several real contributors
+                // to true-zero width would be the worse failure mode, so
+                // the floor stays.
                 width: `${Math.max(s.pct > 0 ? 0.4 : 0, s.pct)}%`,
                 background:
                   s.key === UNATTRIBUTED
@@ -686,16 +721,29 @@ function Tile({
   value,
   hint,
   accent,
+  sub,
 }: {
   label: string;
   value: string;
   hint?: string;
   accent?: string;
+  // sub marks a tile as qualifying another one (Measured/Estimated qualify
+  // the headline total) rather than standing as a peer stat of its own: a
+  // smaller, lighter number is the visual half of telling the two kinds of
+  // tile apart, alongside the "of that" / "of the limit" wording carried in
+  // value and hint. Without some visual difference, four identically
+  // rendered cards read as four numbers on the same scale even once the
+  // copy says otherwise.
+  sub?: boolean;
 }) {
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
       <div className="text-xs uppercase tracking-wider text-zinc-500">{label}</div>
-      <div className={`text-2xl font-semibold tabular-nums mt-1 ${accent || ''}`}>{value}</div>
+      <div
+        className={`${sub ? 'text-lg font-medium text-zinc-700 dark:text-zinc-300' : 'text-2xl font-semibold'} tabular-nums mt-1 ${accent || ''}`}
+      >
+        {value}
+      </div>
       {hint && <div className="text-[11px] text-zinc-500 mt-1 leading-snug">{hint}</div>}
     </div>
   );
