@@ -721,56 +721,66 @@ func TestGroupAttribution_SingleWindowPeakEqualsPctForProjectAndCwd(t *testing.T
 	}
 }
 
-// TestGroupAttribution_BySessionPeakStaysPerRowMax pins the "do not touch"
-// half of the bug 2 fix: by=="session" already keys on the effective owner,
-// so unlike project/cwd there's no widening effect from the fix to apply -
-// only the separate, longstanding case where a supervisor and the subagents
-// it dispatched share one window and land as distinct rows under the same
-// key. That case's peak stays the plain per-row MAX() intentionally, the
-// same approximation SessionPctTotalsAll's own FiveHPeakPct documents, so a
-// consumer already depending on this number sees it unchanged. If this test
-// starts failing because PeakPct now equals Pct (73), the "by session must
-// keep its current, already-correct value" requirement was violated.
-func TestGroupAttribution_BySessionPeakStaysPerRowMax(t *testing.T) {
-	s := openTestStore(t)
-	ctx := context.Background()
-
-	const (
-		parent = "10101010-1010-1010-1010-101010101010"
-		sub    = "agent-abababababababab"
-	)
-	insertTestSession(t, s, parent, "proj", "")
-	insertTestSession(t, s, sub, "proj", parent)
-
-	insertTestWindow(t, s, "week", 1000)
-	insertTestAttribution(t, s, "week", 1000, parent, "proj", 33, 0)
-	insertTestAttribution(t, s, "week", 1000, sub, "proj", 40, 0)
-
-	groups, err := s.GroupAttribution(ctx, "week", "session", 0)
-	if err != nil {
-		t.Fatalf("GroupAttribution: %v", err)
-	}
-	var parentGroup *AttributionGroup
-	for i := range groups {
-		if groups[i].Key == parent {
-			parentGroup = &groups[i]
-		}
-	}
-	if parentGroup == nil {
-		t.Fatalf("no group for parent %s (got %+v)", parent, groups)
-	}
-	if got, want := parentGroup.Pct, 73.0; got != want {
-		t.Errorf("Pct = %v, want %v (33+40)", got, want)
-	}
-	if got, want := parentGroup.PeakPct, 40.0; got != want {
-		t.Errorf("PeakPct = %v, want %v (the single largest raw row, not the window's pooled 73 - unchanged by design)", got, want)
-	}
-}
-
 func keysOf(m map[string]*SessionPctTotals) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestGroupAttribution_BySessionPeakSumsSupervisorAndSubagents is the
+// by=="session" counterpart of the two tests above. A supervisor and the
+// subagents it dispatched all fold into one effective-owner group and each
+// contributes its own row to the same window, so the group's peak has to sum
+// them before taking the max, exactly as project and cwd do.
+//
+// This grouping was deliberately left on a plain MAX() over raw rows when the
+// project/cwd fix landed. That understated the peak by whatever the subagents
+// contributed alongside their supervisor, and produced a visibly
+// self-contradictory pair on the Attribution page: a real database showed one
+// owner with 115 rows in a single window summing to 37.45% but reporting a
+// 9.3% peak, the supervisor's own row. With one window in range the peak is
+// the total by definition.
+func TestGroupAttribution_BySessionPeakSumsSupervisorAndSubagents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const (
+		parent = "12121212-1212-1212-1212-121212121212"
+		subA   = "agent-fff0000000000000a"
+		subB   = "agent-fff0000000000000b"
+	)
+	insertTestSession(t, s, parent, "proj", "")
+	insertTestSession(t, s, subA, "proj", parent)
+	insertTestSession(t, s, subB, "proj", parent)
+
+	insertTestWindow(t, s, "week", 1000)
+	insertTestWindow(t, s, "week", 2000)
+	// Window 1: supervisor plus both subagents, pooled 9+4+3 = 16.
+	insertTestAttribution(t, s, "week", 1000, parent, "proj", 9, 0)
+	insertTestAttribution(t, s, "week", 1000, subA, "proj", 4, 0)
+	insertTestAttribution(t, s, "week", 1000, subB, "proj", 3, 0)
+	// Window 2: supervisor alone, larger than any single row in window 1 but
+	// smaller than window 1's pooled total. This is what separates the fix
+	// from the bug: the old MAX() over raw rows would report 10 here.
+	insertTestAttribution(t, s, "week", 2000, parent, "proj", 10, 0)
+
+	groups, err := s.GroupAttribution(ctx, "week", "session", 0)
+	if err != nil {
+		t.Fatalf("GroupAttribution: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d, want 1 (subagents fold into their supervisor): %+v", len(groups), groups)
+	}
+	g := groups[0]
+	if got, want := g.Pct, 26.0; got != want {
+		t.Errorf("Pct = %v, want %v (9+4+3+10)", got, want)
+	}
+	if got, want := g.PeakPct, 16.0; got != want {
+		t.Errorf("PeakPct = %v, want %v (window 1's pooled 9+4+3, not window 2's single row 10)", got, want)
+	}
+	if g.PeakPct > g.Pct {
+		t.Errorf("PeakPct %v exceeds Pct %v, which is impossible", g.PeakPct, g.Pct)
+	}
 }

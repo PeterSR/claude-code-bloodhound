@@ -436,34 +436,34 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 	// sums every row sharing (key, window) first, then maxes across those
 	// window sums instead of across raw rows.
 	//
-	// by=="session" keeps the plain MAX() over raw rows: it already keys on
-	// the effective owner, one entry per (real) session_uuid contributing
-	// to a window, so unlike project/cwd there's no widening effect on the
-	// same measurement, only the longstanding case where a supervisor and
-	// its own subagents land in the same window and aren't summed before
-	// the max (documented on SessionPctTotalsAll's own FiveHPeakPct). Left
-	// as-is here rather than folded into the same fix, so a consumer already
-	// depending on this number sees it unchanged.
-	peakExpr := "MAX(sa.measured_pct + sa.estimated_pct)"
-	joinedPeaks := ""
-	if by == "project" || by == "cwd" {
-		peakExpr = "peaks.peak"
-		joinedPeaks = `
-			JOIN (
-				SELECT k, MAX(window_pct) AS peak FROM (
-					SELECT ` + keyCol + ` AS k,
-					       sa.window_start_unix_ms AS window_start_unix_ms,
-					       SUM(sa.measured_pct + sa.estimated_pct) AS window_pct
-					FROM session_attribution sa
-					LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
-					LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
-					WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
-					GROUP BY k, sa.window_start_unix_ms
-				)
-				GROUP BY k
-			) peaks ON peaks.k = ` + keyCol + `
-		`
-	}
+	// by=="session" needs the same treatment for the same reason. It keys on
+	// the effective owner, so a supervisor and every subagent it dispatched
+	// fold into one group and each contributes its own row to the same
+	// window; a plain MAX() over those rows reports the largest single
+	// contributor rather than what the group actually held. Measured live on
+	// a real database: one owner with 115 rows in exactly one window summed
+	// to 37.45 but reported a peak of 9.3, the supervisor's own row. One
+	// window in range means peak must equal the total by definition, and the
+	// page showed a peak far below the share sitting next to it. This was
+	// previously left on the plain MAX() to avoid moving a number consumers
+	// might depend on, but pre-1.0 a self-contradicting number is not worth
+	// preserving, so all three groupings now agree on what peak means.
+	peakExpr := "peaks.peak"
+	joinedPeaks := `
+		JOIN (
+			SELECT k, MAX(window_pct) AS peak FROM (
+				SELECT ` + keyCol + ` AS k,
+				       sa.window_start_unix_ms AS window_start_unix_ms,
+				       SUM(sa.measured_pct + sa.estimated_pct) AS window_pct
+				FROM session_attribution sa
+				LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
+				LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
+				WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
+				GROUP BY k, sa.window_start_unix_ms
+			)
+			GROUP BY k
+		) peaks ON peaks.k = ` + keyCol + `
+	`
 	q := `
 		SELECT ` + keyCol + ` AS k,
 		       MAX(sa.project)                      AS project,
@@ -487,10 +487,9 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 		GROUP BY k
 		ORDER BY pct DESC
 	`
-	args := []any{bucket, sinceMS}
-	if joinedPeaks != "" {
-		args = []any{bucket, sinceMS, bucket, sinceMS}
-	}
+	// Two pairs, in query order: the peaks subquery is interpolated ahead of
+	// the outer WHERE, so its bucket/since bind first.
+	args := []any{bucket, sinceMS, bucket, sinceMS}
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
