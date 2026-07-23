@@ -67,6 +67,14 @@ type doctorReport struct {
 	// the result, all the counting logic lives in store.
 	Coverage store.CoverageReport `json:"coverage"`
 
+	// HistoryRepair is a dry run of `repair --dedupe-history` at the
+	// default window and default (not --all) scope. Nil only when the
+	// dry run itself failed. Coverage answers "is anything missing";
+	// this answers the other half, "is anything counted twice" — the
+	// state an upgrader lands in when their history predates the
+	// ingester fix.
+	HistoryRepair *store.RepairStats `json:"history_repair,omitempty"`
+
 	// Errors collects anything that went wrong gathering the above without
 	// aborting the rest of the report (mirrors the human output's inline
 	// "ERROR" annotations, just collected in one place for --json).
@@ -201,6 +209,22 @@ var doctorCmd = &cobra.Command{
 			printCoverageHuman(w, cov)
 		}
 
+		fmt.Fprintln(w, "\nHistory repair:")
+		repairStats, repairErr := s.DedupeHistory(ctx, store.RepairOptions{
+			WindowS: store.DefaultRepairWindowS,
+		})
+		if repairErr != nil {
+			fmt.Fprintf(w, "  ERROR: %v\n", repairErr)
+			rep.Errors = append(rep.Errors, fmt.Sprintf("history repair: %v", repairErr))
+		} else {
+			rep.HistoryRepair = &repairStats
+			// covErr != nil means we don't know whether anything is
+			// missing, so we can't claim ingest is done either; treat it
+			// the same as "something is missing" and send them to ingest
+			// first rather than risk recommending repair out of order.
+			printHistoryRepairHuman(w, repairStats, covErr != nil || cov.AnyMissing())
+		}
+
 		if doctorJSON {
 			printDoctorJSON(realOut, rep)
 		}
@@ -225,6 +249,33 @@ func printCoverageHuman(w io.Writer, cov store.CoverageReport) {
 		fmt.Fprintf(w, "  !! %d transcript file(s) on disk are not represented in the database.\n", cov.TotalMissing())
 		fmt.Fprintln(w, "     run `bloodhound ingest --force` and re-check with `bloodhound doctor`.")
 	}
+}
+
+// printHistoryRepairHuman reports the dedupe-history dry run and, when
+// there is something to collapse, names the next command. ingestFirst
+// makes that recommendation ordered rather than a menu: `ingest --force`
+// dedupes on the real message.id/requestId, so any session whose JSONL
+// still exists is fixed exactly by ingest and only approximately by this
+// heuristic. Sending someone to repair while transcripts are still
+// un-ingested bakes a timing guess into rows that could have been
+// reconstructed precisely.
+func printHistoryRepairHuman(w io.Writer, st store.RepairStats, ingestFirst bool) {
+	fmt.Fprintf(w, "  %-15s in_scope=%-5s runs=%-5s turns=%-5s\n", "dedupe-history",
+		fmtCount(int64(st.SessionsInScope)), fmtCount(int64(st.RunsCollapsed)), fmtCount(int64(st.TurnsRemoved)))
+	if st.RunsCollapsed == 0 {
+		fmt.Fprintln(w, "  no duplicate turns from the pre-fix ingester.")
+		return
+	}
+	fmt.Fprintf(w, "  !! %s turn(s) across %s session(s) are counted twice, inflating history by %s tokens.\n",
+		fmtCount(int64(st.TurnsRemoved)), fmtCount(int64(st.SessionsChanged)),
+		fmtTokens(float64(st.RawTokensBefore-st.RawTokensAfter)))
+	if ingestFirst {
+		fmt.Fprintln(w, "     run `bloodhound ingest --force` first, then re-check with `bloodhound doctor`:")
+		fmt.Fprintln(w, "     ingest repairs on-disk sessions exactly, this pass only estimates.")
+		return
+	}
+	fmt.Fprintln(w, "     preview with `bloodhound repair --dedupe-history`,")
+	fmt.Fprintln(w, "     then write it with `bloodhound repair --dedupe-history --apply`.")
 }
 
 func printDoctorJSON(w io.Writer, rep doctorReport) {
