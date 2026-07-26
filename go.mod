@@ -3,6 +3,7 @@ module github.com/PeterSR/claude-code-bloodhound
 go 1.25.8
 
 require (
+	github.com/PeterSR/claude-code-weaverbird v0.1.0
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/charmbracelet/x/vt v0.0.0-20260519012233-798e623c8447
 	github.com/creack/pty v1.1.24
@@ -62,7 +63,7 @@ require (
 	golang.org/x/crypto v0.33.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
