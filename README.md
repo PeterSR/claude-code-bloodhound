@@ -2,7 +2,7 @@
 
 **Track your Claude Code subscription usage over time. Make educated decisions about how to use it today.**
 
-Claude Code's subscription burns through opaque rate limits — a 5-hour session window and a weekly window, both expressed only as percentages in the `/usage` TUI panel. There's no API. No history. No way to know whether your next prompt will sail through or push you into a hard stop.
+Claude Code's subscription burns through opaque rate limits - a 5-hour session window and a weekly window, both expressed only as percentages in the `/usage` TUI panel.
 
 Bloodhound watches the JSONL session logs Claude Code already writes to your disk, polls `/usage` on a schedule you control, and stores it all locally so you can answer questions like:
 
@@ -10,22 +10,22 @@ Bloodhound watches the JSONL session logs Claude Code already writes to your dis
 - How much can I realistically do before the bucket runs out?
 - What does my next prompt likely cost? (calibration: tokens per 1%)
 - Should I `/compact` now? Was my last compaction warm or cold?
-- Where am I leaking quota — idle gaps, cold compactions, or breakpoint rotations?
+- Where am I leaking quota - idle gaps, cold compactions, or breakpoint rotations?
 - Which sessions are eating the most of my week?
 
 ## Status
 
-**v0.1 alpha — usable, but expect rough edges.** The data model and the daily-driver UI are in place:
+**v0.1 alpha - usable, but expect rough edges.** The data model and the daily-driver UI are in place:
 
-- `Now` — gauges for session and week, time to natural reset, burn-rate projection (only when actionable), and an "On extra usage" badge once you blow past 100%.
-- `History` — `/usage` % over time, the calibration trend (tokens per 1%), and a weekday × hour heatmap of when you spend.
-- `Sessions` — every session on disk, sortable, click-through to a per-turn view with classification (idle / rotation / restructure) and inline compactions.
-- `Settings` — edit `config.json` from the UI, copy-paste statusline + hook + systemd snippets.
-- `Debug` — last `/usage` raw dump, parser output, ingest counters, schema version, paths, and a Retrain button that triggers an on-demand extractor self-heal.
+- `Now` - gauges for session and week, time to natural reset, burn-rate projection (only when actionable), and an "On extra usage" badge once you blow past 100%.
+- `History` - `/usage` % over time, the calibration trend (tokens per 1%), and a weekday × hour heatmap of when you spend.
+- `Sessions` - every session on disk, sortable, click-through to a per-turn view with classification (idle / rotation / restructure) and inline compactions.
+- `Settings` - edit `config.json` from the UI, copy-paste statusline + hook + systemd snippets.
+- `Debug` - last `/usage` raw dump, parser output, ingest counters, schema version, paths, and a Retrain button that triggers an on-demand extractor self-heal.
 
-Two more pages exist behind direct URLs but stay out of the sidebar in v0.1 until the visuals get a polish pass: `/compactions` (every confirmed `/compact`, broken down by warm vs cold cache state) and `/leaks` (avoidable spend ranked — idle misses, rotations, restructures, cold compactions).
+Two more pages exist behind direct URLs but stay out of the sidebar in v0.1 until the visuals get a polish pass: `/compactions` (every confirmed `/compact`, broken down by warm vs cold cache state) and `/leaks` (avoidable spend ranked - idle misses, rotations, restructures, cold compactions).
 
-The opt-in **Join the pack** community-insights upload is next — see [Privacy](#privacy) for what that's for and what it would and wouldn't share.
+The opt-in **Join the pack** community-insights upload is next - see [Privacy](#privacy) for what that's for and what it would and wouldn't share.
 
 ## How it works
 
@@ -35,7 +35,7 @@ Three jobs, scheduled either by your OS or by a built-in scheduler:
 - `bloodhound ingest`: walks `~/.claude/projects/*.jsonl`, parses every assistant turn and compaction event into local SQLite.
 - `bloodhound aggregate`: recomputes rolling metrics (sessions, 5-hour buckets, tokens-per-1% calibration, per-session limit attribution) on a slower cadence.
 
-`bloodhound daemon` runs all three on configurable intervals (defaults: poll 5m, ingest 5m, aggregate 15m) and exposes a JSON API over a unix socket at `$XDG_RUNTIME_DIR/bloodhound/api.sock` — no TCP port to conflict with anything on your box.
+`bloodhound daemon` runs all three on configurable intervals (defaults: poll 5m, ingest 5m, aggregate 15m) and exposes a JSON API over a unix socket at `$XDG_RUNTIME_DIR/bloodhound/api.sock` - no TCP port to conflict with anything on your box.
 
 `bloodhound-gui` is a native window that loads the dashboard and proxies its API calls to the daemon's socket. Pre-built for Linux x86_64; macOS / Windows / Linux-arm builds work in principle but aren't shipped yet (see [Platforms](#platforms)). It's a separate binary so the daemon can run headless on machines without a desktop environment.
 
@@ -51,7 +51,7 @@ The Attribution page rolls this up by working directory and by session, over wee
 
 ## Currency
 
-Your currency is the percentage shown in `/usage`. Bloodhound never asks you to guess your plan's token cap or pick a billing-weight mode — those are implementation details we figure out from your data. The calibration phase converts the opaque percentage into a tokens-per-1% estimate by pairing adjacent observations and dividing the cost-weighted spend in between by the percentage points the bucket moved. Saturated observations (≥99%, when you're on the pay-per-use Extra usage tier and the bucket has stopped moving) are excluded.
+Your currency is the percentage shown in `/usage`. Bloodhound never asks you to guess your plan's token cap or pick a billing-weight mode - those are implementation details we figure out from your data. The calibration phase converts the opaque percentage into a tokens-per-1% estimate by pairing adjacent observations and dividing the cost-weighted spend in between by the percentage points the bucket moved. Saturated observations (≥99%, when you're on the pay-per-use Extra usage tier and the bucket has stopped moving) are excluded.
 
 ## Self-healing extractor
 
@@ -66,7 +66,7 @@ The "Join the pack" feature is the planned opt-in to that. Why have one at all: 
 - **Are tokens-per-1% the same for everyone?** If your calibration drifts from the pack median over weeks, Anthropic may be quietly differentiating cost weights by plan, account age, region, or load.
 - **Does the 5-hour window really mean 5 hours?** Reset cadence and saturation rates pooled across many accounts make it visible if some users get longer-effective windows.
 - **Where are the cliffs?** When the bundled extractor breaks because Anthropic redesigned the `/usage` panel, the pack notices in minutes instead of one user at a time.
-- **Plan-tier comparisons.** Pro vs Max-5x vs Max-20x — what does each dollar actually buy in throughput once you account for cache hits and saturation?
+- **Plan-tier comparisons.** Pro vs Max-5x vs Max-20x - what does each dollar actually buy in throughput once you account for cache hits and saturation?
 
 Joining the pack would upload:
 
@@ -89,7 +89,7 @@ This is all moot until the upload server exists. When it does, joining will be a
 
 ### Platforms
 
-The daemon is pure-Go and ships pre-built for Linux and macOS × amd64 / arm64. The native GUI is a Wails app and ships pre-built for Linux x86_64 only. Daemon-only setups give you the full API — the GUI is just a viewer on top.
+The daemon is pure-Go and ships pre-built for Linux and macOS × amd64 / arm64. The native GUI is a Wails app and ships pre-built for Linux x86_64 only. Daemon-only setups give you the full API - the GUI is just a viewer on top.
 
 Both binaries compile cleanly for every other platform listed below; what's missing is the *release pipeline* extension (macOS GUI needs a `macos-*` runner in the release workflow; Windows wants real-hardware validation before it gets a release artifact). The CI-verified column is what makes that gap fillable as soon as someone reports back from a real machine.
 
@@ -100,7 +100,7 @@ Both binaries compile cleanly for every other platform listed below; what's miss
 | macOS arm64 / amd64   | ✅                  | build from source | daemon + GUI               |
 | Windows amd64         | build from source  | build from source | daemon + GUI               |
 
-**Help me test Bloodhound on your platform.** I develop on Linux x86_64, so that's the only combo I exercise end-to-end. The other rows compile in CI but haven't been driven against a real `claude` session by anyone yet — especially Windows, where the daemon talks to Claude Code via a freshly-written ConPTY shim that mirrors the Unix pty path on paper but is unproven in practice. If you try Bloodhound on macOS, Windows, or Linux arm64 — daemon-only or full GUI — open [an issue](https://github.com/PeterSR/claude-code-bloodhound/issues) with your `bloodhound doctor` output and what worked or broke. Platform fixes get fast-tracked, and credited.
+**Help me test Bloodhound on your platform.** I develop on Linux x86_64, so that's the only combo I exercise end-to-end. The other rows compile in CI but haven't been driven against a real `claude` session by anyone yet - especially Windows, where the daemon talks to Claude Code via a freshly-written ConPTY shim that mirrors the Unix pty path on paper but is unproven in practice. If you try Bloodhound on macOS, Windows, or Linux arm64 - daemon-only or full GUI - open [an issue](https://github.com/PeterSR/claude-code-bloodhound/issues) with your `bloodhound doctor` output and what worked or broke. Platform fixes get fast-tracked, and credited.
 
 First-launch friction to expect on unsigned binaries:
 
@@ -116,7 +116,7 @@ bloodhound doctor               # sanity-check paths, schema, claude binary
 bloodhound install --enable     # write + start the systemd user unit (Linux)
 ```
 
-On Linux, if you also unpacked the GUI tarball and ran its `install-gui.sh`, launch `bloodhound-gui` from your application menu. Otherwise — or on macOS / Windows where there is no GUI binary yet — the dashboard's API is reachable directly over the unix socket:
+On Linux, if you also unpacked the GUI tarball and ran its `install-gui.sh`, launch `bloodhound-gui` from your application menu. Otherwise - or on macOS / Windows where there is no GUI binary yet - the dashboard's API is reachable directly over the unix socket:
 
 ```bash
 curl --unix-socket $XDG_RUNTIME_DIR/bloodhound/api.sock http://bh/api/now | jq
@@ -136,7 +136,7 @@ bloodhound install --enable
 Building the GUI from source needs platform-specific prerequisites:
 
 - **Linux:** GTK 3 and WebKit2GTK 4.1 dev headers. Fedora: `sudo dnf install gtk3-devel webkit2gtk4.1-devel`. Ubuntu 24.04+ / Debian trixie: `sudo apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev`. Then `make install-gui` drops `bloodhound-gui` into `~/.local/bin` and installs the `.desktop` entry.
-- **macOS:** Xcode Command Line Tools (`xcode-select --install`). The Makefile target is Linux-shaped, so build the binary directly: `cd web && npm ci && npm run build && cd .. && go build -tags prod,production,desktop -o bloodhound-gui ./cmd/bloodhound-gui`. If you get it working — or it explodes — please report back.
+- **macOS:** Xcode Command Line Tools (`xcode-select --install`). The Makefile target is Linux-shaped, so build the binary directly: `cd web && npm ci && npm run build && cd .. && go build -tags prod,production,desktop -o bloodhound-gui ./cmd/bloodhound-gui`. If you get it working - or it explodes - please report back.
 - **Windows:** WebView2 runtime (pre-installed on Windows 10/11). PowerShell: `cd web; npm ci; npm run build; cd ..; go build -tags prod,production,desktop -o bloodhound-gui.exe ./cmd/bloodhound-gui`. Same "let me know how it went" applies.
 
 For first-time setup the daemon will collect a few `/usage` polls before the gauges show anything useful; calibration needs at least two non-saturated observations in the same bucket. If the GUI launches before the daemon is running, it shows a setup wizard with the commands above.
@@ -153,9 +153,9 @@ Bloodhound follows XDG conventions on Linux and the platform conventions on macO
 
 ## Disclaimer
 
-This is a tool for monitoring Claude Code, and — fittingly — Claude Code has been used to build it. The Go and TypeScript here are vetted by a human, but parts of the implementation, scaffolding, and copy were drafted with AI assistance.
+This is a tool for monitoring Claude Code, and - fittingly - Claude Code has been used to build it. The Go and TypeScript here are vetted by a human, but parts of the implementation, scaffolding, and copy were drafted with AI assistance.
 
-It's also **alpha software**. Expect rough edges: things may misclassify, the schema may change, your local DB may need to be wiped between releases, and the bundled `/usage` extractor will break the next time Anthropic redesigns the panel. The daemon's self-heal usually catches that on the first failed poll; if it can't, the Debug page has a manual Retrain button. It does not modify your Claude Code installation, your JSONL session files, or anything outside its own state directory — but treat the numbers as informational, not as a substitute for Anthropic's own billing.
+It's also **alpha software**. Expect rough edges: things may misclassify, the schema may change, your local DB may need to be wiped between releases, and the bundled `/usage` extractor will break the next time Anthropic redesigns the panel. The daemon's self-heal usually catches that on the first failed poll; if it can't, the Debug page has a manual Retrain button. It does not modify your Claude Code installation, your JSONL session files, or anything outside its own state directory - but treat the numbers as informational, not as a substitute for Anthropic's own billing.
 
 Bloodhound is not affiliated with or endorsed by Anthropic.
 
