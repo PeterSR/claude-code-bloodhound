@@ -16,14 +16,16 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
 )
 
-// TestWeaverbirdSpec_Widgets pins the static contract: four widgets, the
-// ids weaverbird's descriptor and the SPEC.md example reference, the
-// bloodhound icon, the warn/danger thresholds mirroring the existing
-// statusline's own coloring intent on the two default widgets, and the two
-// opt-in widgets' static fields (Row, Priority, Cache, and Default marking
-// them opt-in). The two default widgets must lead the slice: the implicit
-// default group is Widgets in this order, so a caller relying on it must
-// see 5h and week first.
+// TestWeaverbirdSpec_Widgets pins the static contract: four widgets, all
+// kind: text (kind: meter is deliberately ruled out for .5h/.week
+// specifically), the ids weaverbird's descriptor and
+// EXAMPLES.md reference, the bloodhound icon, and the two opt-in widgets'
+// static fields (Row, Priority, Cache, and Default marking them opt-in).
+// The warn/danger thresholds are not on the spec at all: weaverbird has no
+// threshold map. They are pinned instead against classForPercentage in
+// TestClassForPercentage. The two default widgets must lead the slice: the
+// implicit default group is Widgets in this order, so a caller relying on
+// it must see 5h and week first.
 func TestWeaverbirdSpec_Widgets(t *testing.T) {
 	if weaverbirdSpec.Provider != "bloodhound" {
 		t.Errorf("Provider = %q, want bloodhound", weaverbirdSpec.Provider)
@@ -51,8 +53,8 @@ func TestWeaverbirdSpec_Widgets(t *testing.T) {
 	if fiveH.Title != "5 hour quota" || fiveH.Priority != 10 {
 		t.Errorf("bloodhound.5h = %+v, want title %q priority 10", fiveH, "5 hour quota")
 	}
-	if fiveH.States["warn"] != 70 || fiveH.States["danger"] != 90 {
-		t.Errorf("bloodhound.5h.States = %v, want warn=70 danger=90", fiveH.States)
+	if fiveH.Kind != wb.KindText {
+		t.Errorf("bloodhound.5h.Kind = %q, want %q", fiveH.Kind, wb.KindText)
 	}
 	if fiveH.Cache == nil || fiveH.Cache.TTLSec != 10 {
 		t.Errorf("bloodhound.5h.Cache = %+v, want ttl_sec=10", fiveH.Cache)
@@ -68,8 +70,8 @@ func TestWeaverbirdSpec_Widgets(t *testing.T) {
 	if week.Title != "Weekly quota" || week.Priority != 20 {
 		t.Errorf("bloodhound.week = %+v, want title %q priority 20", week, "Weekly quota")
 	}
-	if week.States["warn"] != 70 || week.States["danger"] != 90 {
-		t.Errorf("bloodhound.week.States = %v, want warn=70 danger=90", week.States)
+	if week.Kind != wb.KindText {
+		t.Errorf("bloodhound.week.Kind = %q, want %q", week.Kind, wb.KindText)
 	}
 	if week.Cache == nil || week.Cache.TTLSec != 10 {
 		t.Errorf("bloodhound.week.Cache = %+v, want ttl_sec=10", week.Cache)
@@ -85,6 +87,9 @@ func TestWeaverbirdSpec_Widgets(t *testing.T) {
 	if burn.Priority != 15 || burn.Row != 1 {
 		t.Errorf("bloodhound.burn = %+v, want priority 15 row 1", burn)
 	}
+	if burn.Kind != wb.KindText {
+		t.Errorf("bloodhound.burn.Kind = %q, want %q", burn.Kind, wb.KindText)
+	}
 	if burn.Cache == nil || burn.Cache.TTLSec != 10 {
 		t.Errorf("bloodhound.burn.Cache = %+v, want ttl_sec=10", burn.Cache)
 	}
@@ -99,11 +104,44 @@ func TestWeaverbirdSpec_Widgets(t *testing.T) {
 	if poll.Priority != 5 || poll.Row != 1 {
 		t.Errorf("bloodhound.poll = %+v, want priority 5 row 1", poll)
 	}
+	if poll.Kind != wb.KindText {
+		t.Errorf("bloodhound.poll.Kind = %q, want %q", poll.Kind, wb.KindText)
+	}
 	if poll.Cache == nil || poll.Cache.TTLSec != 10 {
 		t.Errorf("bloodhound.poll.Cache = %+v, want ttl_sec=10", poll.Cache)
 	}
 	if poll.IsDefault() {
 		t.Error("bloodhound.poll.IsDefault() = true, want false (opt-in)")
+	}
+}
+
+// TestClassForPercentage pins classForPercentage against the exact
+// thresholds bloodhound applies to .5h/.week: danger at or above 90, warn
+// at or above 70, else ok. It also pins that a non-empty
+// explicit class always wins outright, matching ResolveClass's "explicit
+// class on the record wins" rule — the same override bucketValue relies on
+// for its saturated/limit-projection cases.
+func TestClassForPercentage(t *testing.T) {
+	cases := []struct {
+		name     string
+		explicit string
+		pct      int
+		want     string
+	}{
+		{"below warn: ok", "", 38, wb.ClassOK},
+		{"at warn threshold: warn", "", 70, wb.ClassWarn},
+		{"between warn and danger: warn", "", 85, wb.ClassWarn},
+		{"at danger threshold: danger", "", 90, wb.ClassDanger},
+		{"above danger: danger", "", 95, wb.ClassDanger},
+		{"explicit override below every threshold still wins", wb.ClassDanger, 10, wb.ClassDanger},
+		{"explicit override at a percentage the threshold would also call danger", wb.ClassDanger, 95, wb.ClassDanger},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classForPercentage(tc.explicit, tc.pct); got != tc.want {
+				t.Errorf("classForPercentage(%q, %d) = %q, want %q", tc.explicit, tc.pct, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -151,55 +189,50 @@ func TestWeaverbirdValue_NoData(t *testing.T) {
 	}
 }
 
-// TestBucketValue_Classes exercises every class bucketValue can produce:
-// the plain-percentage case (no explicit class, states derives ok/warn),
-// the danger threshold already crossed by the percentage alone (again no
-// explicit class needed), and the two cases where the percentage would
-// not capture the urgency and an explicit danger class is required:
-// saturated, and a burn-rate limit projection at a percentage still below
-// the danger threshold.
+// TestBucketValue_Classes exercises every class bucketValue can produce,
+// now that it computes class itself instead of handing a percentage to a
+// host-side `states` map: the plain-percentage case (classForPercentage's
+// ok/warn/danger thresholds), the danger threshold already crossed by the
+// percentage alone, and the two cases where the percentage would not
+// capture the urgency and an explicit danger override applies: saturated,
+// and a burn-rate limit projection at a percentage still below the danger
+// threshold. Percentage is no longer a field on a kind:text value record
+// at all (weaverbird SPEC.md section 4), so this only asserts Class now.
 func TestBucketValue_Classes(t *testing.T) {
 	cases := []struct {
 		name      string
 		w         *routes.NowWindow
 		wantClass string
-		wantPct   float64
 	}{
 		{
-			name:      "below warn threshold: no explicit class",
+			name:      "below warn threshold: ok",
 			w:         &routes.NowWindow{Pct: 38},
-			wantClass: "",
-			wantPct:   38,
+			wantClass: wb.ClassOK,
 		},
 		{
-			name:      "past danger threshold via percentage alone: no explicit class",
+			name:      "past danger threshold via percentage alone: danger",
 			w:         &routes.NowWindow{Pct: 95},
-			wantClass: "",
-			wantPct:   95,
+			wantClass: wb.ClassDanger,
 		},
 		{
 			name:      "saturated below the danger threshold: percentage alone would not capture it",
 			w:         &routes.NowWindow{Pct: 85, Saturated: true},
 			wantClass: wb.ClassDanger,
-			wantPct:   85,
 		},
 		{
-			name:      "saturated at a percentage already past danger: states already covers it",
+			name:      "saturated at a percentage already past danger: threshold already covers it",
 			w:         &routes.NowWindow{Pct: 99, Saturated: true},
-			wantClass: "",
-			wantPct:   99,
+			wantClass: wb.ClassDanger,
 		},
 		{
 			name:      "burn-rate limit projected while pct is still low: explicit danger",
 			w:         &routes.NowWindow{Pct: 40, LimitOK: true, LimitETAMS: int64(90 * time.Minute / time.Millisecond)},
 			wantClass: wb.ClassDanger,
-			wantPct:   40,
 		},
 		{
-			name:      "limit projected but pct already past danger threshold: states already covers it",
+			name:      "limit projected but pct already past danger threshold: threshold already covers it",
 			w:         &routes.NowWindow{Pct: 92, LimitOK: true, LimitETAMS: int64(time.Hour / time.Millisecond)},
-			wantClass: "",
-			wantPct:   92,
+			wantClass: wb.ClassDanger,
 		},
 	}
 
@@ -212,9 +245,6 @@ func TestBucketValue_Classes(t *testing.T) {
 			if v.Class != tc.wantClass {
 				t.Errorf("Class = %q, want %q", v.Class, tc.wantClass)
 			}
-			if v.Percentage == nil || *v.Percentage != tc.wantPct {
-				t.Errorf("Percentage = %v, want %v", v.Percentage, tc.wantPct)
-			}
 		})
 	}
 }
@@ -226,11 +256,11 @@ func TestBucketValue_Classes(t *testing.T) {
 func TestBucketValue_TextMirrorsStatuslineStyle(t *testing.T) {
 	w := &routes.NowWindow{Pct: 72, TimeToResetMS: int64(33 * time.Minute / time.Millisecond)}
 	v := bucketValue("bloodhound.5h", "5h", w)
-	if v.Text != "5h 72% (33m)" {
-		t.Errorf("Text = %q, want %q", v.Text, "5h 72% (33m)")
+	if v.FullText != "5h 72% (33m)" {
+		t.Errorf("Text = %q, want %q", v.FullText, "5h 72% (33m)")
 	}
-	if v.Short != "72%" {
-		t.Errorf("Short = %q, want %q", v.Short, "72%")
+	if v.ShortText != "72%" {
+		t.Errorf("Short = %q, want %q", v.ShortText, "72%")
 	}
 }
 
@@ -258,11 +288,11 @@ func TestBurnValue(t *testing.T) {
 		if v.Class != wb.ClassWarn {
 			t.Errorf("Class = %q, want %q", v.Class, wb.ClassWarn)
 		}
-		if v.Text != "burn 5h -> 100% 2h" {
-			t.Errorf("Text = %q, want %q", v.Text, "burn 5h -> 100% 2h")
+		if v.FullText != "burn 5h -> 100% 2h" {
+			t.Errorf("Text = %q, want %q", v.FullText, "burn 5h -> 100% 2h")
 		}
-		if v.Short != "2h" {
-			t.Errorf("Short = %q, want %q", v.Short, "2h")
+		if v.ShortText != "2h" {
+			t.Errorf("Short = %q, want %q", v.ShortText, "2h")
 		}
 	})
 
@@ -291,18 +321,18 @@ func TestBurnValue(t *testing.T) {
 		if v.Class != wb.ClassNeutral {
 			t.Errorf("Class = %q, want %q", v.Class, wb.ClassNeutral)
 		}
-		if v.Text != "burn 5h 12%/h" {
-			t.Errorf("Text = %q, want %q", v.Text, "burn 5h 12%/h")
+		if v.FullText != "burn 5h 12%/h" {
+			t.Errorf("Text = %q, want %q", v.FullText, "burn 5h 12%/h")
 		}
-		if v.Short != "12%/h" {
-			t.Errorf("Short = %q, want %q", v.Short, "12%/h")
+		if v.ShortText != "12%/h" {
+			t.Errorf("Short = %q, want %q", v.ShortText, "12%/h")
 		}
 	})
 
 	t.Run("no breach projected, fractional rate: one decimal", func(t *testing.T) {
 		w := &routes.NowWindow{BurnOK: true, BurnPctPerHour: 2.3}
 		v := burnValue(w)
-		if v == nil || v.Text != "burn 5h 2.3%/h" {
+		if v == nil || v.FullText != "burn 5h 2.3%/h" {
 			t.Errorf("burnValue = %+v, want Text %q", v, "burn 5h 2.3%/h")
 		}
 	})
@@ -356,8 +386,8 @@ func TestPollValue(t *testing.T) {
 		if v.Class != wb.ClassDanger {
 			t.Errorf("Class = %q, want %q", v.Class, wb.ClassDanger)
 		}
-		if v.Text != "extraction failed" {
-			t.Errorf("Text = %q, want %q", v.Text, "extraction failed")
+		if v.FullText != "extraction failed" {
+			t.Errorf("Text = %q, want %q", v.FullText, "extraction failed")
 		}
 	})
 
@@ -369,11 +399,11 @@ func TestPollValue(t *testing.T) {
 		if v.Class != wb.ClassNeutral {
 			t.Errorf("Class = %q, want %q", v.Class, wb.ClassNeutral)
 		}
-		if v.Text != "poll 45s" {
-			t.Errorf("Text = %q, want %q", v.Text, "poll 45s")
+		if v.FullText != "poll 45s" {
+			t.Errorf("Text = %q, want %q", v.FullText, "poll 45s")
 		}
-		if v.Short != "45s" {
-			t.Errorf("Short = %q, want %q", v.Short, "45s")
+		if v.ShortText != "45s" {
+			t.Errorf("Short = %q, want %q", v.ShortText, "45s")
 		}
 	})
 
@@ -385,8 +415,8 @@ func TestPollValue(t *testing.T) {
 		if v.Class != wb.ClassStale {
 			t.Errorf("Class = %q, want %q", v.Class, wb.ClassStale)
 		}
-		if v.Text != "poll stale 11m" {
-			t.Errorf("Text = %q, want %q", v.Text, "poll stale 11m")
+		if v.FullText != "poll stale 11m" {
+			t.Errorf("Text = %q, want %q", v.FullText, "poll stale 11m")
 		}
 	})
 
@@ -516,8 +546,8 @@ func TestWeaverbirdValue_TwoObservations_BurnAppears(t *testing.T) {
 	if burn.Class != wb.ClassWarn {
 		t.Errorf("bloodhound.burn.Class = %q, want %q; got %+v", burn.Class, wb.ClassWarn, burn)
 	}
-	if !strings.HasPrefix(burn.Text, "burn 5h -> 100% ") {
-		t.Errorf("bloodhound.burn.Text = %q, want prefix %q", burn.Text, "burn 5h -> 100% ")
+	if !strings.HasPrefix(burn.FullText, "burn 5h -> 100% ") {
+		t.Errorf("bloodhound.burn.FullText = %q, want prefix %q", burn.FullText, "burn 5h -> 100% ")
 	}
 }
 

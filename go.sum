@@ -1,7 +1,7 @@
 git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 h1:N3IGoHHp9pb6mj1cbXbuaSXV/UMKwmbKLf53nQmtqMA=
 git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3/go.mod h1:QtOLZGz8olr4qH2vWK0QH0w0O4T9fEIjMuWpKUsH7nc=
-github.com/PeterSR/claude-code-weaverbird v0.1.0 h1:i1dSZs9eKmJoo5aD2o3T6HBj4rY5n3nnWeMCwZdSfDg=
-github.com/PeterSR/claude-code-weaverbird v0.1.0/go.mod h1:593wUH9JFeb1pgjWa5tfHLko/T63WF50SmJBjKNFiEQ=
+github.com/PeterSR/claude-code-weaverbird v0.3.0 h1:seGVrWtntWz/ZD+CDKFVyB12gFRM2HSMoeFDpEOg2LY=
+github.com/PeterSR/claude-code-weaverbird v0.3.0/go.mod h1:593wUH9JFeb1pgjWa5tfHLko/T63WF50SmJBjKNFiEQ=
 github.com/bep/debounce v1.2.1 h1:v67fRdBA9UQu2NhLFXrSg0Brw7CexQekrBwDMM8bzeY=
 github.com/bep/debounce v1.2.1/go.mod h1:H8yggRPQKLUhUoqrJC1bO2xNya7vanpDl7xR3ISbCJ0=
 github.com/charmbracelet/colorprofile v0.4.2 h1:BdSNuMjRbotnxHSfxy+PCSa4xAmz7szw70ktAtWRYrY=

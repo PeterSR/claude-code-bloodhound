@@ -15,15 +15,17 @@ import (
 )
 
 // weaverbirdSpec declares bloodhound's two default quota gauges plus two
-// opt-in detail widgets to a weaverbird host. Thresholds mirror the danger
-// zone a user already reads off the `bloodhound status` line: yellow past
-// 70%, red past 90%.
+// opt-in detail widgets to a weaverbird host. All four are kind: text
+// (weaverbird SPEC.md section 3.2). kind: meter is deliberately ruled out
+// for .5h/.week: bloodhound wants control over the exact string, so it
+// keeps composing its own and is not a candidate for meter/series/
+// timestamp regardless of what the shape of any one widget might suggest.
 //
 // Two default widgets, not one: 5h and week are independently meaningful
 // facts, a user tracks each on its own, so weaverbird must be free to
 // order, color, cache, and drop them separately under width pressure. Per
-// weaverbird's widget-split rule (SPEC.md section 3 and 6) that makes them
-// two widgets, not a single widget carrying two colored spans.
+// weaverbird's widget-split rule (SPEC.md section 3.3 and 6) that makes
+// them two widgets, not a single widget carrying two colored spans.
 //
 // bloodhound.burn and bloodhound.poll are opt-in (Default: wb.OptIn()):
 // useful detail a user can add to their layout, but noise in the common
@@ -40,20 +42,21 @@ var weaverbirdSpec = wb.Spec{
 		{
 			ID:       "bloodhound.5h",
 			Title:    "5 hour quota",
+			Kind:     wb.KindText,
 			Priority: 10,
-			States:   map[string]float64{"warn": 70, "danger": 90},
 			Cache:    &wb.Cache{TTLSec: 10},
 		},
 		{
 			ID:       "bloodhound.week",
 			Title:    "Weekly quota",
+			Kind:     wb.KindText,
 			Priority: 20,
-			States:   map[string]float64{"warn": 70, "danger": 90},
 			Cache:    &wb.Cache{TTLSec: 10},
 		},
 		{
 			ID:       "bloodhound.burn",
 			Title:    "5h burn rate",
+			Kind:     wb.KindText,
 			Priority: 15,
 			Row:      1,
 			Default:  wb.OptIn(),
@@ -62,6 +65,7 @@ var weaverbirdSpec = wb.Spec{
 		{
 			ID:       "bloodhound.poll",
 			Title:    "Poll freshness",
+			Kind:     wb.KindText,
 			Priority: 5,
 			Row:      1,
 			Default:  wb.OptIn(),
@@ -145,11 +149,13 @@ func weaverbirdValue(_ wb.Session, _ []string) ([]wb.Value, error) {
 	return vals, nil
 }
 
-// bucketValue turns one NowWindow into a value record. It hands over the
-// raw percentage and lets the spec's states derive the color in the common
-// case; it only sets an explicit class when the percentage alone would not
-// capture the urgency the bucket actually carries: saturated (pinned at
-// the cap, extra-usage billing has kicked in) or a burn-rate projection
+// bucketValue turns one NowWindow into a value record. weaverbird has no
+// host-side threshold map (SPEC.md section 4.1: class resolution is one
+// rule, the class on the record), so a percentage never derives a color on
+// its own. bucketValue computes its own class via
+// classForPercentage, then overrides it when the percentage alone would
+// not capture the urgency the bucket actually carries: saturated (pinned
+// at the cap, extra-usage billing has kicked in) or a burn-rate projection
 // that would hit 100% before the natural reset, while the percentage
 // itself is still below the danger threshold.
 //
@@ -159,7 +165,6 @@ func weaverbirdValue(_ wb.Session, _ []string) ([]wb.Value, error) {
 // so it takes the same single class as the rest of the clause. No second
 // color needed inside one widget.
 func bucketValue(id, label string, w *routes.NowWindow) wb.Value {
-	pct := float64(w.Pct)
 	text := fmt.Sprintf("%s %d%%", label, w.Pct)
 	switch {
 	case w.Saturated:
@@ -170,16 +175,40 @@ func bucketValue(id, label string, w *routes.NowWindow) wb.Value {
 		text += " (" + fmtResetDur(w.TimeToResetMS) + ")"
 	}
 
-	v := wb.Value{
-		ID:         id,
-		Text:       text,
-		Short:      fmt.Sprintf("%d%%", w.Pct),
-		Percentage: &pct,
-	}
+	var explicit string
 	if (w.Saturated || w.LimitOK) && w.Pct < 90 {
-		v.Class = wb.ClassDanger
+		explicit = wb.ClassDanger
 	}
-	return v
+
+	return wb.Value{
+		ID:        id,
+		FullText:  text,
+		ShortText: fmt.Sprintf("%d%%", w.Pct),
+		Class:     classForPercentage(explicit, w.Pct),
+	}
+}
+
+// classForPercentage is bloodhound's own severity rule, computed here
+// because the provider is the only party that can: weaverbird takes the
+// class off the record and never derives one (weaverbird SPEC.md section
+// 4.1). Danger at or above 90,
+// warn at or above 70, else ok. explicit, when non-empty, is an
+// already-decided override (bucketValue's saturated/limit-projection
+// case) and always wins outright — matching ResolveClass's "explicit class
+// on the record wins" rule, so intent stated directly by the provider
+// still beats the threshold calculation.
+func classForPercentage(explicit string, pct int) string {
+	if explicit != "" {
+		return explicit
+	}
+	switch {
+	case pct >= 90:
+		return wb.ClassDanger
+	case pct >= 70:
+		return wb.ClassWarn
+	default:
+		return wb.ClassOK
+	}
 }
 
 // burnValue is the opt-in "bloodhound.burn" widget, built from the same
@@ -217,18 +246,18 @@ func burnValue(w *routes.NowWindow) *wb.Value {
 			class = wb.ClassDanger
 		}
 		return &wb.Value{
-			ID:    "bloodhound.burn",
-			Text:  fmt.Sprintf("burn 5h -> 100%% %s", eta),
-			Short: eta,
-			Class: class,
+			ID:        "bloodhound.burn",
+			FullText:  fmt.Sprintf("burn 5h -> 100%% %s", eta),
+			ShortText: eta,
+			Class:     class,
 		}
 	case w.BurnOK:
 		rate := fmtBurnRate(w.BurnPctPerHour)
 		return &wb.Value{
-			ID:    "bloodhound.burn",
-			Text:  "burn 5h " + rate,
-			Short: rate,
-			Class: wb.ClassNeutral,
+			ID:        "bloodhound.burn",
+			FullText:  "burn 5h " + rate,
+			ShortText: rate,
+			Class:     wb.ClassNeutral,
 		}
 	default:
 		return nil
@@ -268,27 +297,27 @@ func pollValue(p *routes.NowPoll, staleAfterS int) *wb.Value {
 	}
 	if !p.ParseOK {
 		return &wb.Value{
-			ID:    "bloodhound.poll",
-			Text:  "extraction failed",
-			Short: "failed",
-			Class: wb.ClassDanger,
+			ID:        "bloodhound.poll",
+			FullText:  "extraction failed",
+			ShortText: "failed",
+			Class:     wb.ClassDanger,
 		}
 	}
 
 	age := fmtResetDur(p.AgeS * 1000)
 	if staleAfterS > 0 && p.AgeS > int64(staleAfterS) {
 		return &wb.Value{
-			ID:    "bloodhound.poll",
-			Text:  "poll stale " + age,
-			Short: age,
-			Class: wb.ClassStale,
+			ID:        "bloodhound.poll",
+			FullText:  "poll stale " + age,
+			ShortText: age,
+			Class:     wb.ClassStale,
 		}
 	}
 	return &wb.Value{
-		ID:    "bloodhound.poll",
-		Text:  "poll " + age,
-		Short: age,
-		Class: wb.ClassNeutral,
+		ID:        "bloodhound.poll",
+		FullText:  "poll " + age,
+		ShortText: age,
+		Class:     wb.ClassNeutral,
 	}
 }
 
