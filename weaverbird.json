@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/PeterSR/claude-code-weaverbird/main/schema/manifest.schema.json",
+  "v": 1,
+  "name": "bloodhound",
+  "requires": {
+    "bloodhound": { "hint": "go install github.com/PeterSR/claude-code-bloodhound/cmd/bloodhound@latest" }
+  },
+  "providers": [
+    {
+      "name": "bloodhound",
+      "order": 10,
+      "spec": { "exec": ["bloodhound", "weaverbird", "spec"] },
+      "value": { "exec": ["bloodhound", "weaverbird", "value"] }
+    }
+  ]
+}
