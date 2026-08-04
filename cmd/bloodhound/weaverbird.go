@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -11,29 +12,127 @@ import (
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/nowstate"
+	"github.com/PeterSR/claude-code-bloodhound/internal/sessioninsight"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
-// weaverbirdSpec declares bloodhound's two default quota gauges plus two
-// opt-in detail widgets to a weaverbird host. All four are kind: text
+// The three single-cell markers a bucket's parenthetical uses to label
+// what each duration inside it means. They exist so the parenthetical can
+// carry the projected-100% ETA and the natural reset at the same time
+// without either being ambiguous: before this, a limit projection
+// suppressed the reset countdown entirely, because "(33m)" alone could
+// not say which of the two it was.
+//
+// These were picked by rendering a probe sheet of candidates in a real
+// terminal, not by reading width tables, because the two ways a glyph
+// goes wrong here look nothing alike on paper and are easy to confuse
+// with each other:
+//
+//   - Double width. U+26A1, U+26D4 and even U+2588 FULL BLOCK take two
+//     cells in common terminal fonts, silently costing a column the width
+//     cascade already budgeted. The tell is that everything after the
+//     glyph shifts right by one.
+//   - Glyph overhang. The terminal allots one cell, but the font draws
+//     wider than it and bleeds over the neighbouring cell. Nothing
+//     shifts; the character after it is simply painted on. This is what
+//     U+26A0 does, and limitPad below is the fix.
+//
+// U+27F3 was the first glyphReset and lost to U+21BB for a third reason
+// again: the supplemental arrows blocks have far thinner monospace
+// coverage than the base Arrows block, so it landed as a tofu-adjacent
+// shape. Prefer Arrows (U+2190..21FF) and Geometric Shapes
+// (U+25A0..25FF) when picking a replacement.
+const (
+	glyphLimit     = "⚠" // U+26A0: burn rate projects this window hits 100% before its reset
+	glyphSaturated = "⊘" // U+2298: pinned at the cap, pct has stopped moving and extra usage is billing
+	glyphReset     = "↻" // U+21BB: time until this window's natural reset
+
+	// limitPad sits between glyphLimit and its duration and is load
+	// bearing, not spacing taste. U+26A0's glyph overhangs its cell to
+	// the right in many terminal fonts and would otherwise be drawn over
+	// the first digit — "⚠33m" renders as an unreadable smudge where the
+	// triangle and the 3 share a cell. A space gives the overhang
+	// somewhere harmless to land, which is what lets the mark keep the
+	// one code point that unambiguously reads as a warning.
+	//
+	// glyphSaturated and glyphReset need no equivalent: both are drawn
+	// well within their cell, so padding them would cost a column and buy
+	// nothing.
+	limitPad = " "
+)
+
+// Tuning for fmtDeadline. Consts rather than config fields: each is a
+// judgment about what a human reads well, not about one machine's setup,
+// and none of them is worth the plumbing of a config knob until somebody
+// actually wants a different answer. Moving any of them into
+// config.Config later is additive.
+const (
+	// absoluteResetAfter is where a countdown stops being the more useful
+	// rendering. Under a day, "19h" is something you can act on directly.
+	// Past it, "2d15h" makes you do calendar arithmetic to answer the
+	// question you actually asked, which is what day you get quota back.
+	absoluteResetAfter = 24 * time.Hour
+
+	// midnightGrace is how far either side of local midnight a reset may
+	// fall and still print as a bare day name. Nothing about a weekly
+	// quota is precise enough for three hours to change a plan, and
+	// "fri" is materially easier to read than "fri 23:00".
+	//
+	// The band is applied by rounding to the NEAREST midnight and naming
+	// the day that midnight opens, not by naming the day the reset falls
+	// on. That is what makes the two halves of the band equivalent: a
+	// Thursday 22:00 reset and a Friday 02:00 reset both print "fri",
+	// which is the whole point of having a grace band. It also fails in
+	// the safe direction — the named day is never earlier than the real
+	// reset, so the label never promises quota back before it exists.
+	midnightGrace = 3 * time.Hour
+
+	// maxNamedDayOffset is the largest number of calendar days ahead a
+	// weekday name can unambiguously identify: today plus six covers
+	// seven distinct names, and day seven repeats today's. A weekly
+	// window can sit a full 7 days out, and rounding up to a midnight can
+	// push it further, so without this bound a reset a week away would
+	// print the current weekday and read as "already reset".
+	maxNamedDayOffset = 6
+)
+
+// weaverbirdSpec declares bloodhound's three default widgets plus three
+// opt-in detail widgets to a weaverbird host. All six are kind: text
 // (weaverbird SPEC.md section 3.2). kind: meter is deliberately ruled out
 // for .5h/.week: bloodhound wants control over the exact string, so it
 // keeps composing its own and is not a candidate for meter/series/
 // timestamp regardless of what the shape of any one widget might suggest.
 //
-// Two default widgets, not one: 5h and week are independently meaningful
+// Two default gauges, not one: 5h and week are independently meaningful
 // facts, a user tracks each on its own, so weaverbird must be free to
 // order, color, cache, and drop them separately under width pressure. Per
 // weaverbird's widget-split rule (SPEC.md section 3.3 and 6) that makes
 // them two widgets, not a single widget carrying two colored spans.
 //
-// bloodhound.burn and bloodhound.poll are opt-in (Default: wb.OptIn()):
-// useful detail a user can add to their layout, but noise in the common
-// case where 5h/week already say enough. They stay out of the implicit
-// default group and the no-layout view, reachable only by widget id or via
-// the "bloodhound.detail" group declared below. Keeping the two default
-// widgets first in this slice matters: the implicit default group is equal
-// to Widgets in this order, so the opt-in pair must not lead it.
+// The two bloodhound.resume.* widgets are one cost priced against two
+// pools, and they are a pair for exactly the reason the two gauges above
+// are: a cold resume that is 13% of the 5-hour window is around 1.4% of
+// the weekly one, which is danger and info respectively. A value record
+// carries a single class, so folding both readings into one widget would
+// force one of the two colors to be wrong. Two numbers, two severities,
+// two widgets.
+//
+// bloodhound.resume.5h is the third default and the one always-on widget
+// here that is silent most of the time by construction: it emits a record
+// only while the current session's prompt cache has actually gone cold
+// (see resumeValues). A widget that suppresses itself does not need to be
+// opt-in — the cost of leaving it on is zero in every render where it has
+// nothing to say — so it earns a place in the default group that
+// always-on detail like burn and poll does not.
+//
+// bloodhound.resume.week, bloodhound.burn and bloodhound.poll are opt-in
+// (Default: wb.OptIn()): useful detail a user can add to their layout, but
+// noise in the common case where 5h/week already say enough. They stay out
+// of the implicit default group and the no-layout view, reachable only by
+// widget id or via the "bloodhound.detail" group declared below. Keeping
+// the three default widgets first in this slice matters: the implicit
+// default group is equal to Widgets in this order, so the opt-in widgets
+// must not lead it.
 var weaverbirdSpec = wb.Spec{
 	V:        1,
 	Provider: "bloodhound",
@@ -51,6 +150,44 @@ var weaverbirdSpec = wb.Spec{
 			Title:    "Weekly quota",
 			Kind:     wb.KindText,
 			Priority: 20,
+			Cache:    &wb.Cache{TTLSec: 10},
+		},
+		{
+			// Highest priority of the six, which reads odd for a
+			// widget that is usually absent and is exactly why it
+			// wins: priority only ever arbitrates width pressure, and
+			// the renders where this widget exists at all are the
+			// renders where it is the most actionable thing on the
+			// line. The two gauges it outranks report a slow-moving
+			// number the user can re-read on the next render; a cold
+			// cache is a cost the very next turn pays, and dropping
+			// it under width pressure drops it for good.
+			ID:       "bloodhound.resume.5h",
+			Title:    "Cold-cache resume cost (5h)",
+			Kind:     wb.KindText,
+			Priority: 25,
+			DataDeps: []string{"session"},
+			Cache:    &wb.Cache{TTLSec: 10},
+		},
+		{
+			// The same cost priced against the weekly pool, and
+			// deliberately NOT ranked like its 5h twin. The weekly
+			// pool is roughly an order of magnitude larger, so the
+			// same cold resume is a single-digit fraction of it at
+			// worst — real, worth showing, but never the thing you
+			// drop a gauge to keep. Priority 8 puts it first out under
+			// width pressure among the top-row widgets, which is the
+			// same "how actionable is this reading" test that put its
+			// twin at 25, applied honestly to a smaller number.
+			//
+			// Opt-in for the same reason: it is detail, in a way the
+			// 5h reading is not.
+			ID:       "bloodhound.resume.week",
+			Title:    "Cold-cache resume cost (weekly)",
+			Kind:     wb.KindText,
+			Priority: 8,
+			DataDeps: []string{"session"},
+			Default:  wb.OptIn(),
 			Cache:    &wb.Cache{TTLSec: 10},
 		},
 		{
@@ -74,9 +211,13 @@ var weaverbirdSpec = wb.Spec{
 	},
 	Groups: []wb.Group{
 		{
-			ID:      "bloodhound.detail",
-			Title:   "Quota detail",
-			Widgets: []string{"bloodhound.5h", "bloodhound.week", "bloodhound.burn", "bloodhound.poll"},
+			ID:    "bloodhound.detail",
+			Title: "Quota detail",
+			Widgets: []string{
+				"bloodhound.5h", "bloodhound.week",
+				"bloodhound.resume.5h", "bloodhound.resume.week",
+				"bloodhound.burn", "bloodhound.poll",
+			},
 		},
 	},
 }
@@ -118,9 +259,18 @@ func init() {
 // widgets this render" rather than an error: a quiet bloodhound section is
 // better than a weaverbird render that fails because one provider had
 // nothing to say yet.
-func weaverbirdValue(_ wb.Session, _ []string) ([]wb.Value, error) {
+//
+// The pool-state widgets and bloodhound.resume are computed independently
+// of each other, and a failure in one does not silence the other. They
+// read disjoint data — /usage observations versus the local turns table —
+// so a machine that has ingested transcripts but has not landed a
+// successful /usage poll yet can still price a cold resume, and vice
+// versa.
+func weaverbirdValue(sess wb.Session, requested []string) ([]wb.Value, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
+	now := time.Now()
 
 	s, err := store.Open(ctx)
 	if err != nil {
@@ -128,25 +278,51 @@ func weaverbirdValue(_ wb.Session, _ []string) ([]wb.Value, error) {
 	}
 	defer s.Close()
 
-	out, err := nowstate.Compute(ctx, s, time.Now())
-	if err != nil || out == nil {
-		return nil, nil
+	var vals []wb.Value
+	if out, err := nowstate.Compute(ctx, s, now); err == nil && out != nil {
+		if out.Session != nil {
+			vals = append(vals, bucketValue("bloodhound.5h", "5h", out.Session, now))
+		}
+		if out.Week != nil {
+			vals = append(vals, bucketValue("bloodhound.week", "wk", out.Week, now))
+		}
+		if v := burnValue(out.Session); v != nil {
+			vals = append(vals, *v)
+		}
+		if v := pollValue(out.LastPoll, out.StaleAfterS); v != nil {
+			vals = append(vals, *v)
+		}
 	}
 
-	var vals []wb.Value
-	if out.Session != nil {
-		vals = append(vals, bucketValue("bloodhound.5h", "5h", out.Session))
-	}
-	if out.Week != nil {
-		vals = append(vals, bucketValue("bloodhound.week", "wk", out.Week))
-	}
-	if v := burnValue(out.Session); v != nil {
-		vals = append(vals, *v)
-	}
-	if v := pollValue(out.LastPoll, out.StaleAfterS); v != nil {
-		vals = append(vals, *v)
+	// The only widgets gated on `requested`. The four above are all read
+	// off a single nowstate.Compute the provider runs regardless, so
+	// filtering them here would save nothing and weaverbird drops what it
+	// did not ask for anyway (SPEC.md section 2.2: the ids are a hint).
+	// These cost extra queries against the turns table, which is worth not
+	// paying on every render when the user's layout asked for neither.
+	// One gate for both, since they share the query that makes them
+	// expensive; weaverbird filters out whichever of the pair the layout
+	// did not want.
+	if wants(requested, "bloodhound.resume.5h") || wants(requested, "bloodhound.resume.week") {
+		vals = append(vals, resumeValues(ctx, s, sess.SessionID, now)...)
 	}
 	return vals, nil
+}
+
+// wants reports whether weaverbird asked for id this render. An empty
+// requested means "everything you have": weaverbird appends the ids it
+// wants as trailing arguments, so no ids at all is a caller running the
+// subcommand by hand rather than a host asking for nothing.
+func wants(requested []string, id string) bool {
+	if len(requested) == 0 {
+		return true
+	}
+	for _, r := range requested {
+		if r == id {
+			return true
+		}
+	}
+	return false
 }
 
 // bucketValue turns one NowWindow into a value record. weaverbird has no
@@ -159,20 +335,52 @@ func weaverbirdValue(_ wb.Session, _ []string) ([]wb.Value, error) {
 // that would hit 100% before the natural reset, while the percentage
 // itself is still below the danger threshold.
 //
-// The parenthetical qualifier ("(saturated)", "(limit 33m)") stays inside
-// this one widget's text rather than becoming a widget of its own: it is
-// not a fact that stands alone, it only explains this gauge's own number,
-// so it takes the same single class as the rest of the clause. No second
-// color needed inside one widget.
-func bucketValue(id, label string, w *routes.NowWindow) wb.Value {
+// The parenthetical qualifier stays inside this one widget's text rather
+// than becoming a widget of its own: it is not a fact that stands alone,
+// it only explains this gauge's own number, so it takes the same single
+// class as the rest of the clause. No second color needed inside one
+// widget.
+//
+// It carries up to two marks, each a single-cell glyph followed by its
+// duration, and the pressure mark never suppresses the reset countdown:
+//
+//	5h 72% (↻3h12m)         nothing unusual, resets in 3h12m
+//	5h 72% (⚠ 33m ↻3h12m)   projects 100% in 33m, well before that reset
+//	5h 99% (⊘ ↻3h12m)       already pinned at the cap, resets in 3h12m
+//	wk 39% (↻fri 15:30)     a day or more out, so named rather than counted
+//
+// Only the reset mark can go absolute (see fmtDeadline). The limit mark
+// stays a countdown at any distance on its own merits: it is a projection
+// off a measured burn slope with real error bars, and naming a weekday and
+// a clock time for it would dress that up in a precision it does not have.
+//
+// The earlier form spent the whole parenthetical on whichever mark won
+// and dropped the other, so precisely when a window was under pressure —
+// the moment "how long until this clears?" is the actual question — the
+// answer to it disappeared. Two marks cost two glyphs plus a space over
+// the old "(limit 33m)", which is cheap enough that width pressure is
+// weaverbird's problem to solve via ShortText, not a reason to withhold
+// the fact. Saturated carries no duration of its own because there isn't
+// one: the pct has stopped moving, so there is no slope left to project
+// an ETA from.
+func bucketValue(id, label string, w *routes.NowWindow, now time.Time) wb.Value {
 	text := fmt.Sprintf("%s %d%%", label, w.Pct)
+
+	var marks []string
 	switch {
 	case w.Saturated:
-		text += " (saturated)"
+		// Saturated outranks the limit projection rather than joining
+		// it: "will hit the cap" is not worth saying next to "is at the
+		// cap".
+		marks = append(marks, glyphSaturated)
 	case w.LimitOK:
-		text += " (limit " + fmtResetDur(w.LimitETAMS) + ")"
-	case w.TimeToResetMS > 0:
-		text += " (" + fmtResetDur(w.TimeToResetMS) + ")"
+		marks = append(marks, glyphLimit+limitPad+fmtResetDur(w.LimitETAMS))
+	}
+	if w.TimeToResetMS > 0 {
+		marks = append(marks, glyphReset+fmtReset(w, now))
+	}
+	if len(marks) > 0 {
+		text += " (" + strings.Join(marks, " ") + ")"
 	}
 
 	var explicit string
@@ -319,6 +527,241 @@ func pollValue(p *routes.NowPoll, staleAfterS int) *wb.Value {
 		ShortText: age,
 		Class:     wb.ClassNeutral,
 	}
+}
+
+// Severity thresholds for a cold-resume cost, as a percentage of the
+// 5-hour window it is charged against. Under resumeWarnPct the cost is
+// noise against a 100-point pool — you would need thirty-odd cold resumes
+// to spend the window. Past resumeDangerPct one resume costs a tenth of
+// it, which is the point where starting fresh or trimming the session is
+// the cheaper move, so the widget says so in the same color a 90%+ gauge
+// would.
+const (
+	resumeWarnPct   = 3.0
+	resumeDangerPct = 10.0
+)
+
+// resumeValues builds the "bloodhound.resume.*" widgets: what it will
+// cost to carry the current session forward now that its prompt cache has
+// gone cold. Silent in every other case, which is most of them — a warm
+// session has nothing to pay and nothing to say.
+//
+// The underlying figure is sessioninsight.ColdResumeCostCWTokens, the same
+// one the Now page and the legacy `bloodhound status` line already show,
+// so these can never disagree with them about the price. It is a floor,
+// not a forecast: the conversation prefix is fixed and has to be re-cached
+// at the cache_create rate, but the next prompt and response are on top of
+// that and unknowable from here. sessioninsight only populates it once the
+// session's age has actually crossed the TTL its last turn cached at (5m
+// or 1h), so "cold" here is measured, not assumed.
+//
+// That one cost is then divided by each pool's own tokens-per-1% median to
+// get two percentages. Only the conversion differs between the widgets —
+// there is a single cold-resume cost, and the two records are two ways of
+// reading it, which is why this is one function and one query rather than
+// two independent widget builders.
+//
+// sessionUUID comes from the Claude Code session JSON weaverbird pipes in
+// on stdin. Unlike internal/statusline, an unknown or absent id does not
+// fall back to the most-recent active session. The two surfaces differ
+// here for a reason: a fallback answers "is anything cold?", and these
+// widgets answer "is the session you are typing in right now cold?" —
+// quoting another session's resume price next to the current session's
+// quota would be a wrong answer, not a degraded one. A session Claude Code
+// has opened but bloodhound has not ingested yet is simply silent until
+// the ingester catches up.
+func resumeValues(ctx context.Context, s *store.Store, sessionUUID string, now time.Time) []wb.Value {
+	if sessionUUID == "" {
+		return nil
+	}
+	ref, err := sessioninsight.BySessionUUID(ctx, s.DB, sessionUUID)
+	if err != nil || ref == nil {
+		return nil
+	}
+
+	sessionPerPct, _, _, hasSessionCal, _ := s.LatestCalibrationMedian(ctx, "session", 10)
+	ins := sessioninsight.ForSession(ctx, s.DB, *ref, now, sessionPerPct, hasSessionCal)
+	if ins == nil || ins.ColdResumeCostCWTokens <= 0 {
+		return nil
+	}
+
+	// ColdResumeCostPct is already the 5h conversion, done by ForSession
+	// against the median passed in above. Reusing it rather than dividing
+	// again here keeps this widget on exactly the arithmetic the Now page
+	// uses; only the weekly pool needs a conversion of its own.
+	out := []wb.Value{resumeRecord("bloodhound.resume.5h", "5h", ins.ColdResumeCostPct)}
+
+	// The weekly widget is silent without a weekly calibration rather than
+	// falling back to the unpriced form. Unpriced, it would say only "the
+	// cache is cold", which the 5h record beside it already says — a
+	// second widget repeating it is noise, where the first one saying it
+	// is the whole point.
+	if weekPerPct, _, _, ok, err := s.LatestCalibrationMedian(ctx, "week", 10); err == nil && ok && weekPerPct > 0 {
+		out = append(out, resumeRecord("bloodhound.resume.week", "wk",
+			ins.ColdResumeCostCWTokens/weekPerPct))
+	}
+	return out
+}
+
+// resumeRecord renders one pool's view of the cold-resume cost. The pool
+// label leads, matching the two gauges ("5h 72%", "wk 39%") so the bar
+// reads consistently left to right, and avoiding the misparse that puts
+// it last: "resume 5h" beside a line full of durations reads as "resume
+// in 5 hours" rather than "against the 5h pool".
+//
+// pct <= 0 means there is no calibration to price this pool with. The
+// record still fires, because knowing the cache is cold is actionable on
+// its own, and it says exactly that instead of printing a raw
+// cost-weighted token count, which is a number with no scale a user can
+// act on.
+func resumeRecord(id, pool string, pct float64) wb.Value {
+	p := fmtCostPct(pct)
+	if p == "" {
+		return wb.Value{
+			ID:        id,
+			FullText:  pool + " resume cold",
+			ShortText: pool + " cold",
+			Class:     wb.ClassInfo,
+		}
+	}
+	return wb.Value{
+		ID:        id,
+		FullText:  pool + " resume " + p,
+		ShortText: pool + p,
+		Class:     classForResumeCost(pct),
+	}
+}
+
+// classForResumeCost grades a cold-resume cost against the thresholds
+// above. Info rather than ok at the low end: an unavoidable cost the user
+// is about to pay is never "ok" news, it is just small news, and ok is
+// the class the two quota gauges use for a healthy reading.
+func classForResumeCost(pct float64) string {
+	switch {
+	case pct >= resumeDangerPct:
+		return wb.ClassDanger
+	case pct >= resumeWarnPct:
+		return wb.ClassWarn
+	default:
+		return wb.ClassInfo
+	}
+}
+
+// fmtCostPct renders a cost as a signed, compact percentage: "+4%", or
+// "+<1%" when it rounds away to nothing but is not zero. Returns "" when
+// there is no figure to render (no calibration), which the caller reads
+// as "say it is cold without pricing it".
+//
+// The leading "+" is load-bearing: without it "resume 4%" sits on a line
+// beside "5h 72%" and reads as a fourth gauge at 4% rather than as 4
+// points added to the one next to it. Mirrors internal/statusline's own
+// renderPct and its "❄ cold +5%" output, re-declared here for the same
+// reason as fmtResetDur below.
+func fmtCostPct(v float64) string {
+	if v <= 0 {
+		return ""
+	}
+	if v < 1 {
+		return "+<1%"
+	}
+	return fmt.Sprintf("+%d%%", int(v+0.5))
+}
+
+// fmtReset renders a window's reset mark, preferring the parsed absolute
+// timestamp so fmtDeadline can name a weekday, and falling back to the
+// precomputed countdown when there is no parsable reset to name.
+//
+// The fallback is not dead code: nowstate.buildWindow leaves ResetTSISO
+// empty whenever /usage did not carry a reset it could parse, and
+// TimeToResetMS is then the only thing left. It cannot disagree with
+// fmtDeadline's own arithmetic, because now here is the same now Compute
+// derived TimeToResetMS from.
+func fmtReset(w *routes.NowWindow, now time.Time) string {
+	if at, err := time.Parse(time.RFC3339, w.ResetTSISO); err == nil {
+		return fmtDeadline(at, now)
+	}
+	return fmtResetDur(w.TimeToResetMS)
+}
+
+// fmtDeadline renders when a deadline falls, choosing between a countdown
+// and an absolute local weekday by how far out it is:
+//
+//	19h          under absoluteResetAfter: a countdown answers it directly
+//	fri          beyond that, within midnightGrace of a local midnight
+//	fri 15:30    beyond that, anywhere else in the day
+//	7d           too far out for a weekday name to be unique (see below)
+//
+// This is deliberately general rather than week-shaped, and the callers
+// need no bucket-specific branching because of it: a 5-hour window is
+// never a day away, so it can only ever take the first branch, while a
+// weekly one usually takes the second or third. The rule is about the
+// distance, not about which quota is being described.
+//
+// now supplies the zone as well as the instant. Reset timestamps arrive
+// as ISO-8601 UTC and a weekday computed in UTC is simply wrong for the
+// person reading it — a Friday 23:30 UTC reset is Saturday on a
+// Copenhagen clock. Taking the zone from the caller's own clock rather
+// than from time.Local keeps the function pure and testable.
+//
+// The maxNamedDayOffset fallback is the subtle one. A weekly window can
+// legitimately sit almost 7 days out, at which point "fri" names the same
+// weekday as today and reads as though the reset already happened. When
+// the named day is too far ahead to be unique, the countdown is the only
+// honest rendering left, so it goes back to it.
+func fmtDeadline(at, now time.Time) string {
+	d := at.Sub(now)
+	countdown := fmtResetDur(d.Milliseconds())
+	if d < absoluteResetAfter {
+		return countdown
+	}
+
+	local := at.In(now.Location())
+
+	// named is the day whose name gets printed, which is not always the
+	// day the reset falls on: inside the grace band it is the day opened
+	// by the nearest midnight, which for a late-evening reset is the day
+	// after. bare tracks that case, since a rounded deadline has no
+	// time of day left worth printing.
+	named, bare := local, false
+	if m, ok := nearestMidnight(local); ok {
+		named, bare = m, true
+	}
+
+	if n := daysBetween(now.In(now.Location()), named); n < 1 || n > maxNamedDayOffset {
+		return countdown
+	}
+
+	name := strings.ToLower(named.Format("Mon"))
+	if bare {
+		return name
+	}
+	return name + " " + local.Format("15:04")
+}
+
+// nearestMidnight returns the local midnight closest to t and whether t is
+// within midnightGrace of it. The two candidates are the midnight that
+// opened t's own day and the one that opens the next; ties (t exactly at
+// noon) go to the earlier, which cannot matter since noon is never inside
+// any sane grace band.
+func nearestMidnight(t time.Time) (time.Time, bool) {
+	start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	next := start.AddDate(0, 0, 1)
+	if t.Sub(start) <= next.Sub(t) {
+		return start, t.Sub(start) <= midnightGrace
+	}
+	return next, next.Sub(t) <= midnightGrace
+}
+
+// daysBetween counts whole calendar days from's date to to's date in
+// from's zone, which is not the same as dividing their difference by 24
+// hours: across a DST boundary a calendar day is 23 or 25 hours long, and
+// truncating that would put a deadline one day off twice a year. Both
+// ends are floored to midnight first so only the dates matter, and the
+// rounding then absorbs the hour a DST shift adds or removes.
+func daysBetween(from, to time.Time) int {
+	f := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, from.Location())
+	t := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, from.Location())
+	return int(t.Sub(f).Hours()/24 + 0.5)
 }
 
 // fmtResetDur renders a millisecond duration the same coarse-to-fine way
