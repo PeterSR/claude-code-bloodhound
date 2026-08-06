@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
+	"github.com/PeterSR/claude-code-bloodhound/internal/events/sensors"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
 )
@@ -58,6 +59,13 @@ re-learn the extractor against a fresh capture.`,
 		obs, recErr := s.RecordUsage(ctx, res, fetchErr)
 		if recErr != nil {
 			return fmt.Errorf("record: %w", recErr)
+		}
+
+		// Reconcile here too, so a cron-scheduled install (no daemon, just
+		// `bloodhound poll` on a timer) records the same transitions and
+		// fires the same one-shots a daemon-scheduled one does.
+		if _, err := sensors.Run(ctx, s, time.Now()); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warn: events reconcile: %v\n", err)
 		}
 
 		w := cmd.OutOrStdout()
