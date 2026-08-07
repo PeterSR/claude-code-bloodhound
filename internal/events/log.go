@@ -187,6 +187,25 @@ func Levels(ctx context.Context, q queryer) ([]Level, error) {
 	return out, rows.Err()
 }
 
+// PruneLevels drops session-scoped level rows that have not moved since
+// cutoff.
+//
+// Session levels are the one part of the table that grows without bound: a
+// sensor that stops reporting a session (it aged out of the recent window)
+// deliberately leaves its level alone, since absence is not evidence. That is
+// correct per-tick and a leak over months. Meter levels carry no session uuid
+// and are left alone, because a bucket sitting in the same state for a fortnight
+// is ordinary rather than stale.
+func PruneLevels(ctx context.Context, db *sql.DB, cutoffMS int64) (int64, error) {
+	r, err := db.ExecContext(ctx,
+		`DELETE FROM event_levels WHERE session_uuid != '' AND since_ms < ?`, cutoffMS)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	return n, nil
+}
+
 // Prune deletes events older than cutoff, never dropping below keepFromID.
 //
 // keepFromID is the floor a caller passes so retention cannot silently swallow

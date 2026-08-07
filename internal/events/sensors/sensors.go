@@ -38,6 +38,7 @@ func Run(ctx context.Context, s *store.Store, now time.Time) (events.Stats, erro
 	if err == nil {
 		w.Pool = pool
 	}
+	w.TokensPerPctCW, _, _, w.HasCalibration, _ = s.LatestCalibrationMedian(ctx, "session", 10)
 
 	st, rerr := events.Reconcile(ctx, s.DB, w)
 	if err != nil {

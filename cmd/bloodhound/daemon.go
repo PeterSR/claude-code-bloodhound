@@ -375,8 +375,13 @@ func runEventRetentionOnce(ctx context.Context, s *store.Store, w io.Writer) {
 		fmt.Fprintf(w, "[daemon] events: prune hooks: %v\n", err)
 		return
 	}
-	if n > 0 || hn > 0 {
-		fmt.Fprintf(w, "[daemon] events: pruned %d events, %d finished one-shots\n", n, hn)
+	ln, err := events.PruneLevels(ctx, s.DB, cutoff)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] events: prune levels: %v\n", err)
+		return
+	}
+	if n > 0 || hn > 0 || ln > 0 {
+		fmt.Fprintf(w, "[daemon] events: pruned %d events, %d finished one-shots, %d dormant session levels\n", n, hn, ln)
 	}
 }
 

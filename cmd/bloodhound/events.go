@@ -11,10 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/events"
 	"github.com/PeterSR/claude-code-bloodhound/internal/events/sensors"
-	"github.com/PeterSR/claude-code-bloodhound/internal/nowstate"
+	"github.com/PeterSR/claude-code-bloodhound/internal/eventstate"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
@@ -86,26 +85,6 @@ func init() {
 	rootCmd.AddCommand(eventsCmd)
 }
 
-// eventsEnvelope is the batch response shape. Freshness travels with the
-// events rather than being a separate call, so a consumer cannot act on the
-// contents without having been handed the means to distrust them.
-type eventsEnvelope struct {
-	OK          bool            `json:"ok"`
-	NowMS       int64           `json:"server_now_ms"`
-	Cursor      cursorRange     `json:"cursor"`
-	LastPoll    *routes.NowPoll `json:"last_poll"`
-	StaleAfterS int             `json:"stale_after_s,omitempty"`
-	Stale       bool            `json:"stale"`
-	Levels      []events.Level  `json:"levels,omitempty"`
-	Events      []events.Event  `json:"events,omitempty"`
-}
-
-type cursorRange struct {
-	From int64 `json:"from"`
-	To   int64 `json:"to"`
-	More bool  `json:"more"`
-}
-
 // parseSince accepts a cursor id or a duration. Returns (sinceID, sinceMS).
 func parseSince(arg string, now time.Time) (int64, int64, error) {
 	if arg == "" {
@@ -167,7 +146,7 @@ func runEvents(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	env, err := buildEnvelope(ctx, s, now, f, eventsLevels)
+	env, err := eventstate.Compute(ctx, s, now, f, eventsLevels)
 	if err != nil {
 		return err
 	}
@@ -175,44 +154,6 @@ func runEvents(cmd *cobra.Command, args []string) error {
 		return writeJSONOut(w, env)
 	}
 	return writeEventsHuman(w, env, eventsLevels)
-}
-
-func buildEnvelope(ctx context.Context, s *store.Store, now time.Time, f events.Filter, withLevels bool) (*eventsEnvelope, error) {
-	env := &eventsEnvelope{OK: true, NowMS: now.UnixMilli()}
-
-	// Freshness comes from the same read as the events, not a second call.
-	if pool, err := nowstate.Compute(ctx, s, now); err == nil {
-		env.LastPoll = pool.LastPoll
-		env.StaleAfterS = pool.StaleAfterS
-		if pool.LastPoll != nil && pool.StaleAfterS > 0 {
-			env.Stale = pool.LastPoll.AgeS > int64(pool.StaleAfterS)
-		}
-	}
-
-	if withLevels {
-		lv, err := events.Levels(ctx, s.DB)
-		if err != nil {
-			return nil, err
-		}
-		env.Levels = lv
-	}
-
-	evs, err := events.Query(ctx, s.DB, f)
-	if err != nil {
-		return nil, err
-	}
-	env.Events = evs
-	env.Cursor.From = f.SinceID
-	env.Cursor.To = f.SinceID
-	if n := len(evs); n > 0 {
-		env.Cursor.To = evs[n-1].ID
-		limit := f.Limit
-		if limit <= 0 {
-			limit = events.DefaultLimit
-		}
-		env.Cursor.More = n >= limit
-	}
-	return env, nil
 }
 
 // followEvents blocks, polling the table and calling emit for each new event
@@ -291,7 +232,7 @@ func scopeSuffix(sc events.Scope) string {
 	return ""
 }
 
-func writeEventsHuman(w io.Writer, env *eventsEnvelope, withLevels bool) error {
+func writeEventsHuman(w io.Writer, env *eventstate.Response, withLevels bool) error {
 	if env.LastPoll == nil {
 		fmt.Fprintln(w, "no /usage observation captured yet, so nothing has been evaluated.")
 	} else if env.Stale {

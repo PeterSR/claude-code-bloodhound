@@ -89,6 +89,14 @@ type World struct {
 	DB   *sql.DB
 	Now  time.Time
 	Pool *routes.NowResponse
+
+	// TokensPerPctCW converts cost-weighted tokens into percentage points.
+	// Shared here for the same reason Pool is: several sensors want it and
+	// none of them should be re-deriving it. HasCalibration is false when
+	// there is no usable run yet, in which case the pct-denominated fields on
+	// an Insight are absent rather than zero.
+	TokensPerPctCW float64
+	HasCalibration bool
 }
 
 // Sensor answers "what is true now" for one family of facts. Pure: the same
