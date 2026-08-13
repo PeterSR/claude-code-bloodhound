@@ -260,7 +260,19 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	// validated and persisted. Gated by config so users who want manual
 	// control (or who don't want self-heal consuming usage on their
 	// account) can flip it off and use the Debug page's manual retrain.
-	if cfg.ExtractorSelfHeal && fetchErr == nil && !res.OK {
+	//
+	// Gated on the panel actually having rendered. A capture that timed
+	// out while /usage was still loading has no percentages on screen for
+	// any extractor to find, so a heal against it burns ~30s of the user's
+	// own quota to "fix" regexes that were never wrong, then saves the
+	// result, replacing a working extractor with one trained on a screen
+	// that never showed the panel. Those polls just retry next cycle.
+	switch {
+	case !cfg.ExtractorSelfHeal || fetchErr != nil || res.OK:
+		// Nothing to heal, or self-heal is off.
+	case !usage.PanelCaptured(res.RawFull):
+		fmt.Fprintf(w, "[daemon] poll: no /usage panel in capture after %.1fs (still loading?), skipping self-heal\n", res.ElapsedS)
+	default:
 		fmt.Fprintf(w, "[daemon] poll: extraction missed, starting orchestrator self-heal\n")
 		tracePath, traceFile := openSelfHealTrace(w)
 		heal := selfheal.Run(pollCtx, selfheal.Options{
@@ -294,6 +306,11 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 		fmt.Fprintf(w, "[daemon] poll: record error %v\n", err)
 	case fetchErr != nil && !errors.Is(fetchErr, context.Canceled):
 		fmt.Fprintf(w, "[daemon] poll: scrape failed (%v)\n", fetchErr)
+	case !res.OK && !usage.PanelCaptured(res.RawFull):
+		// Distinct from the line below on purpose: "extraction failed"
+		// reads as the extractor being wrong, and here it never got a
+		// panel to read in the first place.
+		fmt.Fprintf(w, "[daemon] poll: no usage panel captured in %.1fs, nothing to extract\n", res.ElapsedS)
 	case !res.OK:
 		fmt.Fprintf(w, "[daemon] poll: extraction failed (missing %v)\n", res.Extracted.Missing)
 	default:

@@ -1257,3 +1257,59 @@ func TestDaysBetween_AcrossDST(t *testing.T) {
 		})
 	}
 }
+
+// TestBucketValue_Stale covers the carried-over reading: a poll that
+// produced nothing must leave a visible, correctly-qualified gauge rather
+// than removing the widget, which is indistinguishable from bloodhound
+// not being installed.
+func TestBucketValue_Stale(t *testing.T) {
+	now := time.Date(2026, 8, 5, 8, 0, 0, 0, time.FixedZone("test", 3600))
+	tookAt := now.Add(-7 * time.Minute).UTC().Format(time.RFC3339)
+	const h3m12 = int64((3*time.Hour + 12*time.Minute) / time.Millisecond)
+
+	t.Run("stale mark trails the window's own facts", func(t *testing.T) {
+		v := bucketValue("bloodhound.5h", "5h", &routes.NowWindow{
+			Pct: 72, TimeToResetMS: h3m12, Stale: true, StaleTSISO: tookAt,
+		}, now)
+		if want := "5h 72% (↻3h12m ◷7m)"; v.FullText != want {
+			t.Errorf("FullText = %q, want %q", v.FullText, want)
+		}
+		if v.Class != wb.ClassStale {
+			t.Errorf("Class = %q, want %q", v.Class, wb.ClassStale)
+		}
+	})
+
+	t.Run("danger outranks stale so an at-cap reading keeps its colour", func(t *testing.T) {
+		v := bucketValue("bloodhound.5h", "5h", &routes.NowWindow{
+			Pct: 92, TimeToResetMS: h3m12, Stale: true, StaleTSISO: tookAt,
+		}, now)
+		if v.Class != wb.ClassDanger {
+			t.Errorf("Class = %q, want %q (understating a 92%% is worse than overstating freshness)",
+				v.Class, wb.ClassDanger)
+		}
+		if !strings.Contains(v.FullText, glyphStale) {
+			t.Errorf("FullText = %q, want the stale glyph present even at danger", v.FullText)
+		}
+	})
+
+	t.Run("unparseable stale timestamp still marks the reading", func(t *testing.T) {
+		v := bucketValue("bloodhound.5h", "5h", &routes.NowWindow{
+			Pct: 72, TimeToResetMS: h3m12, Stale: true, StaleTSISO: "not a timestamp",
+		}, now)
+		if want := "5h 72% (↻3h12m ◷)"; v.FullText != want {
+			t.Errorf("FullText = %q, want %q", v.FullText, want)
+		}
+	})
+
+	t.Run("a fresh window carries no stale mark", func(t *testing.T) {
+		v := bucketValue("bloodhound.5h", "5h", &routes.NowWindow{
+			Pct: 72, TimeToResetMS: h3m12,
+		}, now)
+		if strings.Contains(v.FullText, glyphStale) {
+			t.Errorf("FullText = %q, want no stale glyph", v.FullText)
+		}
+		if v.Class == wb.ClassStale {
+			t.Error("Class = stale on a current reading")
+		}
+	})
+}

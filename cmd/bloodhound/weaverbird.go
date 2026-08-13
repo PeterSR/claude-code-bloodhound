@@ -46,6 +46,18 @@ const (
 	glyphLimit     = "⚠" // U+26A0: burn rate projects this window hits 100% before its reset
 	glyphSaturated = "⊘" // U+2298: pinned at the cap, pct has stopped moving and extra usage is billing
 	glyphReset     = "↻" // U+21BB: time until this window's natural reset
+	glyphStale     = "◷" // U+25F7: how long ago this carried-over reading was actually taken
+
+	// glyphStale is the one circular shape next to glyphReset's circular
+	// arrow, which is a real cost: at terminal sizes ◷ and ↻ are more alike
+	// than either is to ⚠ or ⊘. It wins anyway because it sits in Geometric
+	// Shapes, the block this file's header calls out as reliably covered by
+	// monospace fonts, and the hourglasses that read better semantically do
+	// not: U+29D6/U+29D7 are in the sparse Misc Math Symbols-B block and
+	// risk the same tofu that cost U+27F3 its place, while U+231B/U+23F3
+	// are East Asian Wide and would silently eat two cells from a width
+	// cascade budgeted for one. A pair of similar circles is a legibility
+	// cost; tofu and a width overrun are correctness ones.
 
 	// limitPad sits between glyphLimit and its duration and is load
 	// bearing, not spacing taste. U+26A0's glyph overhangs its cell to
@@ -379,6 +391,12 @@ func bucketValue(id, label string, w *routes.NowWindow, now time.Time) wb.Value 
 	if w.TimeToResetMS > 0 {
 		marks = append(marks, glyphReset+fmtReset(w, now))
 	}
+	// The stale mark goes last so the marks stay in "what is happening to
+	// this window" order, with "and this reading is old" as the qualifier
+	// on all of it rather than something interleaved among the facts.
+	if w.Stale {
+		marks = append(marks, glyphStale+staleAge(w.StaleTSISO, now))
+	}
 	if len(marks) > 0 {
 		text += " (" + strings.Join(marks, " ") + ")"
 	}
@@ -392,8 +410,41 @@ func bucketValue(id, label string, w *routes.NowWindow, now time.Time) wb.Value 
 		ID:        id,
 		FullText:  text,
 		ShortText: fmt.Sprintf("%d%%", w.Pct),
-		Class:     classForPercentage(explicit, w.Pct),
+		Class:     classForStaleness(classForPercentage(explicit, w.Pct), w.Stale),
 	}
+}
+
+// classForStaleness downgrades a carried-over reading to weaverbird's
+// stale class, except when the reading is already danger.
+//
+// Both classes are true of a stale 92%, and only one can be rendered. The
+// tie goes to danger because the two errors are not symmetric: colouring a
+// stale reading as current overstates freshness by at most one poll
+// interval, while colouring an at-the-cap reading as merely stale
+// understates a number that is about to stop the user's work. The glyph in
+// the text says it is old either way, so nothing is hidden by keeping the
+// colour on the severity.
+func classForStaleness(class string, stale bool) string {
+	if !stale || class == wb.ClassDanger {
+		return class
+	}
+	return wb.ClassStale
+}
+
+// staleAge renders how old a carried-over reading is. Falls back to the
+// bare glyph when the timestamp is unparseable: that the reading is stale
+// is the load-bearing half, and it is already known from w.Stale without
+// trusting the string.
+func staleAge(tsISO string, now time.Time) string {
+	t, err := time.Parse(time.RFC3339, tsISO)
+	if err != nil {
+		return ""
+	}
+	age := now.Sub(t)
+	if age < 0 {
+		return ""
+	}
+	return fmtResetDur(age.Milliseconds())
 }
 
 // classForPercentage is bloodhound's own severity rule, computed here

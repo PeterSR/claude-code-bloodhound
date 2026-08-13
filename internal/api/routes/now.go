@@ -81,6 +81,18 @@ type NowWindow struct {
 	// moving even though tokens keep being spent. UI surfaces this so
 	// the gauge doesn't silently lie.
 	Saturated bool `json:"saturated"`
+
+	// Stale marks a reading carried forward from an earlier observation
+	// because the most recent poll produced no percentage. The number is
+	// real, it is just older than LastPoll's timestamp implies, so
+	// StaleTSISO carries when it was actually read and consumers render
+	// it in their stale treatment rather than as a live gauge.
+	//
+	// A stale window is deliberately still a window: the last known
+	// percentage, marked old, beats nothing at all, which is
+	// indistinguishable from "bloodhound has never seen your usage".
+	Stale      bool   `json:"stale"`
+	StaleTSISO string `json:"stale_ts,omitempty"`
 }
 
 // NowPoll summarises the freshness of the latest /usage observation.

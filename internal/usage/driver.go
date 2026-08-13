@@ -39,6 +39,34 @@ func HasInputPrompt(screen string) bool {
 	return false
 }
 
+// panelMarker is the one string every rendered /usage panel carries, on
+// every gauge row. drive already waits on it to decide the panel finished
+// rendering (see the sentExit branch), so reusing it here keeps "did the
+// panel render" one definition rather than two that can disagree.
+const panelMarker = "% used"
+
+// PanelCaptured reports whether a captured screen actually contains the
+// /usage panel, as opposed to the panel's loading state or whatever else
+// claude happened to be showing.
+//
+// This is the difference between the two ways extraction can come up
+// empty, which look identical from the missing-fields list alone:
+//
+//   - The panel rendered but the extractor's regexes no longer match it.
+//     That is extractor drift, and a self-heal is exactly the right
+//     response.
+//   - The panel never rendered at all, because the data fetch behind it
+//     was still in flight when drive hit its deadline and captured a
+//     screen reading "Refreshing…". No extractor can pull percentages off
+//     a screen that has none, so retraining against it is guaranteed
+//     waste: it spends ~30s driving a second claude in a pty, on the
+//     user's own subscription, to rewrite regexes that were never wrong.
+//
+// Callers gate self-heal on this so only the first case triggers one.
+func PanelCaptured(screen string) bool {
+	return strings.Contains(screen, panelMarker)
+}
+
 // drive spawns claude in a pty, types /usage, lets the panel render, and
 // returns the captured raw bytes. Mirrors the Python POC's state machine
 // (wait-for-prompt, type, wait-for-render, send Ctrl-C twice) but cleaner.
@@ -204,7 +232,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 			// stale overdrawn text that could falsely match. The /usage
 			// panel always shows "% used" with a real space.
 			screen := renderVTVisible(curBytes)
-			panelRendered := strings.Contains(screen, "% used")
+			panelRendered := PanelCaptured(screen)
 			if time.Since(typedAt) > minRenderAfterType && panelRendered {
 				time.Sleep(700 * time.Millisecond)
 				_, _ = ptyFile.Write([]byte{0x03, 0x03})

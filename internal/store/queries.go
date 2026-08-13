@@ -25,20 +25,45 @@ type LatestObservation struct {
 	ParseOK              bool
 }
 
+// observationCols is the column list both observation queries select, in
+// the order scanObservation reads them. Shared so the two can't drift.
+const observationCols = `
+	SELECT id, ts, ts_unix_ms,
+	       session_pct, week_pct,
+	       session_reset_raw, week_reset_raw,
+	       session_reset_ts, week_reset_ts,
+	       session_reset_detected, week_reset_detected,
+	       session_saturated, week_saturated,
+	       elapsed_s, parse_ok
+	FROM usage_observations
+`
+
 // LatestUsage returns the most recent observation, or nil + nil error if
-// none exist.
+// none exist. It does not filter on parse_ok: callers that need freshness
+// (how long since we last talked to claude at all) want the failed
+// attempts too. Callers that need a reading use LatestParsedUsage.
 func (s *Store) LatestUsage(ctx context.Context) (*LatestObservation, error) {
-	row := s.DB.QueryRowContext(ctx, `
-		SELECT id, ts, ts_unix_ms,
-		       session_pct, week_pct,
-		       session_reset_raw, week_reset_raw,
-		       session_reset_ts, week_reset_ts,
-		       session_reset_detected, week_reset_detected,
-		       session_saturated, week_saturated,
-		       elapsed_s, parse_ok
-		FROM usage_observations
-		ORDER BY ts_unix_ms DESC LIMIT 1
-	`)
+	return scanObservation(s.DB.QueryRowContext(ctx,
+		observationCols+`ORDER BY ts_unix_ms DESC LIMIT 1`))
+}
+
+// LatestParsedUsage returns the most recent observation that actually
+// extracted, or nil + nil error if none ever has.
+//
+// This is the fallback that keeps a single failed poll from blanking the
+// gauges. A poll can come up empty for reasons that say nothing about the
+// numbers being wrong (the panel was still loading when the capture
+// deadline hit, most commonly), and on a 5-minute poll interval that would
+// otherwise leave every consumer with no percentage at all until the next
+// cycle. The previous reading is still the best answer available; it is
+// just older than the poll timestamp suggests, which is what the Stale
+// flag on the computed window exists to say.
+func (s *Store) LatestParsedUsage(ctx context.Context) (*LatestObservation, error) {
+	return scanObservation(s.DB.QueryRowContext(ctx,
+		observationCols+`WHERE parse_ok = 1 ORDER BY ts_unix_ms DESC LIMIT 1`))
+}
+
+func scanObservation(row *sql.Row) (*LatestObservation, error) {
 	var (
 		o                                LatestObservation
 		sessPct, weekPct                 sql.NullInt64

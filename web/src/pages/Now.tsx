@@ -27,6 +27,11 @@ type WindowState = {
   limit_eta_ts?: string;
   reset_detected_in_last_obs: boolean;
   saturated: boolean;
+  // Set when the latest poll produced no reading and this one was carried
+  // forward from stale_ts. The number is real but older than last_poll
+  // implies, so it has to be labelled or the gauge reads as current.
+  stale?: boolean;
+  stale_ts?: string;
 };
 
 type HistoryPoint = {
@@ -586,6 +591,19 @@ function WindowCard({
             >
               <Zap className="size-3" />
               On extra usage
+            </span>
+          )}
+          {w.stale && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider"
+              title={
+                w.stale_ts
+                  ? `The last poll produced no reading, so this is the previous one, taken ${fmtAbs(w.stale_ts)}.`
+                  : 'The last poll produced no reading, so this is the previous one.'
+              }
+            >
+              <Clock className="size-3" />
+              {w.stale_ts ? `As of ${fmtAbs(w.stale_ts)}` : 'Stale reading'}
             </span>
           )}
         </div>
