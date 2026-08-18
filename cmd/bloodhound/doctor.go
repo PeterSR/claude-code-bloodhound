@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
+	"github.com/PeterSR/claude-code-bloodhound/internal/projectconfig"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
 	"github.com/PeterSR/claude-code-bloodhound/internal/version"
@@ -47,6 +49,11 @@ type doctorReport struct {
 	Config    *config.Config `json:"config,omitempty"`
 	APISocket string         `json:"api_socket,omitempty"`
 
+	// ProjectConfig is what the working directory doctor was run from says
+	// about bloodhound's behaviour toward its sessions. A separate schema
+	// from Config rather than an overlay on it — see internal/projectconfig.
+	ProjectConfig *projectConfigReport `json:"project_config,omitempty"`
+
 	ClaudeBinaryPath  string `json:"claude_binary_path,omitempty"`
 	ClaudeBinaryState string `json:"claude_binary_state,omitempty"`
 
@@ -79,6 +86,16 @@ type doctorReport struct {
 	// aborting the rest of the report (mirrors the human output's inline
 	// "ERROR" annotations, just collected in one place for --json).
 	Errors []string `json:"errors,omitempty"`
+}
+
+// projectConfigReport is the doctor view of the nearest .bloodhound file:
+// where it was found, what it resolved to, and anything in it this build did
+// not recognise.
+type projectConfigReport struct {
+	Cwd         string               `json:"cwd"`
+	Path        string               `json:"path,omitempty"`
+	Config      projectconfig.Config `json:"config"`
+	UnknownKeys []string             `json:"unknown_keys,omitempty"`
 }
 
 var doctorCmd = &cobra.Command{
@@ -145,6 +162,35 @@ var doctorCmd = &cobra.Command{
 			binPath, binState := claudeBinaryStatus(cfg.ClaudeBinary)
 			rep.ClaudeBinaryPath, rep.ClaudeBinaryState = binPath, binState
 			fmt.Fprintf(w, "  claude binary:    %s (%s)\n", binPath, binState)
+		}
+
+		fmt.Fprintln(w, "\nProject config (for the current directory):")
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(w, "  cwd: ERROR: %v\n", err)
+			rep.Errors = append(rep.Errors, fmt.Sprintf("cwd: %v", err))
+		} else {
+			pcfg, found, perr := projectconfig.Load(cwd)
+			pr := &projectConfigReport{Cwd: cwd, Path: found.Path, Config: pcfg, UnknownKeys: found.UnknownKeys}
+			rep.ProjectConfig = pr
+			fmt.Fprintf(w, "  cwd:              %s\n", cwd)
+			switch {
+			case perr != nil:
+				fmt.Fprintf(w, "  file: ERROR: %v\n", perr)
+				rep.Errors = append(rep.Errors, fmt.Sprintf("project config: %v", perr))
+			case found.Path == "":
+				fmt.Fprintf(w, "  file:             none (defaults apply)\n")
+			default:
+				fmt.Fprintf(w, "  file:             %s\n", found.Path)
+			}
+			fmt.Fprintf(w, "  writeup nudge:    %v\n", pcfg.WriteupNudge)
+			fmt.Fprintf(w, "  wakeup nudge:     %v\n", pcfg.WakeupNudge)
+			if len(found.UnknownKeys) > 0 {
+				// Named rather than ignored: the project schema is disjoint
+				// from the global one, so a global key put in here parses,
+				// does nothing, and would otherwise say nothing either.
+				fmt.Fprintf(w, "  unknown keys:     %s (ignored)\n", strings.Join(found.UnknownKeys, ", "))
+			}
 		}
 
 		fmt.Fprintln(w, "\nDatabase:")

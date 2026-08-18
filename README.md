@@ -151,6 +151,34 @@ Bloodhound follows XDG conventions on Linux and the platform conventions on macO
 | Config | `$XDG_CONFIG_HOME/bloodhound/config.json` | `~/Library/Application Support/bloodhound/` | `%LOCALAPPDATA%\bloodhound\` |
 | State (extractors, daemon log) | `$XDG_STATE_HOME/bloodhound/` | `~/Library/Application Support/bloodhound/` | `%LOCALAPPDATA%\bloodhound\` |
 
+### Per-project settings
+
+A project can keep a `.bloodhound/config.json` beside its code. It is a
+different thing from the config above, not an override of it, and the two
+share no keys. The global config is how the daemon operates: where the
+database lives, which `claude` binary to drive, how often to poll. The project
+file only says how bloodhound should behave toward sessions working in that
+directory, which is what makes it safe to check in - it can make bloodhound
+quieter or chattier in one project and can do nothing else.
+
+```json
+{
+  "writeup_nudge": false,
+  "wakeup_nudge": false
+}
+```
+
+`writeup_nudge` asks bloodhound to say something while there is still context
+left to say it in, so a session can be written up before a compaction takes
+the detail away. `wakeup_nudge` lets a budget or limit warning add that the
+window reopens at a known time and that a wakeup could be armed for it;
+bloodhound suggests, it never arms anything itself. Both default to off.
+
+`bloodhound project init` writes a starter file, `bloodhound project show`
+resolves which one governs a directory. The search walks up from the working
+directory to the nearest such file, stopping at your home directory, so a
+session started in a subdirectory is still governed by its project.
+
 ## Disclaimer
 
 This is a tool for monitoring Claude Code, and - fittingly - Claude Code has been used to build it. The Go and TypeScript here are vetted by a human, but parts of the implementation, scaffolding, and copy were drafted with AI assistance.
