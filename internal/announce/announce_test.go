@@ -94,10 +94,10 @@ func TestTextForScopesBudgetsToTheirDirectory(t *testing.T) {
 	mine := ccsock.Session{CWD: "/home/dev/myapp"}
 	theirs := ccsock.Session{CWD: "/home/dev/other"}
 
-	if got := textFor(evs, mine, testNow); got == "" {
+	if got := textFor(evs, mine, testNow, false); got == "" {
 		t.Error("the directory that owns the budget was told nothing")
 	}
-	if got := textFor(evs, theirs, testNow); got != "" {
+	if got := textFor(evs, theirs, testNow, false); got != "" {
 		t.Errorf("an unrelated directory was told %q", got)
 	}
 }
@@ -107,7 +107,7 @@ func TestTextForSendsAccountWideEventsToEveryone(t *testing.T) {
 	// caused it, so these carry no cwd and reach anyone admitted.
 	evs := []events.Event{ev("limit_projection.projected", "session", "", map[string]any{"eta_ts": iso(testNow.Add(40 * time.Minute))})}
 	for _, cwd := range []string{"/home/dev/myapp", "/home/dev/other", ""} {
-		if got := textFor(evs, ccsock.Session{CWD: cwd}, testNow); got == "" {
+		if got := textFor(evs, ccsock.Session{CWD: cwd}, testNow, false); got == "" {
 			t.Errorf("cwd %q was not told about an account-wide event", cwd)
 		}
 	}
@@ -117,7 +117,7 @@ func TestTextForNormalizesDirectories(t *testing.T) {
 	// A trailing separator must not make a session look like a different
 	// directory than the budget it owns.
 	evs := []events.Event{ev("budget.exceeded", "week", "/home/dev/myapp", map[string]any{"reason": "spent"})}
-	if got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow); got == "" {
+	if got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow, false); got == "" {
 		t.Error("a trailing separator hid a session from its own budget")
 	}
 }
@@ -441,4 +441,70 @@ func TestDescribeDropsAResetThatHasAlreadyPassed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTextForAddsTheWakeupNoteOnce covers the opt-in tail. Three transitions
+// landing together are one situation, and the same suggestion three times
+// reads as a tool that has stopped paying attention.
+func TestTextForAddsTheWakeupNoteOnce(t *testing.T) {
+	in90m := iso(testNow.Add(90 * time.Minute))
+	evs := []events.Event{
+		ev("budget.tight", "session", "/home/dev/myapp", map[string]any{"reason": "myapp has 4.0% left", "reset_ts": in90m}),
+		ev("limit_projection.projected", "session", "", map[string]any{"reset_ts": in90m}),
+		ev("saturation.saturated", "session", "", map[string]any{"reset_ts": in90m}),
+	}
+	sess := ccsock.Session{CWD: "/home/dev/myapp"}
+
+	got := textFor(evs, sess, testNow, true)
+	if n := countOccurrences(got, wakeupNote("session")); n != 1 {
+		t.Errorf("the note appears %d times, want exactly 1:\n%s", n, got)
+	}
+	if lines := splitLines(got); lines[len(lines)-1] != wakeupNote("session") {
+		t.Errorf("the note is not the last line:\n%s", got)
+	}
+}
+
+func TestTextForLeavesTheWakeupNoteOutUnlessAsked(t *testing.T) {
+	// Off is the default, and the default has to be the quiet one: this puts
+	// an extra line into somebody's conversation.
+	evs := []events.Event{
+		ev("saturation.saturated", "session", "", map[string]any{"reset_ts": iso(testNow.Add(90 * time.Minute))}),
+	}
+	got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, false)
+	if countOccurrences(got, wakeupNote("session")) != 0 {
+		t.Errorf("the note went out to a directory that did not ask for it:\n%s", got)
+	}
+}
+
+// TestTextForSkipsTheWakeupNoteWithoutAReset guards the dangling reference.
+// The note points at "that reset", and without one in the text above there is
+// nothing for it to point at and nothing to arm a wakeup for.
+func TestTextForSkipsTheWakeupNoteWithoutAReset(t *testing.T) {
+	evs := []events.Event{ev("saturation.saturated", "session", "", nil)}
+	got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, true)
+	if countOccurrences(got, wakeupNote("session")) != 0 {
+		t.Errorf("the note went out with no reset to point at:\n%s", got)
+	}
+}
+
+func countOccurrences(s, sub string) int {
+	n := 0
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			n++
+		}
+	}
+	return n
+}
+
+func splitLines(s string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, s[start:])
 }

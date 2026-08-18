@@ -35,6 +35,7 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/budget"
 	"github.com/PeterSR/claude-code-bloodhound/internal/events"
 	"github.com/PeterSR/claude-code-bloodhound/internal/notify"
+	"github.com/PeterSR/claude-code-bloodhound/internal/projectconfig"
 	"github.com/PeterSR/claude-code-bloodhound/internal/sessioninsight"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/whenfmt"
@@ -281,7 +282,7 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 	}
 
 	for _, sess := range admitted {
-		text := textFor(evs, sess, now)
+		text := textFor(evs, sess, now, wakeupNudgeWanted(sess.CWD))
 		if text == "" {
 			continue // nothing in this batch concerns this session
 		}
@@ -310,20 +311,74 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 // is tight is noise, and it is the mistake a global broadcast makes. The
 // limit events are account-wide and go to everyone admitted, because the 5h
 // cliff stops every session on the machine, not just the one that caused it.
-func textFor(evs []events.Event, sess ccsock.Session, now time.Time) string {
+func textFor(evs []events.Event, sess ccsock.Session, now time.Time, nudgeWakeup bool) string {
 	var lines []string
+	// The soonest reset among the lines that made it in, and which bucket it
+	// belongs to. Two buckets crossing together is one situation with two
+	// deadlines, and the note has to name which of them it means.
+	var soonest time.Time
+	soonestBucket := ""
 	for _, e := range evs {
 		if e.Scope.Cwd != "" && !sameDir(e.Scope.Cwd, sess.CWD) {
 			continue
 		}
-		if line := describe(e, now); line != "" {
-			lines = append(lines, line)
+		line := describe(e, now)
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+		if at, ok := resetAt(e.Detail["reset_ts"], now); ok && (soonest.IsZero() || at.Before(soonest)) {
+			soonest, soonestBucket = at, e.Scope.Bucket
 		}
 	}
 	if len(lines) == 0 {
 		return ""
 	}
+	// Once for the batch, not once per line: several buckets crossing at the
+	// same moment is one situation, and the same suggestion repeated three
+	// times reads as a tool that has stopped paying attention.
+	//
+	// Only when a reset actually made it into the text above. Without one the
+	// note would point at a moment the reader was never told, and there would
+	// be nothing to arm a wakeup for.
+	if nudgeWakeup && soonestBucket != "" {
+		lines = append(lines, wakeupNote(soonestBucket))
+	}
 	return strings.Join(lines, "\n")
+}
+
+// wakeupNote is the opt-in tail on a warning, enabled per directory by
+// projectconfig.WakeupNudge.
+//
+// Offered rather than ordered, and it names no mechanism. Bloodhound does not
+// arm anything and has no idea what the reader schedules wakeups with; what it
+// knows is that the work is about to stop and when it could start again, which
+// is the part worth saying out loud.
+//
+// It names the bucket rather than repeating the time, which is already in the
+// line above it, and rather than saying "that reset", which is ambiguous on
+// the batch where both windows crossed at once.
+func wakeupNote(bucket string) string {
+	return fmt.Sprintf(
+		"Work that stops here could pick up again when the %s window reopens, if something is armed to wake it.",
+		budget.BucketLabel(bucket))
+}
+
+// wakeupNudgeWanted asks the directory a session is working in whether it
+// wants the note.
+//
+// Silent on every failure. A directory with no file, an unreadable one, or a
+// session with no cwd at all all mean the same thing here: nobody asked for
+// the extra line, so it is not added.
+func wakeupNudgeWanted(cwd string) bool {
+	if cwd == "" {
+		return false
+	}
+	cfg, _, err := projectconfig.Load(cwd)
+	if err != nil {
+		return false
+	}
+	return cfg.WakeupNudge
 }
 
 func sameDir(a, b string) bool {
@@ -388,15 +443,26 @@ func describe(e events.Event, now time.Time) string {
 // window that turned over between the reading and the delivery would
 // otherwise be announced as resetting in the past.
 func when(v any, now time.Time) string {
-	iso, _ := v.(string)
-	if iso == "" {
-		return ""
-	}
-	at, err := time.Parse(time.RFC3339, iso)
-	if err != nil || !at.After(now) {
+	at, ok := resetAt(v, now)
+	if !ok {
 		return ""
 	}
 	return whenfmt.Phrase(at, now)
+}
+
+// resetAt parses a stored moment and reports whether it is still ahead. The
+// two callers want different halves of the same answer: one renders it, the
+// other compares it against the other buckets'.
+func resetAt(v any, now time.Time) (time.Time, bool) {
+	iso, _ := v.(string)
+	if iso == "" {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339, iso)
+	if err != nil || !at.After(now) {
+		return time.Time{}, false
+	}
+	return at, true
 }
 
 // coldCache asks bloodhound's own transcripts which sessions would have to
