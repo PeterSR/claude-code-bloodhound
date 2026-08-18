@@ -385,8 +385,17 @@ func runAnnounceOnce(ctx context.Context, s *store.Store, w io.Writer) {
 		return
 	}
 	if ast.Delivered > 0 {
-		fmt.Fprintf(w, "[daemon] announce: said %d thing(s) to %d session(s)\n",
+		line := fmt.Sprintf("[daemon] announce: said %d thing(s) to %d session(s)",
 			ast.Announced, ast.Delivered)
+		if ast.Armed > 0 {
+			line += fmt.Sprintf(", noted %d down for a wakeup", ast.Armed)
+		}
+		fmt.Fprintln(w, line)
+	}
+	// A kept promise is the one delivery nobody was awake for, so it says so
+	// even on a tick where nothing else happened.
+	if ast.Resumed > 0 {
+		fmt.Fprintf(w, "[daemon] announce: woke %d session(s) whose window reopened\n", ast.Resumed)
 	}
 	// Skips are only worth a line when there was something to say, otherwise
 	// every quiet tick would report the whole machine sitting at its prompt.
@@ -445,8 +454,17 @@ func runEventRetentionOnce(ctx context.Context, s *store.Store, w io.Writer) {
 		fmt.Fprintf(w, "[daemon] events: prune levels: %v\n", err)
 		return
 	}
-	if n > 0 || hn > 0 || ln > 0 {
-		fmt.Fprintf(w, "[daemon] events: pruned %d events, %d finished one-shots, %d dormant session levels\n", n, hn, ln)
+	// Kept promises are history on the same terms as the events that caused
+	// them. Pending ones are never touched however old, because a promise
+	// still waiting is the one row in that table that is not a record of the
+	// past; expire_ms is what ends those.
+	wn, err := s.PruneWakeups(ctx, cutoff)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] events: prune wakeups: %v\n", err)
+		return
+	}
+	if n > 0 || hn > 0 || ln > 0 || wn > 0 {
+		fmt.Fprintf(w, "[daemon] events: pruned %d events, %d finished one-shots, %d dormant session levels, %d kept wakeups\n", n, hn, ln, wn)
 	}
 }
 

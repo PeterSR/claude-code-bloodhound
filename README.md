@@ -163,27 +163,61 @@ quieter or chattier in one project and can do nothing else.
 
 ```json
 {
-  "writeup_nudge": false,
-  "wakeup_nudge": false
+  "pressure":      { "message": "" },
+  "writeup_nudge": { "enabled": false, "message": "" },
+  "cache_nudge":   { "enabled": false, "message": "" },
+  "wakeup":        { "mode": "off", "nudge_message": "",
+                     "armed_message": "", "resume_message": "" }
 }
 ```
 
-`writeup_nudge` asks bloodhound to speak up when a session's recent turns have
-outgrown its own average, which is the run-up to a compaction, so the work can
-be written up while the detail is still in the context rather than
-reconstructed from a summary afterwards. It goes only to the session it is
-about. `wakeup_nudge` lets a budget or limit warning add that the window
-reopens at a known time and that a wakeup could be armed for it; bloodhound
-suggests, it never arms anything itself. Both default to off.
+One block per thing bloodhound can say. Everything that puts words into a
+conversation is off by default.
 
-Either way bloodhound only ever speaks into a session that is already
-mid-turn. Delivering to one sitting at its prompt would start a turn it was
-not going to take, and if its cache had gone cold that turn re-pays the whole
-conversation prefix before reading a word, charged to the very budget the
-warning was about.
+`writeup_nudge` speaks up when a session's recent turns have outgrown its own
+average, which is the run-up to a compaction, so the work can be written up
+while the detail is still in the context rather than reconstructed from a
+summary afterwards. It goes only to the session it is about.
 
-`bloodhound project init` writes a starter file, `bloodhound project show`
-resolves which one governs a directory. The search walks up from the working
+`cache_nudge` is the one line bloodhound will say to a session that is *not*
+working, and the exception is the whole point: it fires while the prompt cache
+is still warm but inside its last stretch. The turn it starts is paid at
+warm-cache rates, and the alternative is that the same context gets rebuilt
+from nothing the next time anyone touches the session.
+
+`wakeup.mode` is what happens at the far end of a warning. `nudge` adds a line
+saying the work could pick up again when the window reopens, if something is
+armed to wake it; bloodhound suggests and arms nothing. `resume` drops the
+suggestion and takes the job: the session is noted down against the window
+that is constraining it, and when that window reopens bloodhound writes to it
+again. Promises are only made for resets within twelve hours, so a weekly
+window normally gets neither - "I will write to you on Thursday" is a calendar
+entry, not a resumption. `bloodhound wakeups` shows the promises outstanding.
+
+`pressure` is wording only. A limit that stops every session on the machine is
+not something a directory switches off, so the only question is what the
+sentence says.
+
+Every `message` field is a Go template that *replaces* what bloodhound would
+have said, and is handed that sentence as `{{.Text}}`. There is no separate
+key for adding to a message, because `"{{.Text}} Push the branch first."` says
+it and also says which side it goes on. The other variables are `.Kind`
+`.State` `.Bucket` `.Cwd` `.Dir` `.Project` `.Session` `.Pct` `.Reset`
+`.ResetAt` `.ETA` `.ArmedAt` `.Waited` `.Now`. A template that does not parse,
+or fails while rendering, never silences anything: it is reported by
+`bloodhound project show` and `bloodhound doctor`, and the built-in wording
+goes out in its place.
+
+Except for `cache_nudge` and a promised wakeup, bloodhound only ever speaks
+into a session that is already mid-turn. Delivering to one sitting at its
+prompt would start a turn it was not going to take, and if its cache had gone
+cold that turn re-pays the whole conversation prefix before reading a word,
+charged to the very budget the warning was about. The two exceptions are the
+cases where that same arithmetic points the other way.
+
+`bloodhound project init` writes a starter file, `bloodhound project show
+--preview` resolves which one governs a directory and renders what it would
+actually say against made-up numbers. The search walks up from the working
 directory to the nearest such file, stopping at your home directory, so a
 session started in a subdirectory is still governed by its project.
 

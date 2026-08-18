@@ -44,7 +44,7 @@ func TestFilterWorthSayingKeepsOnlyRisingPressure(t *testing.T) {
 		ev("threshold.80", "week", "", nil),
 		ev("collection.stale", "", "", nil),
 	}
-	got := filterWorthSaying(in)
+	got := filterWorthSaying(in, testNow)
 	want := []string{"budget.tight", "budget.exceeded", "limit_projection.projected", "saturation.saturated"}
 	if len(got) != len(want) {
 		t.Fatalf("kept %d events, want %d: %+v", len(got), len(want), kinds(got))
@@ -95,10 +95,10 @@ func TestTextForScopesBudgetsToTheirDirectory(t *testing.T) {
 	mine := ccsock.Session{CWD: "/home/dev/myapp"}
 	theirs := ccsock.Session{CWD: "/home/dev/other"}
 
-	if got := textFor(evs, mine, testNow, projectconfig.Config{}); got == "" {
+	if got := compose(evs, mine, testNow, projectconfig.Config{}).Text; got == "" {
 		t.Error("the directory that owns the budget was told nothing")
 	}
-	if got := textFor(evs, theirs, testNow, projectconfig.Config{}); got != "" {
+	if got := compose(evs, theirs, testNow, projectconfig.Config{}).Text; got != "" {
 		t.Errorf("an unrelated directory was told %q", got)
 	}
 }
@@ -108,7 +108,7 @@ func TestTextForSendsAccountWideEventsToEveryone(t *testing.T) {
 	// caused it, so these carry no cwd and reach anyone admitted.
 	evs := []events.Event{ev("limit_projection.projected", "session", "", map[string]any{"eta_ts": iso(testNow.Add(40 * time.Minute))})}
 	for _, cwd := range []string{"/home/dev/myapp", "/home/dev/other", ""} {
-		if got := textFor(evs, ccsock.Session{CWD: cwd}, testNow, projectconfig.Config{}); got == "" {
+		if got := compose(evs, ccsock.Session{CWD: cwd}, testNow, projectconfig.Config{}).Text; got == "" {
 			t.Errorf("cwd %q was not told about an account-wide event", cwd)
 		}
 	}
@@ -118,7 +118,7 @@ func TestTextForNormalizesDirectories(t *testing.T) {
 	// A trailing separator must not make a session look like a different
 	// directory than the budget it owns.
 	evs := []events.Event{ev("budget.exceeded", "week", "/home/dev/myapp", map[string]any{"reason": "spent"})}
-	if got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow, projectconfig.Config{}); got == "" {
+	if got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow, projectconfig.Config{}).Text; got == "" {
 		t.Error("a trailing separator hid a session from its own budget")
 	}
 }
@@ -456,11 +456,11 @@ func TestTextForAddsTheWakeupNoteOnce(t *testing.T) {
 	}
 	sess := ccsock.Session{CWD: "/home/dev/myapp"}
 
-	got := textFor(evs, sess, testNow, projectconfig.Config{WakeupNudge: true})
-	if n := countOccurrences(got, wakeupNote("session")); n != 1 {
+	got := compose(evs, sess, testNow, wantsNudge).Text
+	if n := countOccurrences(got, nudgeNote(testNow.Add(90*time.Minute), "session")); n != 1 {
 		t.Errorf("the note appears %d times, want exactly 1:\n%s", n, got)
 	}
-	if lines := splitLines(got); lines[len(lines)-1] != wakeupNote("session") {
+	if lines := splitLines(got); lines[len(lines)-1] != nudgeNote(testNow.Add(90*time.Minute), "session") {
 		t.Errorf("the note is not the last line:\n%s", got)
 	}
 }
@@ -471,8 +471,8 @@ func TestTextForLeavesTheWakeupNoteOutUnlessAsked(t *testing.T) {
 	evs := []events.Event{
 		ev("saturation.saturated", "session", "", map[string]any{"reset_ts": iso(testNow.Add(90 * time.Minute))}),
 	}
-	got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, projectconfig.Config{})
-	if countOccurrences(got, wakeupNote("session")) != 0 {
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, projectconfig.Config{}).Text
+	if countOccurrences(got, nudgeNote(testNow.Add(90*time.Minute), "session")) != 0 {
 		t.Errorf("the note went out to a directory that did not ask for it:\n%s", got)
 	}
 }
@@ -482,8 +482,8 @@ func TestTextForLeavesTheWakeupNoteOutUnlessAsked(t *testing.T) {
 // nothing for it to point at and nothing to arm a wakeup for.
 func TestTextForSkipsTheWakeupNoteWithoutAReset(t *testing.T) {
 	evs := []events.Event{ev("saturation.saturated", "session", "", nil)}
-	got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, projectconfig.Config{WakeupNudge: true})
-	if countOccurrences(got, wakeupNote("session")) != 0 {
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, wantsNudge).Text
+	if countOccurrences(got, nudgeNote(testNow.Add(90*time.Minute), "session")) != 0 {
 		t.Errorf("the note went out with no reset to point at:\n%s", got)
 	}
 }
@@ -518,15 +518,15 @@ func TestRecommendationGoesOnlyToTheSessionItIsAbout(t *testing.T) {
 	e := ev("recommendation.compact", "", "", map[string]any{"reason": "recent turns are heavy"})
 	e.Scope.Session = "session-abc12345"
 	evs := []events.Event{e}
-	on := projectconfig.Config{WriteupNudge: true}
+	on := wantsWriteup
 
 	mine := ccsock.Session{SessionID: "session-abc12345", CWD: "/home/dev/myapp"}
 	theirs := ccsock.Session{SessionID: "session-def67890", CWD: "/home/dev/myapp"}
 
-	if got := textFor(evs, mine, testNow, on); got == "" {
+	if got := compose(evs, mine, testNow, on).Text; got == "" {
 		t.Error("the session it is about was told nothing")
 	}
-	if got := textFor(evs, theirs, testNow, on); got != "" {
+	if got := compose(evs, theirs, testNow, on).Text; got != "" {
 		t.Errorf("another session in the same directory was told %q", got)
 	}
 }
@@ -539,10 +539,10 @@ func TestRecommendationNeedsTheDirectoryToAskForIt(t *testing.T) {
 	e.Scope.Session = "session-abc12345"
 	sess := ccsock.Session{SessionID: "session-abc12345", CWD: "/home/dev/myapp"}
 
-	if got := textFor([]events.Event{e}, sess, testNow, projectconfig.Config{}); got != "" {
+	if got := compose([]events.Event{e}, sess, testNow, projectconfig.Config{}).Text; got != "" {
 		t.Errorf("the nudge went out unasked: %q", got)
 	}
-	if got := textFor([]events.Event{e}, sess, testNow, projectconfig.Config{WriteupNudge: true}); got == "" {
+	if got := compose([]events.Event{e}, sess, testNow, wantsWriteup).Text; got == "" {
 		t.Error("the nudge was asked for and did not arrive")
 	}
 }
@@ -556,8 +556,214 @@ func TestFilterWorthSayingIgnoresTheCalmRecommendations(t *testing.T) {
 		ev("recommendation.watch", "", "", nil),
 		ev("recommendation.compact", "", "", nil),
 	}
-	got := filterWorthSaying(evs)
+	got := filterWorthSaying(evs, testNow)
 	if len(got) != 1 || got[0].Kind != "recommendation.compact" {
 		t.Errorf("kept %v, want only recommendation.compact", got)
+	}
+}
+
+// The two opt-in shapes, spelled once. Both put an extra line into somebody's
+// conversation, which is why neither is the default.
+var (
+	wantsWriteup = projectconfig.Config{WriteupNudge: projectconfig.Nudge{Enabled: true}}
+	wantsNudge   = projectconfig.Config{Wakeup: projectconfig.Wakeup{Mode: projectconfig.WakeupNudge}}
+	wantsResume  = projectconfig.Config{Wakeup: projectconfig.Wakeup{Mode: projectconfig.WakeupResume}}
+	wantsCache   = projectconfig.Config{CacheNudge: projectconfig.Nudge{Enabled: true}}
+)
+
+// nudgeNote is the suggestion as the code under test renders it, rather than a
+// copy of the sentence. A test that repeats the wording only pins the wording.
+func nudgeNote(at time.Time, bucket string) string {
+	line, _ := wakeupLine(wantsNudge, ccsock.Session{}, testNow, at, bucket, "")
+	return line
+}
+
+// --- what the projection is allowed to interrupt for ------------------------
+
+// TestAProjectionTwoDaysOutIsNotWorthInterrupting is the rule this was
+// tightened for. The sensor is right that the meter is on pace to cap out
+// before the week ends; it is a claim built by extrapolating one hour of burn
+// across two days, and a reader at 56% cannot act on it.
+func TestAProjectionTwoDaysOutIsNotWorthInterrupting(t *testing.T) {
+	near := ev("limit_projection.projected", "session", "", map[string]any{
+		"eta_ts": iso(testNow.Add(40 * time.Minute))})
+	far := ev("limit_projection.projected", "week", "", map[string]any{
+		"eta_ts": iso(testNow.Add(43 * time.Hour))})
+	// No ETA at all fails open: the sensor still said the meter caps out
+	// before the window resets, and that is worth hearing.
+	blind := ev("limit_projection.projected", "week", "", nil)
+
+	got := filterWorthSaying([]events.Event{near, far, blind}, testNow)
+	if len(got) != 2 {
+		t.Fatalf("kept %v, want the near one and the one with no ETA", kinds(got))
+	}
+	if got[0].Scope.Bucket != "session" || got[1].Detail != nil {
+		t.Errorf("kept the wrong two: %+v", got)
+	}
+}
+
+// TestTheProjectionLineSaysWhereTheMeterIs covers the other half of the same
+// complaint. "On pace to cap out" reads very differently at 91% than at 56%,
+// and a reader given only the projection has to go and look the reading up
+// before they can judge it.
+func TestTheProjectionLineSaysWhereTheMeterIs(t *testing.T) {
+	e := ev("limit_projection.projected", "week", "", map[string]any{
+		"pct":            float64(56),
+		"burn_pct_per_h": 2.4,
+		"eta_ts":         iso(testNow.Add(4 * time.Hour)),
+		"reset_ts":       iso(testNow.Add(58 * time.Hour)),
+	})
+	want := "The week meter is at 56%, rising about 2.4%/h, and is on pace to reach 100% in 4h, before it resets on fri 18:00."
+	if got := describe(e, testNow); got != want {
+		t.Errorf("describe =\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// --- the cache nudge --------------------------------------------------------
+
+// TestTheCacheNudgeNeedsAsking is the same rule as the writeup nudge, and it
+// matters more here: this is the one line that will wake a session that was
+// not working.
+func TestTheCacheNudgeNeedsAsking(t *testing.T) {
+	e := ev("cache.expiring", "", "", map[string]any{"expires_in_s": float64(540)})
+	e.Scope.Session = "session-abc12345"
+	sess := ccsock.Session{SessionID: "session-abc12345", CWD: "/home/dev/myapp"}
+
+	if got := compose([]events.Event{e}, sess, testNow, projectconfig.Config{}); got.Text != "" {
+		t.Errorf("the nudge went out unasked: %q", got.Text)
+	}
+	got := compose([]events.Event{e}, sess, testNow, wantsCache)
+	if got.Text == "" {
+		t.Fatal("the nudge was asked for and did not arrive")
+	}
+	if !got.CacheNudge {
+		t.Error("the message does not know it may wake a resting session")
+	}
+}
+
+// TestOnlyTheExpiringBandIsWorthSaying separates the cheap moment from the
+// bill already paid. "expired" means the prefix is gone and speaking now costs
+// the full rebuild; "warm" means there is nothing to say yet.
+func TestOnlyTheExpiringBandIsWorthSaying(t *testing.T) {
+	evs := []events.Event{
+		ev("cache.warm", "", "", nil),
+		ev("cache.expiring", "", "", nil),
+		ev("cache.expired", "", "", nil),
+	}
+	got := filterWorthSaying(evs, testNow)
+	if len(got) != 1 || got[0].Kind != "cache.expiring" {
+		t.Errorf("kept %v, want only cache.expiring", kinds(got))
+	}
+}
+
+// --- the promise ------------------------------------------------------------
+
+// TestResumeModePromisesRatherThanSuggests pins the difference between the two
+// modes at the point a reader sees it. One says somebody should arm something;
+// the other says bloodhound will do it, which is only sayable because a row
+// gets written.
+func TestResumeModePromisesRatherThanSuggests(t *testing.T) {
+	evs := []events.Event{ev("budget.tight", "session", "/home/dev/myapp", map[string]any{
+		"reason": "myapp has 4.0% left", "reset_ts": iso(testNow.Add(90 * time.Minute))})}
+	sess := ccsock.Session{CWD: "/home/dev/myapp"}
+
+	suggested := compose(evs, sess, testNow, wantsNudge)
+	if suggested.Arm != nil {
+		t.Error("nudge mode armed something; it is supposed to arm nothing")
+	}
+
+	promised := compose(evs, sess, testNow, wantsResume)
+	if promised.Arm == nil {
+		t.Fatal("resume mode promised nothing")
+	}
+	if promised.Arm.Bucket != "session" {
+		t.Errorf("armed for %q, want the window that is closing", promised.Arm.Bucket)
+	}
+	if !containsFold(promised.Text, "bloodhound will write to this session") {
+		t.Errorf("the promise is not in the text:\n%s", promised.Text)
+	}
+}
+
+// TestNoPromiseIsMadeForAWindowDaysAway is the honesty check. "I will write to
+// you on Thursday" is a calendar entry, not a resumption, and the session it
+// would wake will have been closed for days.
+func TestNoPromiseIsMadeForAWindowDaysAway(t *testing.T) {
+	evs := []events.Event{ev("saturation.saturated", "week", "", map[string]any{
+		"reset_ts": iso(testNow.Add(58 * time.Hour))})}
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, wantsResume)
+
+	if got.Arm != nil {
+		t.Error("promised a wakeup past the horizon")
+	}
+	if containsFold(got.Text, "bloodhound will write") {
+		t.Errorf("promised in words what it did not promise in the table:\n%s", got.Text)
+	}
+	if got.Text == "" {
+		t.Error("the warning itself went missing along with the promise")
+	}
+}
+
+// TestAProjectSpeaksInItsOwnWords covers the templating end to end, including
+// the thing it replaced: adding to a message rather than replacing it is
+// {{.Text}} plus more, and it is the project that decides which side.
+func TestAProjectSpeaksInItsOwnWords(t *testing.T) {
+	cfg := projectconfig.Config{
+		Pressure: projectconfig.Pressure{
+			Message: "{{.Text}}\nPush the branch before you stop ({{.Dir}}, {{.Bucket}} back {{.Reset}}).",
+		},
+	}
+	evs := []events.Event{ev("budget.tight", "session", "/home/dev/myapp", map[string]any{
+		"reason": "myapp has 4.0% left", "reset_ts": iso(testNow.Add(90 * time.Minute))})}
+
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, cfg).Text
+	if !containsFold(got, "myapp has 4.0% left") {
+		t.Errorf("{{.Text}} lost the facts it was standing in for:\n%s", got)
+	}
+	if !containsFold(got, "Push the branch before you stop (myapp, 5h back in 1h30m).") {
+		t.Errorf("the project's own line did not render:\n%s", got)
+	}
+}
+
+// TestABrokenTemplateStillDeliversTheWarning is the failure this whole design
+// is arranged around. A typo in the decoration must not be able to take the
+// warning down with it, because the result is a silence and a silence reads as
+// nothing being wrong.
+func TestABrokenTemplateStillDeliversTheWarning(t *testing.T) {
+	// Past Load's validation on purpose: this is the render-time half, for the
+	// mistakes a parse cannot see.
+	cfg := projectconfig.Config{Pressure: projectconfig.Pressure{Message: "{{.NotAField}}"}}
+	evs := []events.Event{ev("budget.tight", "session", "/home/dev/myapp", map[string]any{
+		"reason": "myapp has 4.0% left"})}
+
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, cfg)
+	if !containsFold(got.Text, "myapp has 4.0% left") {
+		t.Errorf("the warning was lost with the template:\n%s", got.Text)
+	}
+	if len(got.problems) != 1 {
+		t.Errorf("problems = %v, want the failure recorded for the log", got.problems)
+	}
+}
+
+// TestTheCapLeavesSessionScopedEventsAlone keeps a busy machine's nudges from
+// crowding out the pressure warnings. A session-scoped event reaches exactly
+// one conversation, so it is not competing for the same reader.
+func TestTheCapLeavesSessionScopedEventsAlone(t *testing.T) {
+	var in []events.Event
+	for i := 0; i < 5; i++ {
+		in = append(in, ev("budget.tight", "session", "/home/dev/myapp", nil))
+	}
+	for i := 0; i < 4; i++ {
+		e := ev("cache.expiring", "", "", nil)
+		e.Scope.Session = "session-abc12345"
+		in = append(in, e)
+	}
+	st := Stats{Skipped: map[string]int{}}
+	got := capped(in, &st)
+
+	if len(got) != maxPerPass+4 {
+		t.Fatalf("kept %d, want %d broad plus every session-scoped one", len(got), maxPerPass+4)
+	}
+	if st.Skipped["not the most recent transition"] != 2 {
+		t.Errorf("skipped %v, want the two oldest broad events", st.Skipped)
 	}
 }

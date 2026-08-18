@@ -3,23 +3,30 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/announce"
 	"github.com/PeterSR/claude-code-bloodhound/internal/projectconfig"
 )
 
-var projectInitForce bool
+var (
+	projectInitForce  bool
+	projectShowSample bool
+)
 
 var projectCmd = &cobra.Command{
 	Use:   "project",
 	Short: "Read and write the .bloodhound file a project keeps beside its code",
 	Long: `A project's own .bloodhound/config.json says how bloodhound should behave
 toward sessions working in that directory: whether to speak up before a
-compaction, whether a warning may suggest arming a wakeup.
+compaction, what words to use when it does, and whether a warning may suggest
+arming a wakeup or whether bloodhound should carry the wakeup itself.
 
 It is not an override of the global config and shares no keys with it. The
 global config is how the daemon operates: where the database lives, which
@@ -91,14 +98,80 @@ the current directory.`,
 		} else {
 			fmt.Fprintf(out, "config:        %s\n", found.Path)
 		}
-		fmt.Fprintf(out, "writeup nudge: %v\n", cfg.WriteupNudge)
-		fmt.Fprintf(out, "wakeup nudge:  %v\n", cfg.WakeupNudge)
+		fmt.Fprintf(out, "pressure:      %s\n", describePressure(cfg.Pressure))
+		fmt.Fprintf(out, "writeup nudge: %s\n", describeNudge(cfg.WriteupNudge))
+		fmt.Fprintf(out, "cache nudge:   %s\n", describeNudge(cfg.CacheNudge))
+		fmt.Fprintf(out, "wakeup:        %s\n", describeWakeup(cfg.Wakeup))
 		if len(found.UnknownKeys) > 0 {
 			fmt.Fprintf(out, "unknown keys:  %s (ignored; the global config's keys do not work here)\n",
 				strings.Join(found.UnknownKeys, ", "))
 		}
+		for _, p := range found.Problems {
+			fmt.Fprintf(out, "problem:       %s\n", p)
+		}
+
+		if projectShowSample {
+			printPreview(out, cfg, dir)
+		}
 		return nil
 	},
+}
+
+// describePressure and the two below answer the question someone actually
+// opens `project show` with, which is not "what does the file say" (they can
+// read it) but "is bloodhound going to use my words or its own here".
+func describePressure(p projectconfig.Pressure) string {
+	if p.Message != "" {
+		return "this project's wording"
+	}
+	return "built-in wording"
+}
+
+func describeNudge(n projectconfig.Nudge) string {
+	if !n.Enabled {
+		return "off"
+	}
+	if n.Message != "" {
+		return "on, in this project's wording"
+	}
+	return "on"
+}
+
+func describeWakeup(w projectconfig.Wakeup) string {
+	switch w.Mode {
+	case projectconfig.WakeupNudge:
+		return "nudge (a warning may suggest arming one; bloodhound arms nothing)"
+	case projectconfig.WakeupResume:
+		return "resume (bloodhound notes the session down and writes when the window reopens)"
+	}
+	return "off"
+}
+
+// printPreview runs the config through the same functions the daemon calls,
+// against a synthetic situation. Reading a template and imagining the sentence
+// it produces is exactly the step that goes wrong, and the alternative to
+// checking here is finding out from a message that already went out.
+func printPreview(out io.Writer, cfg projectconfig.Config, dir string) {
+	pv := announce.RenderPreview(cfg, dir, time.Now())
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Preview, against made-up numbers:")
+	fmt.Fprintln(out)
+	if pv.Pressure == "" {
+		fmt.Fprintln(out, "  (nothing; this directory would hear none of it)")
+		return
+	}
+	for _, line := range strings.Split(pv.Pressure, "\n") {
+		fmt.Fprintf(out, "  %s\n", line)
+	}
+	if pv.Resume != "" {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Then, when the window reopens:")
+		fmt.Fprintln(out)
+		for _, line := range strings.Split(pv.Resume, "\n") {
+			fmt.Fprintf(out, "  %s\n", line)
+		}
+	}
 }
 
 // targetDir resolves the optional directory argument, defaulting to the
@@ -112,6 +185,8 @@ func targetDir(args []string) (string, error) {
 
 func init() {
 	projectInitCmd.Flags().BoolVar(&projectInitForce, "force", false, "overwrite an existing file")
+	projectShowCmd.Flags().BoolVar(&projectShowSample, "preview", false,
+		"also render what these settings would say, against made-up numbers")
 	projectCmd.AddCommand(projectInitCmd, projectShowCmd)
 	rootCmd.AddCommand(projectCmd)
 }

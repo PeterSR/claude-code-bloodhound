@@ -21,6 +21,24 @@
 // has gone cold that turn re-pays the whole conversation prefix before reading
 // a word. Missing a warning is cheap. A cold wakeup is not, and it is charged
 // to the budget the warning was about.
+//
+// # The two exceptions, and why they are the same rule
+//
+// Both are opt-in per directory, and neither is a softening of the rule above.
+// They are the two cases where the arithmetic that makes the rule right points
+// the other way.
+//
+// A warm cache inside its last stretch. Delivering there starts a turn, but it
+// starts it at warm-cache rates, and the alternative is that the same context
+// is rebuilt from nothing the next time anyone touches the session. Speaking
+// while the cache is warm is the cheap branch, not the expensive one, which is
+// why cache.expiring is deliverable to a resting session while cache.expired
+// never is.
+//
+// A promised wakeup. When a project asks bloodhound to carry the wakeup rather
+// than suggest one, the cold resume on the far side is not an accident, it is
+// the thing being paid for. Refusing it because it is expensive would mean the
+// one delivery a user explicitly asked for is the one that never arrives.
 package announce
 
 import (
@@ -45,16 +63,57 @@ import (
 // the log into every conversation on the machine.
 const cursorKey = "announce_cursor"
 
-// maxPerPass bounds how many events one pass will speak about. A burst of
-// transitions usually means several buckets crossed at once and the reader
-// needs the worst of them, not all of them; the rest stay in the log where
-// `bloodhound events` can show them.
+// maxPerPass bounds how many account-wide or directory-wide events one pass
+// will speak about. A burst of transitions usually means several buckets
+// crossed at once and the reader needs the worst of them, not all of them; the
+// rest stay in the log where `bloodhound events` can show them.
+//
+// Session-scoped events are outside this cap and capped by their own nature
+// instead: they reach exactly one conversation, one line per kind, so a
+// machine watching a dozen sessions cannot crowd the pressure warnings out of
+// a pass.
 const maxPerPass = 3
 
 // backfillLimit bounds what a first run, or a run after a long gap, will look
 // at. Without it a machine that has been collecting for months would announce
 // its entire history the first time this is switched on.
 const backfillLimit = 25
+
+// armHorizon is how far out a reset may be and still be worth promising a
+// wakeup for.
+//
+// A five hour window always qualifies, which is the case the feature exists
+// for. A weekly window usually does not, and that is deliberate: "I will write
+// to you on Thursday" is not resuming work, it is a calendar entry, and the
+// session it wakes will have been closed for days. Past the horizon nothing is
+// promised and nothing is suggested, because there is no honest version of
+// either.
+const armHorizon = 12 * time.Hour
+
+// resumeGrace is how long after the window reopens a promise is still worth
+// keeping. Past it the wakeup would arrive with a stale reason attached, so
+// the promise is retired unkept rather than delivered late.
+const resumeGrace = 6 * time.Hour
+
+// projectionHorizon is how far out a projected crossing may be and still be
+// worth interrupting someone about.
+//
+// The projection itself is honest and stays in the log and on the dashboard
+// whatever this is set to. What it is not is a claim about tomorrow. The burn
+// rate behind it is measured over the last hour, and extrapolating one hour of
+// work across two days assumes the machine keeps working through the night at
+// the pace it happens to be going right now. On a weekly window that produces
+// exactly the message this was written after: a meter at 56% announcing a cap
+// it will reach in a day and three quarters, which is neither wrong nor
+// something a reader can act on.
+//
+// Six hours is where the extrapolation stops being a leap. It is longer than
+// the burn window it is built from, short enough that the current pace is
+// still a fair description of the near future, and long enough to finish what
+// is in flight and write it up. Inside a 5h window every crossing qualifies by
+// construction, which is right: that window cannot produce a crossing further
+// out than its own length.
+const projectionHorizon = 6 * time.Hour
 
 // Announceable kinds, and what each one means to a reader.
 //
@@ -75,29 +134,47 @@ var announceable = map[string]bool{
 	// the run-up to a compaction. Opt-in per directory, and scoped to the one
 	// session it is about.
 	"recommendation": true,
+	// A session's prompt cache in its last stretch. Opt-in per directory, and
+	// the only thing bloodhound will say to a session that is not working.
+	"cache": true,
 }
 
-// Deliberately not announceable: cache.expiring, which looks like it belongs
-// here and cannot be delivered. It is populated only in the last fifth of a
-// cache TTL, which a session reaches by sitting idle, and the gate admits only
-// sessions that are mid-turn. A session working hard enough to hear us has
-// just written its cache and is never in the band. The fact is real and worth
-// having in the log; there is simply nobody awake to tell.
+// pressureKind reports whether a kind is one of the warnings a directory does
+// not get to switch off, as opposed to the two opt-in nudges. The distinction
+// decides three things: whether the cap applies, whether a project's pressure
+// wording applies, and whether a wakeup line belongs underneath.
+func pressureKind(kind string) bool {
+	switch kind {
+	case "budget", "limit_projection", "saturation":
+		return true
+	}
+	return false
+}
+
+// listSessions reads the machine's session registry. A variable so a test can
+// supply a machine that does not exist; production never replaces it, and
+// nothing outside this package can.
+var listSessions = ccsock.ListSessions
 
 // Stats is what one pass did, for the daemon log.
 type Stats struct {
 	Considered int
 	Announced  int
 	Delivered  int
-	Skipped    map[string]int
-	Errors     []string
+	// Armed counts sessions noted down for a wakeup this pass, and Resumed
+	// counts promises kept.
+	Armed   int
+	Resumed int
+	Skipped map[string]int
+	Errors  []string
 }
 
 // Options configure a pass. The zero value is the normal one.
 type Options struct {
 	Now time.Time
 	// DryRun resolves and gates everything but sends nothing, and does not
-	// advance the cursor. What `bloodhound budget announce --dry-run` uses.
+	// advance the cursor, arm a wakeup, or resolve one. What `bloodhound
+	// budget announce --dry-run` uses.
 	DryRun bool
 	// Gate overrides the default gate. Tests set this; production does not.
 	Gate *notify.Gate
@@ -112,12 +189,23 @@ type Sender interface {
 }
 
 // Run reads the events recorded since the last pass and tells whoever is awake
-// and concerned.
+// and concerned, then keeps any wakeup promise that has come due.
 func Run(ctx context.Context, s *store.Store, opt Options) (Stats, error) {
 	st := Stats{Skipped: map[string]int{}}
 	now := opt.Now
 	if now.IsZero() {
 		now = time.Now()
+	}
+
+	// Promises first, and outside the event pass entirely.
+	//
+	// A wakeup comes due because a clock passed a moment, not because
+	// anything was appended to the log, so it cannot hang off the cursor. It
+	// also has to survive every early return below: the pass where nothing
+	// transitioned is exactly the pass where a five hour window quietly
+	// reopened with nobody working.
+	if err := deliverResumes(ctx, s, now, opt, &st); err != nil {
+		st.Errors = append(st.Errors, fmt.Sprintf("wakeups: %v", err))
 	}
 
 	cursor, set, err := readCursor(ctx, s)
@@ -197,11 +285,7 @@ func Run(ctx context.Context, s *store.Store, opt Options) (Stats, error) {
 		}
 	}
 
-	worth := filterWorthSaying(evs)
-	if len(worth) > maxPerPass {
-		st.Skipped["not the most recent transition"] += len(worth) - maxPerPass
-		worth = worth[len(worth)-maxPerPass:]
-	}
+	worth := capped(filterWorthSaying(evs, now), &st)
 	st.Announced = len(worth)
 
 	if len(worth) > 0 {
@@ -210,6 +294,29 @@ func Run(ctx context.Context, s *store.Store, opt Options) (Stats, error) {
 		}
 	}
 	return st, nil
+}
+
+// capped applies maxPerPass to the events that go to everyone, and leaves the
+// session-scoped ones alone.
+//
+// Two groups because one cap over both would let a busy machine's session
+// nudges push out the pressure warnings, and the two are not competing for the
+// same reader anyway: a session-scoped event reaches exactly one conversation,
+// where it is at most one line.
+func capped(evs []events.Event, st *Stats) []events.Event {
+	var broad, scoped []events.Event
+	for _, e := range evs {
+		if e.Scope.Session != "" {
+			scoped = append(scoped, e)
+			continue
+		}
+		broad = append(broad, e)
+	}
+	if len(broad) > maxPerPass {
+		st.Skipped["not the most recent transition"] += len(broad) - maxPerPass
+		broad = broad[len(broad)-maxPerPass:]
+	}
+	return append(broad, scoped...)
 }
 
 // upTo drops events past the head this pass claimed.
@@ -229,7 +336,7 @@ func upTo(evs []events.Event, head int64) []events.Event {
 // wrong for an interruption: nobody needs telling that pressure went away. The
 // exception is a budget returning to clear, which is dropped too, because the
 // reader either already heard the warning or was asleep for it.
-func filterWorthSaying(evs []events.Event) []events.Event {
+func filterWorthSaying(evs []events.Event, now time.Time) []events.Event {
 	out := evs[:0:0]
 	for _, e := range evs {
 		kind, state, ok := splitKind(e.Kind)
@@ -242,7 +349,10 @@ func filterWorthSaying(evs []events.Event) []events.Event {
 				out = append(out, e)
 			}
 		case "limit_projection":
-			if state == "projected" {
+			// Near enough to be believed, not merely true. See
+			// projectionHorizon: a crossing two days out is a fact about an
+			// extrapolation rather than a fact about the week.
+			if state == "projected" && crossingIsNear(e, now) {
 				out = append(out, e)
 			}
 		case "saturation":
@@ -255,9 +365,32 @@ func filterWorthSaying(evs []events.Event) []events.Event {
 			if state == "compact" {
 				out = append(out, e)
 			}
+		case "cache":
+			// "expiring" is the only actionable band: the cache is still warm,
+			// so a turn started now is cheap, and it is about to stop being
+			// so. "expired" is a bill already paid and "warm" is nothing at
+			// all.
+			if state == "expiring" {
+				out = append(out, e)
+			}
 		}
 	}
 	return out
+}
+
+// crossingIsNear reports whether a projected crossing is close enough to
+// interrupt someone about.
+//
+// Fails open. A projection whose ETA did not survive the round trip through
+// the log is announced rather than dropped: the sensor said the meter is on
+// pace to cap out before the window resets, and that is worth hearing even
+// when the moment it lands cannot be pinned down.
+func crossingIsNear(e events.Event, now time.Time) bool {
+	at, ok := resetAt(e.Detail["eta_ts"], now)
+	if !ok {
+		return true
+	}
+	return at.Sub(now) <= projectionHorizon
 }
 
 func splitKind(k string) (kind, state string, ok bool) {
@@ -269,7 +402,7 @@ func splitKind(k string) (kind, state string, ok bool) {
 }
 
 func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Event, opt Options, st *Stats) error {
-	sessions, err := ccsock.ListSessions()
+	sessions, err := listSessions()
 	if err != nil {
 		return fmt.Errorf("read session registry: %w", err)
 	}
@@ -285,29 +418,40 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 		gate.Cache = coldCache(ctx, s, sessions, now)
 	}
 
-	admitted, skipped := gate.Admitted(sessions)
-	for k, v := range skipped {
-		st.Skipped[k] += v
-	}
-	if len(admitted) == 0 {
-		return nil
-	}
-
 	sender := opt.Sender
 	if sender == nil {
 		sender = notify.New()
 	}
 
-	for _, sess := range admitted {
-		text := textFor(evs, sess, now, nudgesFor(sess.CWD))
-		if text == "" {
-			continue // nothing in this batch concerns this session
-		}
-		if opt.DryRun {
-			st.Delivered++
+	for _, sess := range sessions {
+		cfg := configFor(sess.CWD)
+		msg := compose(evs, sess, now, cfg)
+		if msg.Text == "" {
+			// Nothing in this batch concerns this session. Not a skip: there
+			// was never anything to deliver, so counting it would make the log
+			// read as if the gate had refused a warning.
 			continue
 		}
-		if _, err := sender.Send(ctx, notify.Target{SessionID: sess.SessionID}, text); err != nil {
+
+		// The gate is chosen by what is in the message rather than set once
+		// for the pass. A cache nudge is the one line worth waking a resting
+		// session for, and once that wakeup is being paid for anyway the rest
+		// of the batch rides along at no extra cost.
+		g := gate
+		g.AllowAtRest = msg.CacheNudge
+		if d := g.Admit(sess); !d.Admit {
+			st.Skipped[d.Skip]++
+			continue
+		}
+
+		if opt.DryRun {
+			st.Delivered++
+			if msg.Arm != nil {
+				st.Armed++
+			}
+			continue
+		}
+		if _, err := sender.Send(ctx, notify.Target{SessionID: sess.SessionID}, msg.Text); err != nil {
 			if notify.Undeliverable(err) {
 				st.Skipped[notify.SkipUnreachable]++
 				continue
@@ -316,25 +460,75 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 			continue
 		}
 		st.Delivered++
+		for _, p := range msg.problems {
+			st.Errors = append(st.Errors, fmt.Sprintf("%s: %s", sess.SessionID, p))
+		}
+
+		// Arming after the send, never before. The promise is only worth
+		// keeping if the session heard the stop that motivated it; waking a
+		// conversation that was never told anything, hours later, with "the
+		// window has reopened" is the kind of message that gets a tool
+		// uninstalled.
+		if msg.Arm != nil {
+			if err := arm(ctx, s, sess, now, *msg.Arm); err != nil {
+				st.Errors = append(st.Errors, fmt.Sprintf("%s: arm wakeup: %v", sess.SessionID, err))
+				continue
+			}
+			st.Armed++
+		}
 	}
 	return nil
 }
 
-// textFor builds the line one session should hear, or "" when none of the
-// batch concerns it.
+// armPlan is a promise about to be made: which window, and when it reopens.
+type armPlan struct {
+	Bucket string
+	At     time.Time
+	Reason string
+}
+
+// message is what one session is about to hear, and what follows from it.
+type message struct {
+	Text string
+	// CacheNudge is set when a cache line made it in, which is what allows
+	// this delivery to wake a resting session.
+	CacheNudge bool
+	// Arm is set when the project asked bloodhound to carry the wakeup and
+	// there is a deadline near enough to promise one for.
+	Arm *armPlan
+	// problems are templates in the project's config that did not render.
+	// Collected rather than raised: the built-in wording went out in their
+	// place, so this is something to log, never something to fail on.
+	problems []string
+}
+
+// compose builds what one session should hear, or the zero message when none
+// of the batch concerns it.
 //
 // A budget event is directory-scoped, so it goes only to sessions running in
 // that directory: telling an unrelated project that someone else's allowance
 // is tight is noise, and it is the mistake a global broadcast makes. The
 // limit events are account-wide and go to everyone admitted, because the 5h
 // cliff stops every session on the machine, not just the one that caused it.
-func textFor(evs []events.Event, sess ccsock.Session, now time.Time, nudges projectconfig.Config) string {
-	var lines []string
+//
+// The order of the finished text is pressure, then the wakeup line that
+// belongs to it, then the opt-in nudges, then the project's own closing line.
+// Facts first and advice last, so a message that gets skimmed is skimmed in
+// the useful direction.
+func compose(evs []events.Event, sess ccsock.Session, now time.Time, cfg projectconfig.Config) message {
+	var msg message
+	var pressure, nudges []string
+
 	// The soonest reset among the lines that made it in, and which bucket it
 	// belongs to. Two buckets crossing together is one situation with two
-	// deadlines, and the note has to name which of them it means.
+	// deadlines, and anything said underneath has to name which of them it
+	// means.
 	var soonest time.Time
-	soonestBucket := ""
+	soonestBucket, soonestReason := "", ""
+	// The newest transition in the batch, which is what a project's own
+	// wording is rendered against when several arrived at once.
+	var newest events.Event
+
 	for _, e := range evs {
 		if e.Scope.Cwd != "" && !sameDir(e.Scope.Cwd, sess.CWD) {
 			continue
@@ -344,72 +538,379 @@ func textFor(evs []events.Event, sess ccsock.Session, now time.Time, nudges proj
 		if e.Scope.Session != "" && e.Scope.Session != sess.SessionID {
 			continue
 		}
-		if !wanted(e, nudges) {
+		if !wanted(e, cfg) {
 			continue
 		}
-		line := describe(e, now)
+		line, err := lineFor(e, sess, now, cfg)
 		if line == "" {
 			continue
 		}
-		lines = append(lines, line)
-		if at, ok := resetAt(e.Detail["reset_ts"], now); ok && (soonest.IsZero() || at.Before(soonest)) {
-			soonest, soonestBucket = at, e.Scope.Bucket
+		if err != nil {
+			// The wording was the project's and it did not render, so the
+			// built-in line went out instead. Worth saying once in the daemon
+			// log; never worth dropping the message over.
+			msg.wordingProblem(e, err)
+		}
+
+		kind, _, _ := splitKind(e.Kind)
+		newest = e
+		if pressureKind(kind) {
+			pressure = append(pressure, line)
+			if at, ok := resetAt(e.Detail["reset_ts"], now); ok && (soonest.IsZero() || at.Before(soonest)) {
+				soonest, soonestBucket = at, e.Scope.Bucket
+				soonestReason = line
+			}
+			continue
+		}
+		if kind == "cache" {
+			msg.CacheNudge = true
+		}
+		nudges = append(nudges, line)
+	}
+
+	if len(pressure) == 0 && len(nudges) == 0 {
+		return message{}
+	}
+
+	var out []string
+	if len(pressure) > 0 {
+		body := strings.Join(pressure, "\n")
+		if cfg.Pressure.Message != "" {
+			var err error
+			body, err = projectconfig.Render(cfg.Pressure.Message,
+				varsFor(newest, sess, now, body, soonest, soonestBucket), body)
+			if err != nil {
+				msg.wordingProblem(newest, err)
+			}
+		}
+		out = append(out, body)
+
+		if line, plan := wakeupLine(cfg, sess, now, soonest, soonestBucket, soonestReason); line != "" {
+			out = append(out, line)
+			msg.Arm = plan
 		}
 	}
-	if len(lines) == 0 {
-		return ""
-	}
-	// Once for the batch, not once per line: several buckets crossing at the
-	// same moment is one situation, and the same suggestion repeated three
-	// times reads as a tool that has stopped paying attention.
-	//
-	// Only when a reset actually made it into the text above. Without one the
-	// note would point at a moment the reader was never told, and there would
-	// be nothing to arm a wakeup for.
-	if nudges.WakeupNudge && soonestBucket != "" {
-		lines = append(lines, wakeupNote(soonestBucket))
-	}
-	return strings.Join(lines, "\n")
+	out = append(out, nudges...)
+
+	msg.Text = strings.Join(out, "\n")
+	return msg
 }
 
-// wakeupNote is the opt-in tail on a warning, enabled per directory by
-// projectconfig.WakeupNudge.
+// wordingProblem is recorded rather than raised. Collected here so the one
+// caller that cares (the daemon log) has something to print without compose
+// having to carry an error return through every branch.
+func (m *message) wordingProblem(e events.Event, err error) {
+	m.problems = append(m.problems, fmt.Sprintf("%s: %v", e.Kind, err))
+}
+
+// wakeupLine renders the far side of a warning, and reports the promise it
+// implies.
 //
-// Offered rather than ordered, and it names no mechanism. Bloodhound does not
-// arm anything and has no idea what the reader schedules wakeups with; what it
-// knows is that the work is about to stop and when it could start again, which
-// is the part worth saying out loud.
+// Three outcomes rather than two. Off says nothing. Nudge says the work could
+// pick up again if something is armed to wake it, and promises nothing.
+// Resume promises, and only when there is a deadline close enough to keep the
+// promise honest: past armHorizon, or with no reset in the text at all,
+// bloodhound has nothing it can commit to and says so by saying nothing.
+func wakeupLine(cfg projectconfig.Config, sess ccsock.Session, now time.Time, at time.Time, bucket, reason string) (string, *armPlan) {
+	if bucket == "" || at.IsZero() {
+		return "", nil
+	}
+	v := projectconfig.Vars{
+		Kind:    "wakeup",
+		Bucket:  budget.BucketLabel(bucket),
+		Cwd:     sess.CWD,
+		Dir:     budget.Label(sess.CWD),
+		Session: sess.SessionID,
+		Reset:   whenfmt.Phrase(at, now),
+		ResetAt: at,
+		Now:     now,
+	}
+
+	switch {
+	case cfg.Wakeup.Suggests():
+		// Offered rather than ordered, and it names no mechanism. Bloodhound
+		// does not arm anything here and has no idea what the reader schedules
+		// wakeups with; what it knows is that the work is about to stop and
+		// when it could start again, which is the part worth saying out loud.
+		//
+		// It names the bucket rather than repeating the time, which is already
+		// in the line above it, and rather than saying "that reset", which is
+		// ambiguous on the batch where both windows crossed at once.
+		fallback := fmt.Sprintf(
+			"Work that stops here could pick up again when the %s window reopens, if something is armed to wake it.",
+			v.Bucket)
+		v.Text = fallback
+		line, _ := projectconfig.Render(cfg.Wakeup.NudgeMessage, v, fallback)
+		return line, nil
+
+	case cfg.Wakeup.Arms():
+		if at.Sub(now) > armHorizon {
+			return "", nil
+		}
+		fallback := fmt.Sprintf(
+			"Work that stops here can be picked up again: bloodhound will write to this session when the %s window reopens %s.",
+			v.Bucket, v.Reset)
+		v.Text = fallback
+		line, _ := projectconfig.Render(cfg.Wakeup.ArmedMessage, v, fallback)
+		return line, &armPlan{Bucket: bucket, At: at, Reason: reason}
+	}
+	return "", nil
+}
+
+// arm records the promise.
+func arm(ctx context.Context, s *store.Store, sess ccsock.Session, now time.Time, plan armPlan) error {
+	_, err := s.ArmWakeup(ctx, store.SessionWakeup{
+		SessionUUID: sess.SessionID,
+		PID:         sess.PID,
+		Cwd:         sess.CWD,
+		Bucket:      plan.Bucket,
+		Reason:      plan.Reason,
+		ArmedMS:     now.UnixMilli(),
+		DueMS:       plan.At.UnixMilli(),
+		ExpireMS:    plan.At.Add(resumeGrace).UnixMilli(),
+	})
+	return err
+}
+
+// deliverResumes keeps the promises that have come due.
 //
-// It names the bucket rather than repeating the time, which is already in the
-// line above it, and rather than saying "that reset", which is ambiguous on
-// the batch where both windows crossed at once.
-func wakeupNote(bucket string) string {
-	return fmt.Sprintf(
-		"Work that stops here could pick up again when the %s window reopens, if something is armed to wake it.",
-		budget.BucketLabel(bucket))
+// This is the one delivery bloodhound makes that nobody is awake for, and the
+// only one where a cold resume is the intended outcome rather than the thing
+// being avoided. Everything else here is about not keeping a promise badly:
+// not waking a session into the same wall it stopped at, not waking it so late
+// that the reason is stale, and not giving up the first time the socket does
+// not answer.
+func deliverResumes(ctx context.Context, s *store.Store, now time.Time, opt Options, st *Stats) error {
+	pending, err := s.PendingWakeups(ctx)
+	if err != nil || len(pending) == 0 {
+		return err
+	}
+	nowMS := now.UnixMilli()
+
+	// A window can turn over earlier than the reading that armed the promise
+	// predicted, and the log knows before the clock does. Consulting it costs
+	// one query, and only when something is still waiting.
+	early := earlyResets(ctx, s, pending, nowMS)
+
+	// The latest deadline still ahead of us, per session. A session warned
+	// about both windows must not be woken by the 5h reopening while the week
+	// is still shut: that hands it back the wall it stopped at, at the cost of
+	// the whole prefix. The later promise carries it instead.
+	stillShut := map[string]int64{}
+	for _, w := range pending {
+		if w.DueMS > nowMS && !early[w.Bucket] && w.DueMS > stillShut[w.SessionUUID] {
+			stillShut[w.SessionUUID] = w.DueMS
+		}
+	}
+
+	var due []store.SessionWakeup
+	for _, w := range pending {
+		if w.DueMS <= nowMS || early[w.Bucket] {
+			due = append(due, w)
+		}
+	}
+	if len(due) == 0 {
+		return nil
+	}
+
+	// Both windows reopening in the same pass is one event to the session
+	// sitting there, not two. The later of them speaks, because it is the one
+	// that was actually holding the work up, and the other resolves quietly.
+	// Without this a session warned about both gets woken twice in a minute,
+	// which is the same cold prefix paid twice over.
+	speaks := map[string]int64{}
+	for _, w := range due {
+		if nowMS > w.ExpireMS {
+			continue // a stale promise never speaks, so it never wins the slot
+		}
+		if cur, ok := speaks[w.SessionUUID]; !ok || w.DueMS > cur {
+			speaks[w.SessionUUID] = w.DueMS
+		}
+	}
+
+	sessions, err := listSessions()
+	if err != nil {
+		return fmt.Errorf("read session registry: %w", err)
+	}
+	byUUID := make(map[string]ccsock.Session, len(sessions))
+	for _, sess := range sessions {
+		byUUID[sess.SessionID] = sess
+	}
+
+	sender := opt.Sender
+	if sender == nil {
+		sender = notify.New()
+	}
+
+	for _, w := range due {
+		resolve := func(outcome, note string) {
+			if opt.DryRun {
+				return
+			}
+			if err := s.ResolveWakeup(ctx, w.ID, outcome, nowMS, note); err != nil {
+				st.Errors = append(st.Errors, fmt.Sprintf("wakeup %d: %v", w.ID, err))
+			}
+		}
+
+		if nowMS > w.ExpireMS {
+			resolve(store.WakeupExpired, "nobody reachable before the reason went stale")
+			st.Skipped["wakeup went stale"]++
+			continue
+		}
+		if until, ok := stillShut[w.SessionUUID]; ok && until > w.DueMS {
+			resolve(store.WakeupSuperseded, "another window this session was warned about is still shut")
+			st.Skipped["wakeup superseded by a later window"]++
+			continue
+		}
+		if speaks[w.SessionUUID] != w.DueMS {
+			resolve(store.WakeupSuperseded, "a later window reopened in the same pass and carries this")
+			st.Skipped["wakeup superseded by a later window"]++
+			continue
+		}
+
+		sess, ok := byUUID[w.SessionUUID]
+		if !ok {
+			// The session is gone from the registry, which usually means it
+			// was closed. Kept pending rather than retired: a registry read
+			// during a restart can miss a session that is about to be back,
+			// and expire_ms is what eventually ends the waiting.
+			if !opt.DryRun {
+				_ = s.TouchWakeup(ctx, w.ID, "session not in the registry")
+			}
+			st.Skipped["wakeup target is gone"]++
+			continue
+		}
+
+		// Everything the gate normally refuses is deliberately allowed here.
+		// What remains is the one question left: is anything listening.
+		g := notify.Gate{Now: now, AllowAtRest: true, AllowCold: true}
+		if opt.Gate != nil {
+			g = *opt.Gate
+			g.AllowAtRest, g.AllowCold = true, true
+		}
+		if d := g.Admit(sess); !d.Admit {
+			if !opt.DryRun {
+				_ = s.TouchWakeup(ctx, w.ID, d.Skip)
+			}
+			st.Skipped[d.Skip]++
+			continue
+		}
+
+		text := resumeText(w, sess, now, configFor(w.Cwd))
+		if opt.DryRun {
+			st.Resumed++
+			continue
+		}
+		if _, err := sender.Send(ctx, notify.Target{SessionID: sess.SessionID}, text); err != nil {
+			if notify.Undeliverable(err) {
+				_ = s.TouchWakeup(ctx, w.ID, notify.SkipUnreachable)
+				st.Skipped[notify.SkipUnreachable]++
+				continue
+			}
+			st.Errors = append(st.Errors, fmt.Sprintf("wakeup %d: %v", w.ID, err))
+			continue
+		}
+		resolve(store.WakeupDelivered, "")
+		st.Resumed++
+	}
+	return nil
+}
+
+// earlyResets reports which of the buckets still waiting have already turned
+// over according to the log.
+//
+// Best effort by design. The deadline stored on the promise is the primary
+// trigger and needs nothing but a clock; this only brings a wakeup forward
+// when a poll saw the window turn over sooner than the reading that armed it
+// predicted. A failure here means the promise fires on its own deadline
+// instead, which is the answer it would have had anyway.
+func earlyResets(ctx context.Context, s *store.Store, pending []store.SessionWakeup, nowMS int64) map[string]bool {
+	oldest := int64(0)
+	for _, w := range pending {
+		if w.DueMS > nowMS && (oldest == 0 || w.ArmedMS < oldest) {
+			oldest = w.ArmedMS
+		}
+	}
+	if oldest == 0 {
+		return nil
+	}
+	evs, err := events.Query(ctx, s.DB, events.Filter{
+		Kinds:   []string{"window.reset"},
+		SinceMS: oldest,
+		Limit:   50,
+	})
+	if err != nil || len(evs) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, e := range evs {
+		if e.Scope.Bucket != "" {
+			out[e.Scope.Bucket] = true
+		}
+	}
+	return out
+}
+
+// resumeText is what arrives on the far side of a window.
+//
+// Written to read cold, because by definition it does. The session it reaches
+// has been sitting at its prompt for hours, its context may have been rebuilt
+// on the way in, and nobody is watching the terminal; a line that only makes
+// sense to someone who remembers the warning is a line that lands as noise.
+// So it says what reopened, what stopped, and how long ago.
+func resumeText(w store.SessionWakeup, sess ccsock.Session, now time.Time, cfg projectconfig.Config) string {
+	bucket := budget.BucketLabel(w.Bucket)
+	waited := whenfmt.Dur(now.Sub(w.Armed()).Milliseconds())
+
+	fallback := fmt.Sprintf("The %s window has reopened. Work here stopped %s ago under the pressure bloodhound flagged then, and can pick up again now.",
+		bucket, waited)
+	if w.Reason != "" {
+		fallback = fmt.Sprintf("The %s window has reopened, so work here can pick up again. What stopped it %s ago: %s",
+			bucket, waited, w.Reason)
+	}
+
+	v := projectconfig.Vars{
+		Text:    fallback,
+		Kind:    "resume",
+		Bucket:  bucket,
+		Cwd:     w.Cwd,
+		Dir:     budget.Label(w.Cwd),
+		Session: sess.SessionID,
+		ArmedAt: w.Armed(),
+		Waited:  waited,
+		Now:     now,
+	}
+	text, _ := projectconfig.Render(cfg.Wakeup.ResumeMessage, v, fallback)
+	return text
 }
 
 // wanted reports whether an opt-in event may be said to this session at all.
 //
 // The pressure events are unconditional: a limit that stops every session on
-// the machine is not something a directory gets to switch off. The writeup
-// nudge is different in kind. Nothing is going wrong when it fires, and it is
-// advice about how to work rather than a fact about the meter, so it goes only
-// where it was asked for.
-func wanted(e events.Event, nudges projectconfig.Config) bool {
+// the machine is not something a directory gets to switch off. The two nudges
+// are different in kind. Nothing is going wrong when either fires, and they
+// are advice about how to work rather than facts about the meter, so they go
+// only where they were asked for.
+func wanted(e events.Event, cfg projectconfig.Config) bool {
 	kind, _, ok := splitKind(e.Kind)
-	if ok && kind == "recommendation" {
-		return nudges.WriteupNudge
+	if !ok {
+		return true
+	}
+	switch kind {
+	case "recommendation":
+		return cfg.WriteupNudge.Enabled
+	case "cache":
+		return cfg.CacheNudge.Enabled
 	}
 	return true
 }
 
-// nudgesFor asks the directory a session is working in what it wants to hear.
+// configFor asks the directory a session is working in what it wants to hear.
 //
 // Silent on every failure. A directory with no file, an unreadable one, or a
 // session with no cwd at all all mean the same thing here: nobody asked for
 // the extra lines, so they are left out.
-func nudgesFor(cwd string) projectconfig.Config {
+func configFor(cwd string) projectconfig.Config {
 	if cwd == "" {
 		return projectconfig.Default()
 	}
@@ -427,6 +928,59 @@ func sameDir(a, b string) bool {
 		return a == b
 	}
 	return na == nb
+}
+
+// lineFor renders one event, in the project's words when it asked for its own.
+//
+// The error is returned alongside the line rather than instead of it: a
+// template that failed still yields the built-in sentence, and the caller
+// logs the failure without anybody losing a warning over it.
+func lineFor(e events.Event, sess ccsock.Session, now time.Time, cfg projectconfig.Config) (string, error) {
+	base := describe(e, now)
+	if base == "" {
+		return "", nil
+	}
+	kind, _, _ := splitKind(e.Kind)
+
+	tmpl := ""
+	switch kind {
+	case "recommendation":
+		tmpl = cfg.WriteupNudge.Message
+	case "cache":
+		tmpl = cfg.CacheNudge.Message
+	}
+	if tmpl == "" {
+		return base, nil
+	}
+	at, _ := resetAt(e.Detail["reset_ts"], now)
+	return projectconfig.Render(tmpl, varsFor(e, sess, now, base, at, e.Scope.Bucket), base)
+}
+
+// varsFor is what a project's templates see. The event supplies the facts, the
+// session supplies who is being told, and Text supplies what bloodhound would
+// have said, so a template can reframe without reproducing.
+func varsFor(e events.Event, sess ccsock.Session, now time.Time, text string, at time.Time, bucket string) projectconfig.Vars {
+	kind, state, _ := splitKind(e.Kind)
+	v := projectconfig.Vars{
+		Text:    text,
+		Kind:    kind,
+		State:   state,
+		Bucket:  budget.BucketLabel(bucket),
+		Cwd:     sess.CWD,
+		Dir:     budget.Label(sess.CWD),
+		Project: e.Scope.Project,
+		Session: sess.SessionID,
+		ETA:     when(e.Detail["eta_ts"], now),
+		Now:     now,
+	}
+	if pct, ok := e.Detail["pct"].(float64); ok {
+		v.Pct = int(pct)
+	}
+	if !at.IsZero() {
+		v.ResetAt = at
+		v.Reset = whenfmt.Phrase(at, now)
+	}
+	return v
 }
 
 // describe renders one event as a sentence a reader can act on.
@@ -453,33 +1007,88 @@ func describe(e events.Event, now time.Time) string {
 		}
 		return line
 	case "limit_projection":
-		eta := when(e.Detail["eta_ts"], now)
-		switch {
-		case eta != "" && reset != "":
-			return fmt.Sprintf("The %s meter is on pace to reach 100%% %s, before it resets %s.", b, eta, reset)
-		case eta != "":
-			return fmt.Sprintf("The %s meter is on pace to reach 100%% %s, before it resets.", b, eta)
-		case reset != "":
-			return fmt.Sprintf("The %s meter is on pace to reach 100%% before it resets %s.", b, reset)
+		// Built from parts rather than a table of format strings, because
+		// every one of the four facts is separately absent on some install and
+		// the sentence has to read as English without any of them. Where it
+		// starts from matters as much as where it is heading: "on pace to cap
+		// out" reads very differently at 91% than at 56%, and a reader given
+		// only the projection has to go and look the reading up before they
+		// can judge it.
+		line := fmt.Sprintf("The %s meter", b)
+		if pct, ok := e.Detail["pct"].(float64); ok {
+			line += fmt.Sprintf(" is at %d%%", int(pct))
+			if burn, ok := e.Detail["burn_pct_per_h"].(float64); ok && burn > 0 {
+				line += fmt.Sprintf(", rising about %s/h", pctFigure(burn))
+			}
+			line += ", and is"
+		} else {
+			line += " is"
 		}
-		return fmt.Sprintf("The %s meter is on pace to reach 100%% before it resets.", b)
+		line += " on pace to reach 100%"
+		if eta := when(e.Detail["eta_ts"], now); eta != "" {
+			line += " " + eta
+		}
+		if reset != "" {
+			return line + fmt.Sprintf(", before it resets %s.", reset)
+		}
+		return line + ", before it resets."
 	case "recommendation":
 		line := "This session's recent turns have outgrown its own average, which is the run-up to a compaction."
 		if reason, _ := e.Detail["reason"].(string); reason != "" {
 			line = "This session: " + reason + "."
 		}
-		// The second sentence is the whole point of saying it early. After the
+		// The two costs the recommendation is actually a comparison between.
+		// Without them the line is an opinion; with them it is the arithmetic
+		// that produced the opinion, which is what lets a reader disagree with
+		// it on a session where they know better.
+		if cost, ok := e.Detail["compact_cost_pct"].(float64); ok && cost > 0 {
+			line += fmt.Sprintf(" Compacting costs about %s of a context window", pctFigure(cost))
+			if cold, ok := e.Detail["cold_resume_pct"].(float64); ok && cold > 0 {
+				line += fmt.Sprintf(", against %s to resume this session cold", pctFigure(cold))
+			}
+			line += "."
+		}
+		// The last sentence is the whole point of saying it early. After the
 		// compaction the detail is gone and the writeup has to be rebuilt from
 		// a summary; before it, the detail is still sitting in the context.
 		return line + " Writing up where things stand costs less now than reconstructing it afterwards."
+	case "cache":
+		// Deliberately not phrased as an emergency. Nothing is wrong: a cache
+		// lapsing is the normal end of an idle stretch, and the only reason to
+		// mention it is that writing something down while the context is still
+		// loaded is cheaper than reconstructing it from a cold start later.
+		line := "This session's prompt cache is in its last stretch"
+		if in, ok := e.Detail["expires_in_s"].(float64); ok && in > 0 {
+			line += fmt.Sprintf(", about %s from lapsing", whenfmt.Dur(int64(in)*1000))
+		}
+		line += ". Writing down where things stand now is paid at warm-cache rates"
+		if cold, ok := e.Detail["cold_resume_pct"].(float64); ok && cold > 0 {
+			line += fmt.Sprintf("; after it lapses the same summary starts by rebuilding the whole context, about %s of one", pctFigure(cold))
+			return line + "."
+		}
+		return line + "; after it lapses the same summary starts by rebuilding the whole context."
 	case "saturation":
-		line := fmt.Sprintf("The %s meter has stopped moving at its cap, so every figure downstream is now an estimate.", b)
+		at := "its cap"
+		if pct, ok := e.Detail["pct"].(float64); ok {
+			at = fmt.Sprintf("%d%%", int(pct))
+		}
+		line := fmt.Sprintf("The %s meter has stopped moving at %s, so every figure downstream is now an estimate.", b, at)
 		if reset != "" {
 			line += fmt.Sprintf(" It resets %s.", reset)
 		}
 		return line
 	}
 	return ""
+}
+
+// pctFigure renders a percentage the way the rest of bloodhound's prose does:
+// no decimal once the number is big enough that a tenth is noise, one below
+// that so a slow burn does not print as a flat zero.
+func pctFigure(v float64) string {
+	if v >= 10 {
+		return fmt.Sprintf("%.0f%%", v)
+	}
+	return fmt.Sprintf("%.1f%%", v)
 }
 
 // when renders a stored RFC 3339 moment as a sentence fragment on the

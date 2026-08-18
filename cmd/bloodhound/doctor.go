@@ -96,6 +96,7 @@ type projectConfigReport struct {
 	Path        string               `json:"path,omitempty"`
 	Config      projectconfig.Config `json:"config"`
 	UnknownKeys []string             `json:"unknown_keys,omitempty"`
+	Problems    []string             `json:"problems,omitempty"`
 }
 
 var doctorCmd = &cobra.Command{
@@ -171,7 +172,8 @@ var doctorCmd = &cobra.Command{
 			rep.Errors = append(rep.Errors, fmt.Sprintf("cwd: %v", err))
 		} else {
 			pcfg, found, perr := projectconfig.Load(cwd)
-			pr := &projectConfigReport{Cwd: cwd, Path: found.Path, Config: pcfg, UnknownKeys: found.UnknownKeys}
+			pr := &projectConfigReport{Cwd: cwd, Path: found.Path, Config: pcfg,
+				UnknownKeys: found.UnknownKeys, Problems: found.Problems}
 			rep.ProjectConfig = pr
 			fmt.Fprintf(w, "  cwd:              %s\n", cwd)
 			switch {
@@ -183,8 +185,17 @@ var doctorCmd = &cobra.Command{
 			default:
 				fmt.Fprintf(w, "  file:             %s\n", found.Path)
 			}
-			fmt.Fprintf(w, "  writeup nudge:    %v\n", pcfg.WriteupNudge)
-			fmt.Fprintf(w, "  wakeup nudge:     %v\n", pcfg.WakeupNudge)
+			fmt.Fprintf(w, "  pressure:         %s\n", describePressure(pcfg.Pressure))
+			fmt.Fprintf(w, "  writeup nudge:    %s\n", describeNudge(pcfg.WriteupNudge))
+			fmt.Fprintf(w, "  cache nudge:      %s\n", describeNudge(pcfg.CacheNudge))
+			fmt.Fprintf(w, "  wakeup:           %s\n", describeWakeup(pcfg.Wakeup))
+			for _, prob := range found.Problems {
+				// A value this build understands the name of and cannot use.
+				// Reported as an error rather than a note: the file asked for
+				// something specific and is silently not getting it.
+				fmt.Fprintf(w, "  problem:          %s\n", prob)
+				rep.Errors = append(rep.Errors, fmt.Sprintf("project config: %s", prob))
+			}
 			if len(found.UnknownKeys) > 0 {
 				// Named rather than ignored: the project schema is disjoint
 				// from the global one, so a global key put in here parses,

@@ -92,6 +92,29 @@ type Gate struct {
 	// the decision on its own. A session absent from the map is likewise
 	// unknown rather than warm.
 	Cache map[string]CacheState
+
+	// AllowAtRest drops the "must be mid-turn" rule while keeping every other
+	// one, including the cold-cache refusal.
+	//
+	// There is exactly one message where waking a resting session is the
+	// cheap option rather than the expensive one, and it is the reason this
+	// field exists: a warm cache inside its last stretch. Delivering there
+	// starts a turn at warm-cache rates and stops the prefix being rebuilt
+	// from nothing afterwards, so the arithmetic that makes the default rule
+	// right is the same arithmetic that makes this exception right. Because
+	// the cache check still applies, a session that has already gone cold is
+	// refused here as firmly as anywhere else.
+	AllowAtRest bool
+
+	// AllowCold drops the cold-cache refusal as well, which leaves only "is
+	// there something listening".
+	//
+	// Reserved for a message the user asked for by name and is waiting on: a
+	// promised wakeup when a window reopens. The cold resume is not an
+	// accident there, it is the thing being paid for, and refusing it would
+	// mean the one delivery someone explicitly opted into is the one that
+	// silently never arrives.
+	AllowCold bool
 }
 
 func (g Gate) maxAge() time.Duration {
@@ -113,16 +136,18 @@ func (g Gate) Admit(s ccsock.Session) Decision {
 		d.Skip = SkipUnreachable
 		return d
 	}
-	if s.Status != statusBusy {
-		// shell, idle, waiting, or a status the registry never reported. All
-		// of them mean the session is not mid-turn, so delivering would start
-		// one.
-		d.Skip = SkipAtRest
-		return d
-	}
-	if age := g.statusAge(s); age > g.maxAge() {
-		d.Skip = fmt.Sprintf("%s (%s)", SkipStaleStatus, age.Round(time.Minute))
-		return d
+	if !g.AllowAtRest {
+		if s.Status != statusBusy {
+			// shell, idle, waiting, or a status the registry never reported.
+			// All of them mean the session is not mid-turn, so delivering
+			// would start one.
+			d.Skip = SkipAtRest
+			return d
+		}
+		if age := g.statusAge(s); age > g.maxAge() {
+			d.Skip = fmt.Sprintf("%s (%s)", SkipStaleStatus, age.Round(time.Minute))
+			return d
+		}
 	}
 	// The cross-check. A busy session should be warm by construction, so this
 	// almost never fires; it is here because "almost never" is not "never" and
@@ -130,7 +155,7 @@ func (g Gate) Admit(s ccsock.Session) Decision {
 	// by a poll interval, so it can call a live session cold when it is not,
 	// and that error direction is the safe one: a skipped warning costs
 	// nothing, a cold wakeup costs the prefix.
-	if st, ok := g.Cache[s.SessionID]; ok && st.Cold {
+	if st, ok := g.Cache[s.SessionID]; ok && st.Cold && !g.AllowCold {
 		d.Skip = SkipCacheCold
 		return d
 	}

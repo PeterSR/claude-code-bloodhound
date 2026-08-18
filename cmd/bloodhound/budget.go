@@ -334,6 +334,10 @@ func runBudgetAnnounce(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(w, "%d event(s) considered, %d worth saying, %s to %d session(s).\n",
 		st.Considered, st.Announced, verb, st.Delivered)
+	if st.Armed > 0 || st.Resumed > 0 {
+		fmt.Fprintf(w, "%d session(s) noted down for a wakeup, %d woken because their window reopened.\n",
+			st.Armed, st.Resumed)
+	}
 	if len(st.Skipped) > 0 {
 		fmt.Fprintln(w, "Skipped:")
 		for reason, n := range st.Skipped {
