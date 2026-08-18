@@ -1,5 +1,7 @@
 git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 h1:N3IGoHHp9pb6mj1cbXbuaSXV/UMKwmbKLf53nQmtqMA=
 git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3/go.mod h1:QtOLZGz8olr4qH2vWK0QH0w0O4T9fEIjMuWpKUsH7nc=
+github.com/PeterSR/claude-code-socket-transport v0.1.1 h1:xirJZhJT2rl6vm3+9ejsUkVcVP9S9/s+pI0VxPtgPec=
+github.com/PeterSR/claude-code-socket-transport v0.1.1/go.mod h1:6C1DXhlyaOYFEqOzjflPX3AtlePC1v/0Urc4duPhYqc=
 github.com/PeterSR/claude-code-weaverbird v0.3.0 h1:seGVrWtntWz/ZD+CDKFVyB12gFRM2HSMoeFDpEOg2LY=
 github.com/PeterSR/claude-code-weaverbird v0.3.0/go.mod h1:593wUH9JFeb1pgjWa5tfHLko/T63WF50SmJBjKNFiEQ=
 github.com/bep/debounce v1.2.1 h1:v67fRdBA9UQu2NhLFXrSg0Brw7CexQekrBwDMM8bzeY=
