@@ -96,6 +96,12 @@ func SaveExtractor(e *Extractor, snapshot string) error {
 	if err := config.EnsureDir(dir); err != nil {
 		return err
 	}
+	// Stamp the schema pointer on the way out, so a ruleset a heal learned is
+	// as editable by hand as the bundled one it replaced. Never overwritten:
+	// someone pinning a different URL has a reason.
+	if e.Schema == "" {
+		e.Schema = ExtractorSchemaURL
+	}
 	data, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode extractor: %w", err)

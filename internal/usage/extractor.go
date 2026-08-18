@@ -41,8 +41,19 @@ type FieldRule struct {
 	Required bool   `json:"required"`
 }
 
+// ExtractorSchemaURL is written as the "$schema" of every extractor bloodhound
+// saves. Hand-editing a ruleset is the documented fallback when a self-heal
+// cannot run, and it is regexes in JSON, which is exactly the kind of file
+// worth having an editor check.
+const ExtractorSchemaURL = "https://raw.githubusercontent.com/PeterSR/claude-code-bloodhound/main/schema/extractor.schema.json"
+
 // Extractor is a complete ruleset for parsing a /usage panel dump.
 type Extractor struct {
+	// Schema is a pointer to the JSON Schema for this file, for editors.
+	// Never read: an extractor is judged by whether its regexes compile and
+	// match, not by whether it validates.
+	Schema string `json:"$schema,omitempty"`
+
 	Version     int    `json:"version"`
 	GeneratedAt string `json:"generated_at,omitempty"`
 	GeneratedBy string `json:"generated_by,omitempty"` // "default" | "claude"

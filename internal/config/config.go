@@ -11,6 +11,11 @@ import (
 
 const configFileName = "config.json"
 
+// schemaURL is where the JSON Schema for this file is published. Spelled out
+// rather than imported from the schema package, which would be a cycle: that
+// package's tests read this struct to check the two have not drifted apart.
+const schemaURL = "https://raw.githubusercontent.com/PeterSR/claude-code-bloodhound/main/schema/config.schema.json"
+
 // PlanTier values used for community-insights metadata. They have no effect
 // on local computation.
 const (
@@ -25,6 +30,12 @@ const (
 // Fields that aren't present in the file fall back to Default(). Missing
 // config file => returns Default() with no error.
 type Config struct {
+	// Schema is a pointer to the JSON Schema for this file, for editors.
+	// Bloodhound never reads it; Save writes it when it is missing, so a
+	// config bloodhound has touched carries the pointer without anyone
+	// having to know it exists.
+	Schema string `json:"$schema,omitempty"`
+
 	PollIntervalS      int `json:"poll_interval_s"`
 	IngestIntervalS    int `json:"ingest_interval_s"`
 	AggregateIntervalS int `json:"aggregate_interval_s"`
@@ -195,6 +206,13 @@ func Load() (Config, error) {
 
 // Save writes the config back out, creating the directory if needed.
 func Save(cfg Config) error {
+	// Stamp the schema pointer on the way out, so a config bloodhound has
+	// written is one an editor can check without the user knowing there was
+	// a schema to point at. Never overwritten: someone pinning a different
+	// URL has a reason.
+	if cfg.Schema == "" {
+		cfg.Schema = schemaURL
+	}
 	dir, err := ConfigDir()
 	if err != nil {
 		return err

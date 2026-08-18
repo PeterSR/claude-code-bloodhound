@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/PeterSR/claude-code-bloodhound/main/schema/extractor.schema.json",
+  "title": "bloodhound /usage extractor",
+  "description": "A ruleset for pulling numbers out of a captured /usage panel. One ships bundled with the binary; a learned one is written to $XDG_DATA_HOME/bloodhound/extractors.json when the panel's layout changes and the daemon heals itself against a live capture. Hand-editing is supported and is the fallback when a heal cannot run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "fields"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "description": "The extractor contract this file is written against. It must match the version the running binary expects; a file from an older contract is refused and the bundled default is used instead, which is what makes a stale learned extractor a degradation rather than a failure."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this ruleset was produced."
+    },
+    "generated_by": {
+      "type": "string",
+      "description": "\"default\" for the bundled ruleset, \"claude\" for one a self-heal learned."
+    },
+    "fields": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One rule per value read out of the panel. A rule marked required and matching nothing fails the whole extraction, which is the signal that drives a self-heal.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "type",
+          "regex"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The field this rule fills. The names the rest of bloodhound reads are session_pct, session_reset, session_reset_tz, week_pct, week_reset, week_reset_tz and their opus counterparts."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "int",
+              "string"
+            ],
+            "description": "How the captured group is parsed."
+          },
+          "regex": {
+            "type": "string",
+            "description": "Go regexp applied to the whole captured panel. It must compile, or the whole ruleset is refused."
+          },
+          "group": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Which capture group carries the value. 0 is the whole match."
+          },
+          "required": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether a miss fails the extraction. The percentages and reset times are required; anything optional is a nicety the panel may or may not carry."
+          }
+        }
+      }
+    }
+  }
+}

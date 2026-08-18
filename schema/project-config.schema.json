@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/PeterSR/claude-code-bloodhound/main/schema/project-config.schema.json",
+  "title": "bloodhound project config",
+  "description": "The .bloodhound/config.json a project keeps beside its code. It says how bloodhound behaves toward sessions working in that directory and nothing else. It shares no keys with the global config, cannot redirect the daemon at another database or binary, and is safe to check in. Every key defaults to off; a directory with no file gets the defaults, which is the normal case. Resolution walks up from the session's working directory to the nearest such file, stopping at home, and the nearest file is the whole answer rather than an overlay on the ones above it.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "pressure": {
+      "type": "object",
+      "description": "Wording of the warnings a project does not get to opt out of: its own budget going tight, a meter projected to reach the cap, a meter saturating. There is no enabled key here because a limit that stops every session on the machine is not something a directory switches off.",
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": "string",
+          "description": "Template standing in for bloodhound's own sentences, which are handed back as {{.Text}}. To add rather than reword, write \"{{.Text}} Push the branch first.\". Covers the pressure lines only, not the wakeup line underneath or the opt-in nudges after it.",
+          "default": ""
+        }
+      }
+    },
+    "writeup_nudge": {
+      "type": "object",
+      "description": "A line saying the session's recent turns have outgrown its own average, which is the run-up to a compaction. Worth hearing while there is still context left to write the session up from.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "message": {
+          "type": "string",
+          "description": "Template replacing the built-in line, which is available as {{.Text}}.",
+          "default": ""
+        }
+      }
+    },
+    "cache_nudge": {
+      "type": "object",
+      "description": "The one line bloodhound will say to a session that is not working. It fires while the prompt cache is still warm but inside its last stretch, which is the only moment where interrupting an idle session is cheaper than leaving it alone: the turn it starts is paid at warm-cache rates, and the alternative is the same context rebuilt from nothing later.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "message": {
+          "type": "string",
+          "description": "Template replacing the built-in line, which is available as {{.Text}}.",
+          "default": ""
+        }
+      }
+    },
+    "wakeup": {
+      "type": "object",
+      "description": "What happens at the far end of a warning: nothing, a suggestion that the reader arm something, or bloodhound noting the session down and writing to it itself when the window reopens.",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "nudge",
+            "resume"
+          ],
+          "default": "off",
+          "description": "off says nothing about the far side of the window. nudge adds a line saying the work could pick up again if something is armed to wake it, and arms nothing. resume drops the suggestion and takes the job: the session is noted down against the window constraining it, and bloodhound writes to it when that window reopens. Promises are only made for resets within twelve hours, so a weekly window normally gets neither a promise nor a suggestion."
+        },
+        "nudge_message": {
+          "type": "string",
+          "description": "Template replacing the built-in suggestion under mode \"nudge\".",
+          "default": ""
+        },
+        "armed_message": {
+          "type": "string",
+          "description": "Template replacing what mode \"resume\" says at the moment it notes the session down, which is a promise rather than a suggestion.",
+          "default": ""
+        },
+        "resume_message": {
+          "type": "string",
+          "description": "Template replacing what arrives when the window has reopened. This is the only message bloodhound sends that nobody is awake for, so it is worth wording it as something a session can act on cold.",
+          "default": ""
+        }
+      }
+    }
+  },
+  "$comment": "Every message field is a Go text/template rendered against: .Text (what bloodhound would have said), .Kind, .State, .Bucket (\"5h\" or \"week\"), .Cwd, .Dir, .Project, .Session, .Pct, .Reset, .ResetAt, .ETA, .ArmedAt, .Waited, .Now. A template that does not parse or fails to render never silences a message: it is reported by `bloodhound project show` and `bloodhound doctor`, and the built-in wording goes out instead. `bloodhound project show --preview` renders the finished messages against made-up numbers."
+}

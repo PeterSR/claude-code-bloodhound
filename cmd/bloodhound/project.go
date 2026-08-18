@@ -59,7 +59,14 @@ Refuses to overwrite an existing file unless --force.`,
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		data, err := json.MarshalIndent(projectconfig.Default(), "", "  ")
+		// The stub carries a pointer to the schema, which is what turns a
+		// file full of empty strings into something an editor can complete
+		// and check. Written here rather than in Default() because it is not
+		// part of what a directory with no file gets; it is part of what
+		// someone who asked for a file to edit gets.
+		stub := projectconfig.Default()
+		stub.Schema = projectconfig.SchemaURL
+		data, err := json.MarshalIndent(stub, "", "  ")
 		if err != nil {
 			return err
 		}

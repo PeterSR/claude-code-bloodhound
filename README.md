@@ -221,6 +221,17 @@ actually say against made-up numbers. The search walks up from the working
 directory to the nearest such file, stopping at your home directory, so a
 session started in a subdirectory is still governed by its project.
 
+### Schemas
+
+Machine-readable JSON Schemas for the three files anyone edits by hand are in
+[`schema/`](schema/): the global config, a project's `.bloodhound/config.json`,
+and a `/usage` extractor ruleset. `bloodhound project init` writes the
+`$schema` pointer into the file it creates, and both `config.json` and a
+self-healed extractor gain one the first time bloodhound writes them, so
+editors offer completion and flag a misspelled key at the moment it is typed.
+A test walks the schemas and the Go structs together and fails if either grows
+a field the other does not have.
+
 ## Disclaimer
 
 This is a tool for monitoring Claude Code, and - fittingly - Claude Code has been used to build it. The Go and TypeScript here are vetted by a human, but parts of the implementation, scaffolding, and copy were drafted with AI assistance.

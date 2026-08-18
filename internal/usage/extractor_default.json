@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/PeterSR/claude-code-bloodhound/main/schema/extractor.schema.json",
   "version": 2,
   "generated_at": "2026-04-29T00:00:00Z",
   "generated_by": "default",

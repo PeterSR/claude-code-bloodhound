@@ -87,6 +87,11 @@ const (
 	File = "config.json"
 )
 
+// SchemaURL is written as the "$schema" of a config `bloodhound project init`
+// creates, so an editor can complete and check the file. Spelled out here
+// rather than read from schema/ because that directory holds artifacts, not
+// code: nothing embeds it and no binary reads it.
+const SchemaURL = "https://raw.githubusercontent.com/PeterSR/claude-code-bloodhound/main/schema/project-config.schema.json"
 
 // Config is what a project may say about how bloodhound treats its sessions.
 //
@@ -97,6 +102,12 @@ const (
 // stops every session on the machine is not something a directory switches
 // off) but only how the sentence reads.
 type Config struct {
+	// Schema is a pointer to the JSON Schema for this file, for editors.
+	// Bloodhound never reads it. It exists as a field so that writing it into
+	// a checked-in config does not show up as an unknown key, which is the
+	// one thing that would make the pointer worse than not having one.
+	Schema string `json:"$schema,omitempty"`
+
 	// Pressure customises the wording of the warnings a project does not get
 	// to opt out of: its own budget going tight, a meter projected to hit the
 	// cap, a meter saturating. Empty by default, which leaves bloodhound's own

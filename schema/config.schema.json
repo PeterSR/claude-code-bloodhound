@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/PeterSR/claude-code-bloodhound/main/schema/config.schema.json",
+  "title": "bloodhound config",
+  "description": "The global config, at $XDG_CONFIG_HOME/bloodhound/config.json. This is how the daemon itself operates: where it looks, what it drives, how often. One process serves every project on the machine, so nothing here is per-directory; a project's own preferences live in its .bloodhound/config.json, which shares no keys with this file. Every key is optional and a missing file is not an error: absent keys take the defaults below.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "poll_interval_s": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 300,
+      "description": "How often the daemon drives a /usage capture. Each poll spends real quota, so this is the one cadence worth thinking about before lowering."
+    },
+    "ingest_interval_s": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 300,
+      "description": "How often transcripts are read into the database. Reads local files only; costs nothing but disk."
+    },
+    "aggregate_interval_s": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 900,
+      "description": "How often rollups and retention run."
+    },
+    "plan_tier": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "pro",
+        "max-5x",
+        "max-20x"
+      ],
+      "default": "unknown",
+      "description": "Cosmetic, and metadata for community insights only. It has no effect on any local computation."
+    },
+    "join_the_pack": {
+      "type": "boolean",
+      "default": false,
+      "description": "Opt in to uploading anonymised usage packets to the community-insights server. There is no server yet, so this is currently informational."
+    },
+    "user_id": {
+      "type": "string",
+      "default": "",
+      "description": "Links this device to others on the same Anthropic account, so community insights do not double-count someone running Claude Code from several machines. Blank means this device is its own user."
+    },
+    "claude_binary": {
+      "type": "string",
+      "default": "",
+      "description": "Path to the claude executable the /usage scraper drives. Empty means look up \"claude\" on $PATH. Point it at something inert like /bin/false when running against a scratch database, or startup will spend real quota."
+    },
+    "statusline_prefix": {
+      "type": "string",
+      "default": "\ud83e\ude78",
+      "description": "Prepended to `bloodhound status`. Set it to \"BH\" or \"\" on terminals that render the default emoji badly."
+    },
+    "stale_after_s": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 600,
+      "description": "How old the last poll may be before the UI and statusline call the meter stale. Twice the default poll cadence."
+    },
+    "active_session_threshold_s": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1800,
+      "description": "How recently a session must have taken a turn to count as active. Several sessions can qualify at once, which matches having a few windows open."
+    },
+    "recent_session_window_s": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 86400,
+      "description": "How far back the Now page's recent-sessions panel looks."
+    },
+    "extractor_self_heal": {
+      "type": "boolean",
+      "default": true,
+      "description": "Let the daemon re-learn the /usage extractor automatically when a capture's required fields go missing. With it off the extractor stays as it is, and re-learning is a hand edit or the Debug page's Retrain button."
+    },
+    "self_heal_mode": {
+      "type": "string",
+      "enum": [
+        "interactive",
+        "headless"
+      ],
+      "default": "interactive",
+      "description": "How the heal's orchestrator is invoked. \"interactive\" drives a second interactive claude over a pty, so its tokens count against the interactive subscription. \"headless\" uses claude -p, which has a cleaner cost envelope but draws on the Agent SDK credit rather than the subscription."
+    },
+    "price_self_heal": {
+      "type": "boolean",
+      "default": true,
+      "description": "Look up the list price of a model that appears in the logs and is not in the price table. Best effort, unlike the extractor heal: an un-found price only drops that model from cost-weighted analysis, flagged, and the Models page can ask again by hand."
+    },
+    "trail_enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Turn on Trail, the passive watcher that keeps per-session work briefs and open loops across worktrees. Off by default because it drives claude to summarise, and that spends usage."
+    },
+    "trail_mode": {
+      "type": "string",
+      "enum": [
+        "interactive",
+        "headless"
+      ],
+      "default": "interactive",
+      "description": "How Trail's analyzer is invoked. Same split and same caveat as self_heal_mode."
+    },
+    "trail_interval_s": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 900,
+      "description": "Trail's cadence. Slower than ingest on purpose: the briefs are an overview, not a live feed."
+    },
+    "trail_window_s": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "How recently a session must have been active for Trail to analyse it. Zero falls back to active_session_threshold_s."
+    }
+  }
+}
