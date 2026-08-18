@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Wallet, AlertTriangle, Info } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Wallet, AlertTriangle, Info, Plus } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { apiPost } from '../api/client';
 import ReloadButton from '../components/ReloadButton';
@@ -46,8 +46,15 @@ const STATE_STYLE: Record<string, { label: string; cls: string }> = {
 };
 
 export default function Budgets() {
-  const { data, error, loading, refreshing, refresh } = useApi<BudgetsResponse>('/budgets', 30_000);
+  // Always fetch retired rows and filter here. Fetching without all=1 meant
+  // the checkbox filtered a list that could never contain a retired budget, so
+  // ticking it did nothing at all.
+  const { data, error, loading, refreshing, refresh } = useApi<BudgetsResponse>(
+    '/budgets?all=1',
+    30_000,
+  );
   const [showRetired, setShowRetired] = useState(false);
+  const [adding, setAdding] = useState(false);
 
   const budgets = (data?.budgets || []).filter((b) => showRetired || !b.retired_ms);
 
@@ -72,12 +79,17 @@ export default function Budgets() {
       )}
       {loading && !data && <div className="text-sm text-zinc-500">Loading…</div>}
 
-      <NewBudget onSaved={refresh} />
-
       {data && (
         <>
-          <div className="flex items-center gap-3 mt-8 mb-2">
+          <div className="flex items-center gap-3 mb-2">
             <h2 className="text-lg font-medium">In force</h2>
+            <button
+              onClick={() => setAdding(true)}
+              className="flex items-center gap-1 rounded bg-sky-600 hover:bg-sky-500 text-white text-xs px-2 py-1"
+            >
+              <Plus className="size-3.5" />
+              Add budget
+            </button>
             <label className="ml-auto flex items-center gap-1.5 text-xs text-zinc-500">
               <input
                 type="checkbox"
@@ -91,7 +103,7 @@ export default function Budgets() {
           {budgets.length === 0 ? (
             <p className="text-sm text-zinc-500">
               No budgets set. Most directories do not need one: the limit guards
-              above apply regardless.
+              apply regardless.
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -117,6 +129,16 @@ export default function Budgets() {
           )}
         </>
       )}
+
+      {adding && (
+        <NewBudgetDialog
+          onClose={() => setAdding(false)}
+          onSaved={() => {
+            setAdding(false);
+            refresh();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -139,7 +161,6 @@ function BudgetRow({ b, onChanged }: { b: Budget; onChanged: () => void }) {
       onChanged();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
-    } finally {
       setBusy(false);
     }
   };
@@ -176,7 +197,20 @@ function BudgetRow({ b, onChanged }: { b: Budget; onChanged: () => void }) {
   );
 }
 
-function NewBudget({ onSaved }: { onSaved: () => void }) {
+/**
+ * Set-a-budget dialog.
+ *
+ * Built on the native <dialog> so Esc, the focus trap and the backdrop come
+ * from the platform rather than from hand-rolled key handlers, which is the
+ * kind of thing that is easy to get subtly wrong and never notice.
+ *
+ * It closes only on success. A rejected write keeps the dialog open with the
+ * message in place, because the API's validation text is written for a person
+ * ("a budget needs a spend rule, a meter rule, or both") and closing the
+ * dialog would throw away both the message and everything typed.
+ */
+function NewBudgetDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
   const [cwd, setCwd] = useState('');
   const [bucket, setBucket] = useState('week');
   const [spend, setSpend] = useState('');
@@ -185,6 +219,12 @@ function NewBudget({ onSaved }: { onSaved: () => void }) {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    // showModal rather than the open attribute: only the former puts the
+    // dialog in the top layer and gives it a backdrop.
+    ref.current?.showModal();
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -202,121 +242,145 @@ function NewBudget({ onSaved }: { onSaved: () => void }) {
         until: until || undefined,
         note: note || undefined,
       });
-      setSpend('');
-      setMeter('');
-      setNote('');
       onSaved();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
-    } finally {
       setBusy(false);
     }
   };
 
   return (
-    <form
-      onSubmit={submit}
-      className="rounded-lg border border-zinc-200 dark:border-zinc-800 p-4 max-w-3xl"
+    <dialog
+      ref={ref}
+      // Esc fires cancel and close; both route back to the parent so the
+      // dialog is unmounted rather than left hidden but mounted.
+      onCancel={onClose}
+      onClose={onClose}
+      // A click landing on the dialog element itself is a backdrop click: the
+      // form inside covers the whole content box, so anything else is caught
+      // by a child.
+      onClick={(e) => {
+        if (e.target === ref.current) ref.current?.close();
+      }}
+      // m-auto is not decoration. The UA stylesheet centres a modal dialog
+      // with `margin: auto`, and Tailwind's preflight zeroes every margin, so
+      // without this the dialog renders hard against the top-left corner.
+      className="m-auto w-[min(40rem,calc(100vw-2rem))] max-h-[calc(100vh-4rem)] overflow-y-auto rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 p-0 backdrop:bg-black/40"
     >
-      <h2 className="text-sm font-medium mb-3">Set a budget</h2>
+      <form onSubmit={submit} className="p-5">
+        <h2 className="text-base font-medium mb-4">Set a budget</h2>
 
-      <div className="grid sm:grid-cols-2 gap-3">
-        <label className="text-xs text-zinc-500 sm:col-span-2">
-          Working directory
-          <input
-            required
-            value={cwd}
-            onChange={(e) => setCwd(e.target.value)}
-            placeholder="/home/you/projects/myapp"
-            className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 font-mono text-xs"
-          />
-        </label>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <label className="text-xs text-zinc-500 sm:col-span-2">
+            Working directory
+            <input
+              required
+              autoFocus
+              value={cwd}
+              onChange={(e) => setCwd(e.target.value)}
+              placeholder="/home/you/projects/myapp"
+              className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 font-mono text-xs"
+            />
+          </label>
 
-        <label className="text-xs text-zinc-500">
-          Bucket
-          <select
-            value={bucket}
-            onChange={(e) => setBucket(e.target.value)}
-            className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
-          >
-            <option value="week">week</option>
-            <option value="session">5h</option>
-          </select>
-        </label>
+          <label className="text-xs text-zinc-500">
+            Bucket
+            <select
+              value={bucket}
+              onChange={(e) => setBucket(e.target.value)}
+              className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
+            >
+              <option value="week">week</option>
+              <option value="session">5h</option>
+            </select>
+          </label>
 
-        <label className="text-xs text-zinc-500">
-          In force until
-          <input
-            value={until}
-            onChange={(e) => setUntil(e.target.value)}
-            placeholder="reset, 2h, 18:00, 2026-08-20 (blank: until revoked)"
-            className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
-          />
-        </label>
+          <label className="text-xs text-zinc-500">
+            In force until
+            <input
+              value={until}
+              onChange={(e) => setUntil(e.target.value)}
+              placeholder="reset, 2h, 18:00, 2026-08-20"
+              className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
+            />
+            <span className="block mt-1 text-[11px] text-zinc-400">
+              blank means until revoked
+            </span>
+          </label>
 
-        <label className="text-xs text-zinc-500">
-          Spend %
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={spend}
-            onChange={(e) => setSpend(e.target.value)}
-            className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm tabular-nums"
-          />
-          <span className="block mt-1 text-[11px] text-zinc-400">
-            movement this directory itself causes
-          </span>
-        </label>
+          <label className="text-xs text-zinc-500">
+            Spend %
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={spend}
+              onChange={(e) => setSpend(e.target.value)}
+              className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm tabular-nums"
+            />
+            <span className="block mt-1 text-[11px] text-zinc-400">
+              movement this directory itself causes
+            </span>
+          </label>
 
-        <label className="text-xs text-zinc-500">
-          Meter %
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={meter}
-            onChange={(e) => setMeter(e.target.value)}
-            className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm tabular-nums"
-          />
-          <span className="block mt-1 text-[11px] text-zinc-400">
-            the shared reading to stop at, whoever moved it
-          </span>
-        </label>
+          <label className="text-xs text-zinc-500">
+            Meter %
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={meter}
+              onChange={(e) => setMeter(e.target.value)}
+              className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm tabular-nums"
+            />
+            <span className="block mt-1 text-[11px] text-zinc-400">
+              the shared reading to stop at, whoever moved it
+            </span>
+          </label>
 
-        <label className="text-xs text-zinc-500 sm:col-span-2">
-          Note
-          <input
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
-          />
-        </label>
-      </div>
-
-      <div className="flex items-start gap-2 mt-3 text-[11px] text-zinc-500">
-        <Info className="size-3.5 shrink-0 mt-0.5" />
-        <p>
-          Set either rule or both. Spend needs attribution and so ignores what
-          other projects do; meter watches the shared number and buys headroom
-          at the top for ungoverned work.
-        </p>
-      </div>
-
-      {err && (
-        <div className="flex items-center gap-1.5 mt-3 text-xs text-red-600 dark:text-red-400">
-          <AlertTriangle className="size-3.5" />
-          {err}
+          <label className="text-xs text-zinc-500 sm:col-span-2">
+            Note
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
+            />
+          </label>
         </div>
-      )}
 
-      <button
-        type="submit"
-        disabled={busy}
-        className="mt-3 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white text-sm px-3 py-1.5"
-      >
-        {busy ? 'Saving…' : 'Set budget'}
-      </button>
-    </form>
+        <div className="flex items-start gap-2 mt-4 text-[11px] text-zinc-500">
+          <Info className="size-3.5 shrink-0 mt-0.5" />
+          <p>
+            Set either rule or both. Spend needs attribution and so ignores what
+            other projects do; meter watches the shared number and buys headroom
+            at the top for ungoverned work.
+          </p>
+        </div>
+
+        {err && (
+          <div className="flex items-center gap-1.5 mt-3 text-xs text-red-600 dark:text-red-400">
+            <AlertTriangle className="size-3.5 shrink-0" />
+            {err}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 mt-5">
+          <button
+            type="button"
+            onClick={() => ref.current?.close()}
+            className="rounded border border-zinc-300 dark:border-zinc-700 text-sm px-3 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-900"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white text-sm px-3 py-1.5"
+          >
+            {busy ? 'Saving…' : 'Set budget'}
+          </button>
+        </div>
+      </form>
+    </dialog>
   );
 }

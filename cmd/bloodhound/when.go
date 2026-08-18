@@ -122,7 +122,7 @@ func runWhen(cmd *cobra.Command, args []string) error {
 		KindGlob:  args[0],
 		Bucket:    whenBucket,
 		Session:   whenSession,
-		Cwd:       whenCwd,
+		Cwd:       normalizeCwdFilter(whenCwd),
 		Command:   whenRun,
 		Note:      whenNote,
 		ExpiresMS: now.Add(whenExpires).UnixMilli(),

@@ -11,6 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"path/filepath"
+	"strings"
+
 	"github.com/PeterSR/claude-code-bloodhound/internal/announce"
 	"github.com/PeterSR/claude-code-bloodhound/internal/budget"
 	"github.com/PeterSR/claude-code-bloodhound/internal/events"
@@ -260,7 +263,7 @@ func runBudgetStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	levels, err := budgetLevels(ctx, s, cwd)
+	levels, err := budgetLevels(ctx, s, cwd, budgetBucket)
 	if err != nil {
 		return err
 	}
@@ -279,7 +282,7 @@ func runBudgetStatus(cmd *cobra.Command, args []string) error {
 		}
 		mine := 0
 		for _, b := range set {
-			if b.Cwd == cwd {
+			if b.Cwd == cwd && (budgetBucket == "" || b.Bucket == budgetBucket) {
 				mine++
 			}
 		}
@@ -343,20 +346,50 @@ func runBudgetAnnounce(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// normalizeCwdFilter matches a --cwd filter against the form budgets are keyed
+// in. Budget scopes are stored as budget.NormalizeCwd output, so a filter typed
+// with a trailing slash, a relative path, or ~ would compare unequal and match
+// nothing at all: the one-shot registers fine and simply never fires, which is
+// the silent-no-op failure the budget code is otherwise careful to avoid.
+//
+// An unresolvable value is passed through rather than rejected, so a filter on
+// some future non-path scope is not broken by this.
+func normalizeCwdFilter(v string) string {
+	if v == "" {
+		return ""
+	}
+	if strings.HasPrefix(v, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			v = filepath.Join(home, strings.TrimPrefix(v, "~"))
+		}
+	}
+	n, err := budget.NormalizeCwd(v)
+	if err != nil {
+		return v
+	}
+	return n
+}
+
 // budgetLevels reads the recorded budget pressure for one directory straight
 // out of event_levels, rather than recomputing it here. The reconciler owns
 // that computation and the memory behind it, so asking it twice in two places
 // is how the CLI and the GUI end up disagreeing.
-func budgetLevels(ctx context.Context, s *store.Store, cwd string) ([]events.Level, error) {
+func budgetLevels(ctx context.Context, s *store.Store, cwd, bucket string) ([]events.Level, error) {
 	all, err := events.Levels(ctx, s.DB)
 	if err != nil {
 		return nil, err
 	}
 	var out []events.Level
 	for _, l := range all {
-		if l.Kind == "budget" && l.Scope.Cwd == cwd {
-			out = append(out, l)
+		if l.Kind != "budget" || l.Scope.Cwd != cwd {
+			continue
 		}
+		// --bucket has a non-empty default, so it always narrows. Accepting the
+		// flag and ignoring it printed the week row for --bucket session.
+		if bucket != "" && l.Scope.Bucket != bucket {
+			continue
+		}
+		out = append(out, l)
 	}
 	return out, nil
 }

@@ -99,7 +99,7 @@ func runWait(cmd *cobra.Command, args []string) error {
 		Kinds:   waitFor,
 		Bucket:  waitBucket,
 		Session: waitSession,
-		Cwd:     waitCwd,
+		Cwd:     normalizeCwdFilter(waitCwd),
 		Limit:   1,
 	}
 

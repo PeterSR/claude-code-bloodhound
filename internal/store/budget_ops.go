@@ -52,7 +52,7 @@ func (s *Store) SetBudget(ctx context.Context, b budget.Budget, now time.Time) (
 	res, err := tx.ExecContext(ctx,
 		`UPDATE budgets SET retired_ms = ?, retired_why = ?
 		   WHERE cwd = ? AND bucket = ? AND retired_ms IS NULL`,
-		nowMS, budget.RetiredRevoked, b.Cwd, b.Bucket)
+		nowMS, budget.RetiredReplaced, b.Cwd, b.Bucket)
 	if err != nil {
 		return budget.Budget{}, fmt.Errorf("retire previous budget: %w", err)
 	}
@@ -116,23 +116,6 @@ func insertLease(ctx context.Context, tx *sql.Tx, budgetID int64, l *budget.Leas
 	}
 	l.ID, err = res.LastInsertId()
 	return err
-}
-
-// AddLease attaches another lease to a live budget, extending what keeps it
-// alive without disturbing the leases already on it.
-func (s *Store) AddLease(ctx context.Context, budgetID int64, l budget.Lease) (budget.Lease, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return budget.Lease{}, err
-	}
-	defer tx.Rollback()
-	if err := insertLease(ctx, tx, budgetID, &l); err != nil {
-		return budget.Lease{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return budget.Lease{}, err
-	}
-	return l, nil
 }
 
 // RevokeBudget retires the live budget for a directory and bucket. It reports
@@ -260,20 +243,6 @@ func nullInt64Ptr(n sql.NullInt64) *int64 {
 	return &v
 }
 
-// BudgetFor returns the live budget for one directory and bucket, or nil.
-func (s *Store) BudgetFor(ctx context.Context, cwd, bucket string) (*budget.Budget, error) {
-	all, err := s.ListBudgets(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	for i := range all {
-		if all[i].Cwd == cwd && all[i].Bucket == bucket {
-			return &all[i], nil
-		}
-	}
-	return nil, nil
-}
-
 // SettleBudgets expires run-out leases and retires any budget whose last lease
 // has gone. Returns the budgets still in force.
 //
@@ -293,35 +262,98 @@ func (s *Store) SettleBudgets(ctx context.Context, now time.Time, windowEnd map[
 		before := expiredIDs(*b)
 		alive := budget.SettleLeases(b, now, windowEnd)
 
-		for _, l := range b.Leases {
-			if l.ExpiredMS != nil && !before[l.ID] {
-				if _, err := s.DB.ExecContext(ctx,
-					`UPDATE budget_leases SET expired_ms = ? WHERE id = ?`, *l.ExpiredMS, l.ID); err != nil {
-					return nil, fmt.Errorf("expire lease %d: %w", l.ID, err)
-				}
-			}
+		// One transaction per budget. Everything that ends a budget has to
+		// land together or not at all: without it, a crash between the retire
+		// and the append loses budget.expired permanently, because the budget
+		// is already retired and no later pass rediscovers it. The conditional
+		// UPDATE on retired_ms is also what makes this safe to run
+		// concurrently, since only one settler can retire a given budget and
+		// therefore only one can append its event.
+		if err := s.settleOne(ctx, b, before, alive, nowMS); err != nil {
+			return nil, err
 		}
 		if alive {
 			still = append(still, *b)
-			continue
-		}
-		if _, err := s.DB.ExecContext(ctx,
-			`UPDATE budgets SET retired_ms = ?, retired_why = ? WHERE id = ?`,
-			nowMS, budget.RetiredExpired, b.ID); err != nil {
-			return nil, fmt.Errorf("retire budget %d: %w", b.ID, err)
-		}
-		if _, err := s.DB.ExecContext(ctx,
-			`DELETE FROM event_levels WHERE kind = 'budget' AND bucket = ? AND cwd = ?`,
-			b.Bucket, b.Cwd); err != nil {
-			return nil, fmt.Errorf("clear level for budget %d: %w", b.ID, err)
-		}
-		if _, err := events.AppendTx(ctx, s.DB, nowMS, EventBudgetExpired,
-			events.Scope{Bucket: b.Bucket, Cwd: b.Cwd},
-			map[string]any{"set_ms": b.SetMS}); err != nil {
-			return nil, fmt.Errorf("append budget.expired: %w", err)
 		}
 	}
 	return still, nil
+}
+
+func (s *Store) settleOne(ctx context.Context, b *budget.Budget, before map[int64]bool, alive bool, nowMS int64) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, l := range b.Leases {
+		if l.ExpiredMS != nil && !before[l.ID] {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE budget_leases SET expired_ms = ? WHERE id = ? AND expired_ms IS NULL`,
+				*l.ExpiredMS, l.ID); err != nil {
+				return fmt.Errorf("expire lease %d: %w", l.ID, err)
+			}
+		}
+	}
+	if alive {
+		return tx.Commit()
+	}
+
+	// Guarded by retired_ms IS NULL so a concurrent settler that got here
+	// first takes the retirement, and this one appends nothing.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE budgets SET retired_ms = ?, retired_why = ? WHERE id = ? AND retired_ms IS NULL`,
+		nowMS, budget.RetiredExpired, b.ID)
+	if err != nil {
+		return fmt.Errorf("retire budget %d: %w", b.ID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return tx.Commit() // somebody else retired it; their event stands
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM event_levels WHERE kind = 'budget' AND bucket = ? AND cwd = ?`,
+		b.Bucket, b.Cwd); err != nil {
+		return fmt.Errorf("clear level for budget %d: %w", b.ID, err)
+	}
+	if _, err := events.AppendTx(ctx, tx, nowMS, EventBudgetExpired,
+		events.Scope{Bucket: b.Bucket, Cwd: b.Cwd},
+		map[string]any{"set_ms": b.SetMS}); err != nil {
+		return fmt.Errorf("append budget.expired: %w", err)
+	}
+	return tx.Commit()
+}
+
+// PruneOrphanBudgetLevels deletes recorded pressure for (cwd, bucket) pairs
+// that no longer have a live budget.
+//
+// Deleting the level when a budget is revoked or expires is not enough on its
+// own. Reconcile collects its sensor readings BEFORE opening the transaction
+// that writes them, so a pass that read a budget as live can upsert its level
+// after the revoke committed, and nothing else would ever remove it:
+// PruneLevels only touches rows with a non-empty session, which a budget level
+// never has. A resurrected row is not merely cosmetic — re-setting the same
+// budget later would find the level already in that state, see no transition,
+// and silently swallow the warning.
+//
+// Running this at the top of every sensor pass bounds the damage to a single
+// tick instead of forever.
+func (s *Store) PruneOrphanBudgetLevels(ctx context.Context) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `
+		DELETE FROM event_levels
+		 WHERE kind = 'budget'
+		   AND NOT EXISTS (
+		         SELECT 1 FROM budgets
+		          WHERE budgets.cwd = event_levels.cwd
+		            AND budgets.bucket = event_levels.bucket
+		            AND budgets.retired_ms IS NULL)`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func expiredIDs(b budget.Budget) map[int64]bool {

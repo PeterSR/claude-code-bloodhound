@@ -53,6 +53,10 @@ const (
 const (
 	RetiredRevoked = "revoked"
 	RetiredExpired = "expired"
+	// RetiredReplaced marks a budget displaced by a newer one for the same
+	// directory and bucket. Distinct from revoked because the directory is
+	// still governed, which is what a reader of the archive wants to know.
+	RetiredReplaced = "replaced"
 )
 
 // Pressure states, in increasing severity. These are level states in the event

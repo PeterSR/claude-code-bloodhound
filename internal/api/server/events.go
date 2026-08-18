@@ -38,7 +38,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		Kinds:   q["kind"],
 		Bucket:  q.Get("bucket"),
 		Session: q.Get("session"),
-		Cwd:     q.Get("cwd"),
+		Cwd:     normalizeCwdQuery(q.Get("cwd")),
 	}
 	if v := q.Get("since"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)

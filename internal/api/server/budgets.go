@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/budget"
@@ -107,6 +109,14 @@ func (s *Server) postBudget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "malformed JSON: " + err.Error()})
 		return
 	}
+	// Absolute only. NormalizeCwd would happily resolve a relative path with
+	// filepath.Abs, but "here" for the daemon is wherever systemd started it,
+	// which is never what a web client meant.
+	if !filepath.IsAbs(strings.TrimSpace(req.Cwd)) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "cwd must be an absolute path"})
+		return
+	}
 	cwd, err := budget.NormalizeCwd(req.Cwd)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -181,6 +191,22 @@ func (s *Server) budgetWindowEnds(ctx context.Context, now time.Time) (map[strin
 		}
 	}
 	return out, nil
+}
+
+// normalizeCwdQuery matches a ?cwd= filter against the form budget scopes are
+// stored in. Budget events key on budget.NormalizeCwd output, so a raw query
+// value with a trailing slash compares unequal and matches nothing. A value
+// that will not resolve is passed through rather than rejected, so this cannot
+// break a filter on some future non-path scope.
+func normalizeCwdQuery(v string) string {
+	if v == "" {
+		return ""
+	}
+	n, err := budget.NormalizeCwd(v)
+	if err != nil {
+		return v
+	}
+	return n
 }
 
 func budgetInForce(b budget.Budget, now time.Time) string {

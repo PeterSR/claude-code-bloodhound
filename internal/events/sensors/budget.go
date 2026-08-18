@@ -39,7 +39,25 @@ func init() {
 }
 
 func readBudgetPressure(ctx context.Context, w events.World) ([]events.Reading, error) {
+	// Same bail as every other meter sensor, and for the same reason its
+	// comment gives: a transient failure to compute the pool says nothing
+	// about any budget, and reporting unknown would flip a meter-rule level to
+	// unknown and straight back on the next tick, consuming any one-shot
+	// watching budget.* and re-announcing on recovery. Spend-rule budgets read
+	// from the database and would survive, but reporting half the budgets on a
+	// bad tick is worse than reporting none.
+	if w.Pool == nil {
+		return nil, nil
+	}
+
 	s := &store.Store{DB: w.DB}
+
+	// Clear pressure left behind by budgets that are already gone before
+	// reading anything, so a level resurrected by a racing pass lives one tick
+	// rather than forever. See PruneOrphanBudgetLevels.
+	if _, err := s.PruneOrphanBudgetLevels(ctx); err != nil {
+		return nil, fmt.Errorf("prune orphan budget levels: %w", err)
+	}
 
 	// Settling first means a budget whose last lease ran out stops producing
 	// readings on the same tick it dies, rather than one tick later.
@@ -127,19 +145,29 @@ func bucketWanted(bs []budget.Budget, bucket string) bool {
 	return false
 }
 
-// currentWindowEnds reports when each bucket's open window turns over, keyed by
-// the budget spelling of the bucket. A bucket with no open window is absent
-// rather than zero, which is what a window_reset lease needs to tell "not yet
-// bound" from "already over".
+// currentWindowEnds reports the end of each bucket's most recent window, keyed
+// by the budget spelling of the bucket. A bucket with no window at all in range
+// is absent rather than zero, which is what a window_reset lease needs to tell
+// "nothing to attach to yet" from "already over".
+//
+// The open window is preferred, but a bucket with none falls back to the last
+// window that CLOSED. Without that fallback a window which opened and shut
+// while nobody was watching (laptop suspended, daemon down) is invisible to
+// the lease, which then silently rolls to the end of the next window: up to
+// five hours late for the session bucket and a week for the weekly one. The
+// closed rows were in the store the whole time; the lease just never looked.
 func currentWindowEnds(ctx context.Context, s *store.Store, now time.Time) (map[string]int64, error) {
 	out := map[string]int64{}
 	for _, bucket := range []string{budget.BucketSession, budget.BucketWeek} {
-		win, err := currentWindow(ctx, s, bucket, now)
+		since := now.Add(-budgetLookback[bucket]).UnixMilli()
+		windows, err := s.ListLimitWindows(ctx, budget.AttributeBucket(bucket), since)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list %s windows: %w", bucket, err)
 		}
-		if win != nil {
-			out[bucket] = win.ResetUnixMS
+		// Oldest first, so the last entry is the most recent window whether or
+		// not it is still open.
+		if n := len(windows); n > 0 {
+			out[bucket] = windows[n-1].ResetUnixMS
 		}
 	}
 	return out, nil

@@ -107,7 +107,7 @@ func Run(ctx context.Context, s *store.Store, opt Options) (Stats, error) {
 		now = time.Now()
 	}
 
-	cursor, err := readCursor(ctx, s)
+	cursor, set, err := readCursor(ctx, s)
 	if err != nil {
 		return st, err
 	}
@@ -116,10 +116,15 @@ func Run(ctx context.Context, s *store.Store, opt Options) (Stats, error) {
 	if err != nil {
 		return st, err
 	}
-	if cursor == 0 {
+	if !set {
 		// First run. Start at the head rather than the beginning: nobody wants
 		// their first switch-on to be a recital of everything that has ever
 		// happened, and the levels are all still readable in the log.
+		//
+		// Keyed on whether the cursor exists, not on whether it is zero. A
+		// first run against an empty log legitimately records cursor 0, and
+		// treating that as "never initialised" would make every subsequent
+		// pass re-initialise and announce nothing, forever.
 		if !opt.DryRun {
 			return st, writeCursor(ctx, s, head)
 		}
@@ -135,18 +140,53 @@ func Run(ctx context.Context, s *store.Store, opt Options) (Stats, error) {
 	}
 	sort.Strings(kinds)
 
+	// Look at the NEWEST window of the backlog, not the oldest.
+	//
+	// Query pages ascending, so asking for `backfillLimit` rows straight from
+	// the cursor returns the oldest ones and then the cursor jumps to head,
+	// which silently discards everything newer. After a real gap (daemon down
+	// while a cron reconcile kept appending) that is exactly backwards: it
+	// delivers stale transitions, possibly an "exceeded" that has since
+	// cleared, and drops the ones still true.
+	from := cursor
+	if head-cursor > backfillLimit {
+		from = head - backfillLimit
+		log := head - cursor - backfillLimit
+		st.Skipped[fmt.Sprintf("older than the last %d events", backfillLimit)] += int(log)
+	}
+
 	evs, err := events.Query(ctx, s.DB, events.Filter{
-		SinceID: cursor,
+		SinceID: from,
 		Kinds:   kinds,
 		Limit:   backfillLimit,
 	})
 	if err != nil {
 		return st, err
 	}
+	// Query has no upper bound, so a concurrent writer can land an event
+	// between MaxID and here. Announcing it while writing the cursor at head
+	// would announce it again next pass, so it waits for the pass that owns it.
+	evs = upTo(evs, head)
 	st.Considered = len(evs)
+
+	// Claim the cursor BEFORE delivering rather than after.
+	//
+	// Two processes can run a pass at once (the daemon tick and a hand-run
+	// `budget announce`), and delivery is slow enough that both would
+	// otherwise read the same cursor and say the same thing to the same
+	// session. Claiming first makes it at-most-once instead of at-most-twice,
+	// at the cost of losing a batch if delivery dies mid-flight. That trade is
+	// the same asymmetry the gate is built on: a warning nobody hears is
+	// cheap, and the duplicate is not.
+	if !opt.DryRun {
+		if err := writeCursor(ctx, s, head); err != nil {
+			return st, err
+		}
+	}
 
 	worth := filterWorthSaying(evs)
 	if len(worth) > maxPerPass {
+		st.Skipped["not the most recent transition"] += len(worth) - maxPerPass
 		worth = worth[len(worth)-maxPerPass:]
 	}
 	st.Announced = len(worth)
@@ -156,13 +196,18 @@ func Run(ctx context.Context, s *store.Store, opt Options) (Stats, error) {
 			st.Errors = append(st.Errors, err.Error())
 		}
 	}
+	return st, nil
+}
 
-	if !opt.DryRun {
-		if err := writeCursor(ctx, s, head); err != nil {
-			return st, err
+// upTo drops events past the head this pass claimed.
+func upTo(evs []events.Event, head int64) []events.Event {
+	out := evs[:0:0]
+	for _, e := range evs {
+		if e.ID <= head {
+			out = append(out, e)
 		}
 	}
-	return st, nil
+	return out
 }
 
 // filterWorthSaying drops the transitions that are not news to a reader.
@@ -337,6 +382,14 @@ func coldCache(ctx context.Context, s *store.Store, sessions []ccsock.Session, n
 		if in == nil {
 			continue
 		}
+		// ColdResumeCostCWTokens is only meaningful when the TTL was inferable.
+		// With CacheTTLS == 0 the cost is left at 0 because nothing could be
+		// priced, not because the cache is warm, and writing an entry here
+		// would hand the gate a confident "warm" for exactly the sessions
+		// bloodhound understands least. Absent means unknown; keep it absent.
+		if in.CacheTTLS == 0 {
+			continue
+		}
 		out[sess.SessionID] = notify.CacheState{
 			Cold:                   in.ColdResumeCostCWTokens > 0,
 			ColdResumeCostCWTokens: in.ColdResumeCostCWTokens,
@@ -345,16 +398,25 @@ func coldCache(ctx context.Context, s *store.Store, sessions []ccsock.Session, n
 	return out
 }
 
-func readCursor(ctx context.Context, s *store.Store) (int64, error) {
+// readCursor returns the recorded cursor and whether one has ever been
+// written. The two are separate answers: an absent cursor means this install
+// has never run a pass, while a cursor of 0 means it has and the log was empty
+// at the time.
+func readCursor(ctx context.Context, s *store.Store) (int64, bool, error) {
 	v, err := s.GetMeta(ctx, cursorKey)
-	if err != nil || v == "" {
-		return 0, err
+	if err != nil {
+		return 0, false, err
+	}
+	if v == "" {
+		return 0, false, nil
 	}
 	var id int64
 	if _, err := fmt.Sscanf(v, "%d", &id); err != nil {
-		return 0, nil
+		// Unreadable is not the same as unset: re-initialise from head rather
+		// than replaying the whole log.
+		return 0, false, nil
 	}
-	return id, nil
+	return id, true, nil
 }
 
 func writeCursor(ctx context.Context, s *store.Store, id int64) error {

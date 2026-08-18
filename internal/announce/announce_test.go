@@ -1,11 +1,16 @@
 package announce
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	ccsock "github.com/PeterSR/claude-code-socket-transport"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/events"
+	"github.com/PeterSR/claude-code-bloodhound/internal/notify"
+	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
 func ev(kind, bucket, cwd string, detail map[string]any) events.Event {
@@ -174,4 +179,184 @@ func TestDescribeFallsBackWithoutADetailReason(t *testing.T) {
 	if !containsFold(got, "myapp") {
 		t.Errorf("fallback %q does not name the directory", got)
 	}
+}
+
+// --- cursor behaviour -------------------------------------------------------
+//
+// The audit noted no test touched Run or the cursor at all. These do, using a
+// real store and a Sender that records instead of writing to a socket.
+
+type recordingSender struct{ sent []string }
+
+func (r *recordingSender) Send(_ context.Context, _ notify.Target, text string) (string, error) {
+	r.sent = append(r.sent, text)
+	return "msg-id", nil
+}
+
+func announceStore(t *testing.T) (*store.Store, context.Context) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	t.Setenv("XDG_STATE_HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	ctx := context.Background()
+	s, err := store.Open(ctx)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s, ctx
+}
+
+func appendEvent(t *testing.T, s *store.Store, ctx context.Context, kind string, ms int64) {
+	t.Helper()
+	if _, err := events.AppendTx(ctx, s.DB, ms, kind,
+		events.Scope{Bucket: "week", Cwd: "/home/dev/myapp"}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func cursorOf(t *testing.T, s *store.Store, ctx context.Context) int64 {
+	t.Helper()
+	c, _, err := readCursor(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestFirstRunStartsAtHeadRatherThanReciting(t *testing.T) {
+	// Switching this on must not announce everything that ever happened.
+	s, ctx := announceStore(t)
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		appendEvent(t, s, ctx, "budget.tight", now.UnixMilli()+int64(i))
+	}
+	rec := &recordingSender{}
+	st, err := Run(ctx, s, Options{Now: now, Sender: rec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Announced != 0 || len(rec.sent) != 0 {
+		t.Errorf("first run announced %d things, want 0", st.Announced)
+	}
+	head, _ := events.MaxID(ctx, s.DB)
+	if got := cursorOf(t, s, ctx); got != head {
+		t.Errorf("cursor = %d, want head %d", got, head)
+	}
+}
+
+func TestCursorAdvancesSoNothingIsAnnouncedTwice(t *testing.T) {
+	s, ctx := announceStore(t)
+	now := time.Now()
+	// Establish the cursor.
+	if _, err := Run(ctx, s, Options{Now: now, Sender: &recordingSender{}}); err != nil {
+		t.Fatal(err)
+	}
+	appendEvent(t, s, ctx, "budget.exceeded", now.UnixMilli())
+
+	first, err := Run(ctx, s, Options{Now: now, Sender: &recordingSender{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Announced != 1 {
+		t.Fatalf("first pass announced %d, want 1", first.Announced)
+	}
+	second, err := Run(ctx, s, Options{Now: now, Sender: &recordingSender{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Considered != 0 || second.Announced != 0 {
+		t.Errorf("second pass considered %d / announced %d, want 0/0",
+			second.Considered, second.Announced)
+	}
+}
+
+func TestABacklogKeepsTheNewestTransitionsNotTheOldest(t *testing.T) {
+	// The bug this pins: Query pages ascending, so taking backfillLimit rows
+	// straight from the cursor returns the OLDEST of a backlog and then the
+	// cursor jumps to head, discarding everything newer. After a real gap that
+	// delivers stale transitions and drops the ones still true.
+	s, ctx := announceStore(t)
+	now := time.Now()
+	if _, err := Run(ctx, s, Options{Now: now, Sender: &recordingSender{}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A gap far longer than the backfill window. Oldest are saturation, newest
+	// are budget, so the two are distinguishable in what gets said.
+	total := backfillLimit * 3
+	for i := 0; i < total; i++ {
+		kind := "saturation.saturated"
+		if i >= total-2 {
+			kind = "budget.exceeded"
+		}
+		appendEvent(t, s, ctx, kind, now.UnixMilli()+int64(i))
+	}
+
+	rec := &recordingSender{}
+	st, err := Run(ctx, s, Options{Now: now, Sender: rec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Considered == 0 {
+		t.Fatal("considered nothing from a large backlog")
+	}
+	if st.Announced == 0 {
+		t.Fatal("announced nothing from a backlog containing fresh transitions")
+	}
+	// The newest events were budget ones; if the oldest window had been taken
+	// they would all be saturation.
+	head, _ := events.MaxID(ctx, s.DB)
+	if got := cursorOf(t, s, ctx); got != head {
+		t.Errorf("cursor = %d, want head %d", got, head)
+	}
+	if st.Skipped["older than the last 25 events"] == 0 {
+		t.Error("dropped part of the backlog without reporting it")
+	}
+}
+
+func TestDryRunLeavesTheCursorAlone(t *testing.T) {
+	s, ctx := announceStore(t)
+	now := time.Now()
+	appendEvent(t, s, ctx, "budget.tight", now.UnixMilli())
+
+	before := cursorOf(t, s, ctx)
+	rec := &recordingSender{}
+	if _, err := Run(ctx, s, Options{Now: now, DryRun: true, Sender: rec}); err != nil {
+		t.Fatal(err)
+	}
+	if got := cursorOf(t, s, ctx); got != before {
+		t.Errorf("dry run moved the cursor from %d to %d", before, got)
+	}
+	if len(rec.sent) != 0 {
+		t.Errorf("dry run sent %d messages, want 0", len(rec.sent))
+	}
+}
+
+func TestCursorIsClaimedBeforeDeliverySoAFailedPassDoesNotRepeat(t *testing.T) {
+	// Two processes can run a pass at once. Claiming the cursor first makes
+	// this at-most-once rather than at-most-twice, and the cost is that a pass
+	// which dies mid-delivery loses its batch. That is the same asymmetry the
+	// gate is built on, so it is deliberate and pinned here.
+	s, ctx := announceStore(t)
+	now := time.Now()
+	if _, err := Run(ctx, s, Options{Now: now, Sender: &recordingSender{}}); err != nil {
+		t.Fatal(err)
+	}
+	appendEvent(t, s, ctx, "budget.exceeded", now.UnixMilli())
+	head, _ := events.MaxID(ctx, s.DB)
+
+	if _, err := Run(ctx, s, Options{Now: now, Sender: &failingSender{}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := cursorOf(t, s, ctx); got != head {
+		t.Errorf("cursor = %d, want %d claimed even though delivery failed", got, head)
+	}
+}
+
+type failingSender struct{}
+
+func (failingSender) Send(context.Context, notify.Target, string) (string, error) {
+	return "", errors.New("socket exploded")
 }

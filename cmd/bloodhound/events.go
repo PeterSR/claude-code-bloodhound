@@ -129,7 +129,7 @@ func runEvents(cmd *cobra.Command, args []string) error {
 		Kinds:   eventsKinds,
 		Bucket:  eventsBucket,
 		Session: eventsSession,
-		Cwd:     eventsCwd,
+		Cwd:     normalizeCwdFilter(eventsCwd),
 		Limit:   eventsLimit,
 	}
 
