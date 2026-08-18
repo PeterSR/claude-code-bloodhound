@@ -32,6 +32,11 @@ type Scope struct {
 	Bucket  string `json:"bucket,omitempty"`  // "session" | "week" | ""
 	Session string `json:"session,omitempty"` // session UUID
 	Project string `json:"project,omitempty"` // denormalised so consumers can filter without a join
+	// Cwd is the absolute working directory a reading is about. Budgets are
+	// keyed by directory rather than project, because one project name can
+	// span many directories, so a directory-scoped level needs its own slot
+	// rather than borrowing Project.
+	Cwd string `json:"cwd,omitempty"`
 }
 
 // Event is one recorded transition.

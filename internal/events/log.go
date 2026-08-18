@@ -41,9 +41,9 @@ func appendWithPrev(ctx context.Context, ex execer, tsMS int64, kind, prev strin
 		detailJSON = string(b)
 	}
 	r, err := ex.ExecContext(ctx, `
-		INSERT INTO events (ts_unix_ms, kind, bucket, session_uuid, project, prev_state, detail)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		tsMS, kind, sc.Bucket, sc.Session, sc.Project, prev, detailJSON,
+		INSERT INTO events (ts_unix_ms, kind, bucket, session_uuid, project, cwd, prev_state, detail)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		tsMS, kind, sc.Bucket, sc.Session, sc.Project, sc.Cwd, prev, detailJSON,
 	)
 	if err != nil {
 		return 0, err
@@ -61,6 +61,7 @@ type Filter struct {
 	Kinds   []string // globs; empty means all
 	Bucket  string
 	Session string
+	Cwd     string
 	Limit   int // <= 0 means DefaultLimit
 }
 
@@ -98,7 +99,7 @@ func Query(ctx context.Context, q queryer, f Filter) ([]Event, error) {
 		limit = DefaultLimit
 	}
 
-	sqlStr := `SELECT id, ts_unix_ms, kind, bucket, session_uuid, project, prev_state, detail
+	sqlStr := `SELECT id, ts_unix_ms, kind, bucket, session_uuid, project, cwd, prev_state, detail
 	             FROM events WHERE id > ?`
 	args := []any{f.SinceID}
 	if f.SinceMS > 0 {
@@ -116,6 +117,10 @@ func Query(ctx context.Context, q queryer, f Filter) ([]Event, error) {
 	if f.Session != "" {
 		sqlStr += ` AND session_uuid = ?`
 		args = append(args, f.Session)
+	}
+	if f.Cwd != "" {
+		sqlStr += ` AND cwd = ?`
+		args = append(args, f.Cwd)
 	}
 	if len(f.Kinds) > 0 {
 		clause := ""
@@ -142,7 +147,7 @@ func Query(ctx context.Context, q queryer, f Filter) ([]Event, error) {
 		var e Event
 		var detailJSON string
 		if err := rows.Scan(&e.ID, &e.TSUnixMS, &e.Kind, &e.Scope.Bucket,
-			&e.Scope.Session, &e.Scope.Project, &e.PrevState, &detailJSON); err != nil {
+			&e.Scope.Session, &e.Scope.Project, &e.Scope.Cwd, &e.PrevState, &detailJSON); err != nil {
 			return nil, err
 		}
 		e.TSISO = time.UnixMilli(e.TSUnixMS).UTC().Format(time.RFC3339)
@@ -168,9 +173,9 @@ func MaxID(ctx context.Context, q queryer) (int64, error) {
 // Levels returns every current level, ordered for stable output.
 func Levels(ctx context.Context, q queryer) ([]Level, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT kind, bucket, session_uuid, state, since_ms
+		SELECT kind, bucket, session_uuid, cwd, state, since_ms
 		  FROM event_levels
-		 ORDER BY kind, bucket, session_uuid`)
+		 ORDER BY kind, bucket, session_uuid, cwd`)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +184,7 @@ func Levels(ctx context.Context, q queryer) ([]Level, error) {
 	out := []Level{}
 	for rows.Next() {
 		var l Level
-		if err := rows.Scan(&l.Kind, &l.Scope.Bucket, &l.Scope.Session, &l.State, &l.SinceMS); err != nil {
+		if err := rows.Scan(&l.Kind, &l.Scope.Bucket, &l.Scope.Session, &l.Scope.Cwd, &l.State, &l.SinceMS); err != nil {
 			return nil, err
 		}
 		out = append(out, l)

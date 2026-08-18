@@ -15,6 +15,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/aggregate"
+	"sort"
+	"strings"
+
+	"github.com/PeterSR/claude-code-bloodhound/internal/announce"
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/server"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
@@ -362,6 +366,50 @@ func runReconcileOnce(ctx context.Context, s *store.Store, w io.Writer) {
 	for _, e := range st.Errors {
 		fmt.Fprintf(w, "[daemon] events: warn %s\n", e)
 	}
+
+	// Delivery rides the same tick as the reconcile that produced the events,
+	// so a transition is spoken about while it is still true rather than up to
+	// a cadence later. It is deliberately after the reconcile and outside its
+	// error path: failing to deliver must never stop the log being written,
+	// because the log is the durable record and delivery is best effort.
+	runAnnounceOnce(ctx, s, w)
+}
+
+// runAnnounceOnce tells whichever sessions are awake about pressure that just
+// changed. Most passes say nothing, either because nothing transitioned or
+// because every session was at rest, and both are the system working.
+func runAnnounceOnce(ctx context.Context, s *store.Store, w io.Writer) {
+	ast, err := announce.Run(ctx, s, announce.Options{})
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] announce: %v\n", err)
+		return
+	}
+	if ast.Delivered > 0 {
+		fmt.Fprintf(w, "[daemon] announce: said %d thing(s) to %d session(s)\n",
+			ast.Announced, ast.Delivered)
+	}
+	// Skips are only worth a line when there was something to say, otherwise
+	// every quiet tick would report the whole machine sitting at its prompt.
+	if ast.Announced > 0 && ast.Delivered == 0 && len(ast.Skipped) > 0 {
+		fmt.Fprintf(w, "[daemon] announce: %d thing(s) to say, nobody awake to tell (%s)\n",
+			ast.Announced, skipSummary(ast.Skipped))
+	}
+	for _, e := range ast.Errors {
+		fmt.Fprintf(w, "[daemon] announce: warn %s\n", e)
+	}
+}
+
+func skipSummary(skipped map[string]int) string {
+	reasons := make([]string, 0, len(skipped))
+	for r := range skipped {
+		reasons = append(reasons, r)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		parts = append(parts, fmt.Sprintf("%s=%d", r, skipped[r]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // runEventRetentionOnce trims the log. Rides the aggregate cadence rather than
