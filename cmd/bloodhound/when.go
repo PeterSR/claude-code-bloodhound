@@ -17,6 +17,7 @@ var (
 	whenRun     string
 	whenBucket  string
 	whenSession string
+	whenCwd     string
 	whenExpires time.Duration
 	whenNote    string
 	whenList    bool
@@ -62,6 +63,7 @@ func init() {
 	whenCmd.Flags().StringVar(&whenRun, "run", "", "shell command to run once when the event lands")
 	whenCmd.Flags().StringVar(&whenBucket, "bucket", "", "only match this limit bucket: session or week")
 	whenCmd.Flags().StringVar(&whenSession, "session", "", "only match this session UUID")
+	whenCmd.Flags().StringVar(&whenCwd, "cwd", "", "only match this working directory")
 	whenCmd.Flags().DurationVar(&whenExpires, "expires", 24*time.Hour, "give up if nothing matches within this long")
 	whenCmd.Flags().StringVar(&whenNote, "note", "", "free-text label, shown in --list")
 	whenCmd.Flags().BoolVar(&whenList, "list", false, "list registered one-shots")
@@ -120,6 +122,7 @@ func runWhen(cmd *cobra.Command, args []string) error {
 		KindGlob:  args[0],
 		Bucket:    whenBucket,
 		Session:   whenSession,
+		Cwd:       whenCwd,
 		Command:   whenRun,
 		Note:      whenNote,
 		ExpiresMS: now.Add(whenExpires).UnixMilli(),

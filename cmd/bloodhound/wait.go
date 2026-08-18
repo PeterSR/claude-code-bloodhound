@@ -18,6 +18,7 @@ var (
 	waitFor     []string
 	waitBucket  string
 	waitSession string
+	waitCwd     string
 	waitTimeout time.Duration
 	waitSince   string
 	waitJSON    bool
@@ -51,6 +52,7 @@ func init() {
 	waitCmd.Flags().StringArrayVar(&waitFor, "for", nil, "kind glob to wait for, repeatable (e.g. window.reset)")
 	waitCmd.Flags().StringVar(&waitBucket, "bucket", "", "limit bucket: session or week")
 	waitCmd.Flags().StringVar(&waitSession, "session", "", "session UUID")
+	waitCmd.Flags().StringVar(&waitCwd, "cwd", "", "working directory (budget events are scoped to one)")
 	waitCmd.Flags().DurationVar(&waitTimeout, "timeout", time.Hour, "give up after this long (0 waits forever)")
 	waitCmd.Flags().StringVar(&waitSince, "since", "", "start from a cursor id or duration instead of now")
 	waitCmd.Flags().BoolVar(&waitJSON, "json", false, "emit the matched event as JSON")
@@ -97,6 +99,7 @@ func runWait(cmd *cobra.Command, args []string) error {
 		Kinds:   waitFor,
 		Bucket:  waitBucket,
 		Session: waitSession,
+		Cwd:     waitCwd,
 		Limit:   1,
 	}
 

@@ -8,6 +8,26 @@ import (
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/budget"
+	"github.com/PeterSR/claude-code-bloodhound/internal/events"
+)
+
+// Budget lifecycle events.
+//
+// Pressure is a level, diffed by the reconciler, and surfaces as
+// budget.clear / budget.tight / budget.exceeded. Lifecycle is not a level: a
+// budget being set is an edge with no persistent state, so it is appended by
+// whatever transaction discovered it, the same way window.reset is. That also
+// means it works on a cron install with no daemon, since `bloodhound budget
+// set` goes through exactly this path.
+//
+// They deliberately share the "budget" prefix. The state names (clear, tight,
+// exceeded) and the lifecycle verbs (set, revoked, expired) cannot collide, so
+// a peer wanting everything budget-related globs budget.* and gets both, while
+// one wanting only pressure can still name the states.
+const (
+	EventBudgetSet     = "budget.set"
+	EventBudgetRevoked = "budget.revoked"
+	EventBudgetExpired = "budget.expired"
 )
 
 // SetBudget stores a budget for a directory and bucket, retiring whatever live
@@ -29,21 +49,27 @@ func (s *Store) SetBudget(ctx context.Context, b budget.Budget, now time.Time) (
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`UPDATE budgets SET retired_ms = ?, retired_why = ?
 		   WHERE cwd = ? AND bucket = ? AND retired_ms IS NULL`,
-		nowMS, budget.RetiredRevoked, b.Cwd, b.Bucket); err != nil {
+		nowMS, budget.RetiredRevoked, b.Cwd, b.Bucket)
+	if err != nil {
 		return budget.Budget{}, fmt.Errorf("retire previous budget: %w", err)
 	}
+	displaced, err := res.RowsAffected()
+	if err != nil {
+		return budget.Budget{}, err
+	}
+	replaced := displaced > 0
 
-	res, err := tx.ExecContext(ctx,
+	ins, err := tx.ExecContext(ctx,
 		`INSERT INTO budgets (cwd, bucket, spend_pct, meter_pct, note, set_ms)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		b.Cwd, b.Bucket, b.SpendPct, b.MeterPct, b.Note, nowMS)
 	if err != nil {
 		return budget.Budget{}, fmt.Errorf("insert budget: %w", err)
 	}
-	id, err := res.LastInsertId()
+	id, err := ins.LastInsertId()
 	if err != nil {
 		return budget.Budget{}, err
 	}
@@ -54,6 +80,26 @@ func (s *Store) SetBudget(ctx context.Context, b budget.Budget, now time.Time) (
 			return budget.Budget{}, err
 		}
 	}
+
+	// One event for the whole change, carrying whether it displaced something.
+	// A replacement is not also reported as a revoke: a peer watching
+	// budget.revoked wants "this directory is no longer governed", which a
+	// replacement is precisely not.
+	detail := map[string]any{"replaced": replaced}
+	if b.HasSpend() {
+		detail["spend_pct"] = b.SpendPct
+	}
+	if b.HasMeter() {
+		detail["meter_pct"] = b.MeterPct
+	}
+	if b.Note != "" {
+		detail["note"] = b.Note
+	}
+	if _, err := events.AppendTx(ctx, tx, nowMS, EventBudgetSet,
+		events.Scope{Bucket: b.Bucket, Cwd: b.Cwd}, detail); err != nil {
+		return budget.Budget{}, fmt.Errorf("append budget.set: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return budget.Budget{}, err
 	}
@@ -92,15 +138,44 @@ func (s *Store) AddLease(ctx context.Context, budgetID int64, l budget.Lease) (b
 // RevokeBudget retires the live budget for a directory and bucket. It reports
 // whether there was one to retire.
 func (s *Store) RevokeBudget(ctx context.Context, cwd, bucket string, now time.Time) (bool, error) {
-	res, err := s.DB.ExecContext(ctx,
+	nowMS := now.UnixMilli()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
 		`UPDATE budgets SET retired_ms = ?, retired_why = ?
 		   WHERE cwd = ? AND bucket = ? AND retired_ms IS NULL`,
-		now.UnixMilli(), budget.RetiredRevoked, cwd, bucket)
+		nowMS, budget.RetiredRevoked, cwd, bucket)
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return false, err
+	}
+	if n == 0 {
+		// Nothing was in force, so nothing happened. Emitting an event here
+		// would tell a peer a budget ended when none existed.
+		return false, tx.Commit()
+	}
+
+	// The level the reconciler recorded for this budget is now about something
+	// that no longer exists. Clearing it in the same transaction stops
+	// `budget status` reporting pressure for a revoked budget until the next
+	// tick, and stops the next reconcile reading a stale previous state.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM event_levels WHERE kind = 'budget' AND bucket = ? AND cwd = ?`,
+		bucket, cwd); err != nil {
+		return false, fmt.Errorf("clear budget level: %w", err)
+	}
+	if _, err := events.AppendTx(ctx, tx, nowMS, EventBudgetRevoked,
+		events.Scope{Bucket: bucket, Cwd: cwd}, nil); err != nil {
+		return false, fmt.Errorf("append budget.revoked: %w", err)
+	}
+	return true, tx.Commit()
 }
 
 // ListBudgets returns budgets with their leases. Live-only unless includeRetired.
@@ -234,6 +309,16 @@ func (s *Store) SettleBudgets(ctx context.Context, now time.Time, windowEnd map[
 			`UPDATE budgets SET retired_ms = ?, retired_why = ? WHERE id = ?`,
 			nowMS, budget.RetiredExpired, b.ID); err != nil {
 			return nil, fmt.Errorf("retire budget %d: %w", b.ID, err)
+		}
+		if _, err := s.DB.ExecContext(ctx,
+			`DELETE FROM event_levels WHERE kind = 'budget' AND bucket = ? AND cwd = ?`,
+			b.Bucket, b.Cwd); err != nil {
+			return nil, fmt.Errorf("clear level for budget %d: %w", b.ID, err)
+		}
+		if _, err := events.AppendTx(ctx, s.DB, nowMS, EventBudgetExpired,
+			events.Scope{Bucket: b.Bucket, Cwd: b.Cwd},
+			map[string]any{"set_ms": b.SetMS}); err != nil {
+			return nil, fmt.Errorf("append budget.expired: %w", err)
 		}
 	}
 	return still, nil

@@ -35,6 +35,7 @@ type Hook struct {
 	KindGlob     string `json:"kind"`
 	Bucket       string `json:"bucket,omitempty"`
 	Session      string `json:"session,omitempty"`
+	Cwd          string `json:"cwd,omitempty"`
 	Command      string `json:"command"`
 	Note         string `json:"note,omitempty"`
 	ExpiresMS    int64  `json:"expires_ms"`
@@ -59,9 +60,9 @@ func RegisterHook(ctx context.Context, db *sql.DB, now time.Time, h Hook) (Hook,
 
 	r, err := db.ExecContext(ctx, `
 		INSERT INTO event_hooks
-		  (created_ms, after_event_id, kind_glob, bucket, session_uuid, command, note, expires_ms, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		h.CreatedMS, h.AfterEventID, h.KindGlob, h.Bucket, h.Session, h.Command, h.Note, h.ExpiresMS, h.Status,
+		  (created_ms, after_event_id, kind_glob, bucket, session_uuid, cwd, command, note, expires_ms, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		h.CreatedMS, h.AfterEventID, h.KindGlob, h.Bucket, h.Session, h.Cwd, h.Command, h.Note, h.ExpiresMS, h.Status,
 	)
 	if err != nil {
 		return Hook{}, err
@@ -73,7 +74,7 @@ func RegisterHook(ctx context.Context, db *sql.DB, now time.Time, h Hook) (Hook,
 // ListHooks returns hooks newest first. When pendingOnly, expired-but-unswept
 // rows are excluded too, so the answer matches what would actually still fire.
 func ListHooks(ctx context.Context, db *sql.DB, now time.Time, pendingOnly bool) ([]Hook, error) {
-	q := `SELECT id, created_ms, after_event_id, kind_glob, bucket, session_uuid,
+	q := `SELECT id, created_ms, after_event_id, kind_glob, bucket, session_uuid, cwd,
 	             command, note, expires_ms, status, fired_ms, fired_event_id, exit_code
 	        FROM event_hooks`
 	var args []any
@@ -95,7 +96,7 @@ func ListHooks(ctx context.Context, db *sql.DB, now time.Time, pendingOnly bool)
 		var firedMS, firedEvent sql.NullInt64
 		var exit sql.NullInt64
 		if err := rows.Scan(&h.ID, &h.CreatedMS, &h.AfterEventID, &h.KindGlob, &h.Bucket,
-			&h.Session, &h.Command, &h.Note, &h.ExpiresMS, &h.Status,
+			&h.Session, &h.Cwd, &h.Command, &h.Note, &h.ExpiresMS, &h.Status,
 			&firedMS, &firedEvent, &exit); err != nil {
 			return nil, err
 		}
@@ -172,6 +173,7 @@ func runHooks(ctx context.Context, db *sql.DB, now time.Time) (fired, expired in
 			Kinds:   []string{h.KindGlob},
 			Bucket:  h.Bucket,
 			Session: h.Session,
+			Cwd:     h.Cwd,
 			Limit:   1,
 		})
 		if err != nil {
@@ -307,6 +309,7 @@ func execHook(ctx context.Context, h Hook, ev Event, now time.Time) (int, []byte
 		"BLOODHOUND_EVENT_KIND="+ev.Kind,
 		"BLOODHOUND_EVENT_BUCKET="+ev.Scope.Bucket,
 		"BLOODHOUND_EVENT_SESSION="+ev.Scope.Session,
+		"BLOODHOUND_EVENT_CWD="+ev.Scope.Cwd,
 		"BLOODHOUND_EVENT_LATE_S="+strconv.FormatInt(lateS, 10),
 		"BLOODHOUND_HOOK_ID="+strconv.FormatInt(h.ID, 10),
 	)

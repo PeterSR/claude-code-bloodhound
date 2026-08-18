@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/budget"
 	"github.com/PeterSR/claude-code-bloodhound/internal/events"
 	"github.com/PeterSR/claude-code-bloodhound/internal/events/sensors"
 	"github.com/PeterSR/claude-code-bloodhound/internal/eventstate"
@@ -22,6 +23,7 @@ var (
 	eventsKinds   []string
 	eventsBucket  string
 	eventsSession string
+	eventsCwd     string
 	eventsLimit   int
 	eventsJSON    bool
 	eventsLevels  bool
@@ -74,6 +76,7 @@ func init() {
 	eventsCmd.Flags().StringArrayVar(&eventsKinds, "kind", nil, "kind glob, repeatable (e.g. 'limit_projection.*')")
 	eventsCmd.Flags().StringVar(&eventsBucket, "bucket", "", "limit bucket: session or week")
 	eventsCmd.Flags().StringVar(&eventsSession, "session", "", "session UUID")
+	eventsCmd.Flags().StringVar(&eventsCwd, "cwd", "", "working directory (budget events are scoped to one)")
 	eventsCmd.Flags().IntVar(&eventsLimit, "limit", 0, "max events to return (default 500)")
 	eventsCmd.Flags().BoolVar(&eventsJSON, "json", false, "emit JSON")
 	eventsCmd.Flags().BoolVar(&eventsLevels, "levels", false, "print current levels instead of transitions")
@@ -126,6 +129,7 @@ func runEvents(cmd *cobra.Command, args []string) error {
 		Kinds:   eventsKinds,
 		Bucket:  eventsBucket,
 		Session: eventsSession,
+		Cwd:     eventsCwd,
 		Limit:   eventsLimit,
 	}
 
@@ -223,11 +227,30 @@ func writeEventLine(w io.Writer, e events.Event, asJSON bool) error {
 }
 
 func scopeSuffix(sc events.Scope) string {
+	if r := renderScope(sc); r != "" {
+		return " [" + r + "]"
+	}
+	return ""
+}
+
+// renderScope picks the one identifier that says most about where an event
+// happened. Directory beats bucket because a budget event carries both and the
+// bucket alone makes two directories' events indistinguishable in a listing;
+// session beats everything because it is the narrowest.
+//
+// A budget event renders as "myapp:week" rather than the full path, which
+// would push every other column off the terminal. The full path is still in
+// --json, and --cwd takes it.
+func renderScope(sc events.Scope) string {
 	switch {
 	case sc.Session != "":
-		return " [" + sc.Session + "]"
+		return sc.Session
+	case sc.Cwd != "" && sc.Bucket != "":
+		return budget.Label(sc.Cwd) + ":" + sc.Bucket
+	case sc.Cwd != "":
+		return budget.Label(sc.Cwd)
 	case sc.Bucket != "":
-		return " [" + sc.Bucket + "]"
+		return sc.Bucket
 	}
 	return ""
 }
@@ -244,10 +267,7 @@ func writeEventsHuman(w io.Writer, env *eventstate.Response, withLevels bool) er
 	if withLevels {
 		fmt.Fprintln(tw, "LEVEL\tSCOPE\tSTATE\tSINCE")
 		for _, l := range env.Levels {
-			scope := l.Scope.Bucket
-			if l.Scope.Session != "" {
-				scope = l.Scope.Session
-			}
+			scope := renderScope(l.Scope)
 			if scope == "" {
 				scope = "-"
 			}
@@ -266,10 +286,7 @@ func writeEventsHuman(w io.Writer, env *eventstate.Response, withLevels bool) er
 		if from == "" {
 			from = "-"
 		}
-		scope := e.Scope.Bucket
-		if e.Scope.Session != "" {
-			scope = e.Scope.Session
-		}
+		scope := renderScope(e.Scope)
 		if scope == "" {
 			scope = "-"
 		}

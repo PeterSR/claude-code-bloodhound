@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/budget"
+	"github.com/PeterSR/claude-code-bloodhound/internal/events"
 )
 
 func budgetStore(t *testing.T) (*Store, context.Context) {
@@ -249,4 +250,147 @@ func TestMetaRoundTrip(t *testing.T) {
 	if got, _ := s.GetMeta(ctx, "announce_cursor"); got != "500" {
 		t.Errorf("got %q, want 500", got)
 	}
+}
+
+// Lifecycle events are what makes a budget interoperable: a peer watching the
+// log has to be able to see one appear and disappear, not just poll for it.
+// They are edges, appended by the transaction that made the change, so they
+// work on a cron install with no daemon.
+
+func budgetEvents(t *testing.T, s *Store, ctx context.Context) []events.Event {
+	t.Helper()
+	evs, err := events.Query(ctx, s.DB, events.Filter{Kinds: []string{"budget.*"}})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	return evs
+}
+
+func TestSetBudgetAppendsAnEvent(t *testing.T) {
+	s, ctx := budgetStore(t)
+	if _, err := s.SetBudget(ctx, manualBudget("/home/dev/myapp", budget.BucketWeek, 25), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	evs := budgetEvents(t, s, ctx)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1", len(evs))
+	}
+	e := evs[0]
+	if e.Kind != EventBudgetSet {
+		t.Errorf("kind = %q, want %q", e.Kind, EventBudgetSet)
+	}
+	if e.Scope.Cwd != "/home/dev/myapp" || e.Scope.Bucket != budget.BucketWeek {
+		t.Errorf("scope = %+v, want the directory and bucket", e.Scope)
+	}
+	if e.Detail["replaced"] != false {
+		t.Errorf("replaced = %v, want false on a first set", e.Detail["replaced"])
+	}
+	if e.Detail["spend_pct"] != 25.0 {
+		t.Errorf("spend_pct = %v, want 25", e.Detail["spend_pct"])
+	}
+}
+
+func TestReplacingABudgetSaysSoRatherThanReportingARevoke(t *testing.T) {
+	// A peer watching budget.revoked wants "this directory is no longer
+	// governed". A replacement is precisely not that, so it must not fire one.
+	s, ctx := budgetStore(t)
+	now := time.Now()
+	if _, err := s.SetBudget(ctx, manualBudget("/home/dev/myapp", budget.BucketWeek, 10), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetBudget(ctx, manualBudget("/home/dev/myapp", budget.BucketWeek, 40), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	evs := budgetEvents(t, s, ctx)
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2 sets", len(evs))
+	}
+	for _, e := range evs {
+		if e.Kind == EventBudgetRevoked {
+			t.Fatal("a replacement fired budget.revoked")
+		}
+	}
+	if evs[1].Detail["replaced"] != true {
+		t.Errorf("replaced = %v on the second set, want true", evs[1].Detail["replaced"])
+	}
+}
+
+func TestRevokeAppendsAnEventAndClearsTheLevel(t *testing.T) {
+	s, ctx := budgetStore(t)
+	now := time.Now()
+	if _, err := s.SetBudget(ctx, manualBudget("/home/dev/myapp", budget.BucketWeek, 10), now); err != nil {
+		t.Fatal(err)
+	}
+	// Stand in for a reconcile having recorded pressure for this budget.
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO event_levels (kind, bucket, session_uuid, cwd, state, since_ms)
+		 VALUES ('budget', ?, '', ?, 'tight', ?)`,
+		budget.BucketWeek, "/home/dev/myapp", now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.RevokeBudget(ctx, "/home/dev/myapp", budget.BucketWeek, now); err != nil {
+		t.Fatal(err)
+	}
+
+	var levels int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT count(*) FROM event_levels WHERE kind = 'budget' AND cwd = ?`,
+		"/home/dev/myapp").Scan(&levels); err != nil {
+		t.Fatal(err)
+	}
+	if levels != 0 {
+		t.Error("the level survived a revoke, so status would keep reporting pressure for a budget that is gone")
+	}
+
+	evs := budgetEvents(t, s, ctx)
+	if len(evs) != 2 || evs[1].Kind != EventBudgetRevoked {
+		t.Fatalf("events = %+v, want a set then a revoked", kindsOf(evs))
+	}
+}
+
+func TestRevokingNothingAppendsNoEvent(t *testing.T) {
+	// Telling a peer a budget ended when none existed is worse than silence.
+	s, ctx := budgetStore(t)
+	if _, err := s.RevokeBudget(ctx, "/home/dev/never", budget.BucketWeek, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if evs := budgetEvents(t, s, ctx); len(evs) != 0 {
+		t.Errorf("got %d events revoking nothing, want 0: %v", len(evs), kindsOf(evs))
+	}
+}
+
+func TestExpiryAppendsAnEvent(t *testing.T) {
+	s, ctx := budgetStore(t)
+	now := time.Now()
+	past := now.Add(-time.Hour).UnixMilli()
+	if _, err := s.SetBudget(ctx, budget.Budget{
+		Cwd: "/home/dev/myapp", Bucket: budget.BucketWeek, SpendPct: 10,
+		Leases: []budget.Lease{{Kind: budget.LeaseDeadline, AtMS: &past}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SettleBudgets(ctx, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	evs := budgetEvents(t, s, ctx)
+	if len(evs) != 2 || evs[1].Kind != EventBudgetExpired {
+		t.Fatalf("events = %v, want a set then an expired", kindsOf(evs))
+	}
+
+	// And settling again must not fire a second one: the budget only ends once.
+	if _, err := s.SettleBudgets(ctx, now.Add(time.Minute), nil); err != nil {
+		t.Fatal(err)
+	}
+	if evs := budgetEvents(t, s, ctx); len(evs) != 2 {
+		t.Errorf("got %d events after a second settle, want 2: %v", len(evs), kindsOf(evs))
+	}
+}
+
+func kindsOf(evs []events.Event) []string {
+	out := make([]string, len(evs))
+	for i, e := range evs {
+		out[i] = e.Kind
+	}
+	return out
 }
