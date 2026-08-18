@@ -71,7 +71,18 @@ var announceable = map[string]bool{
 	// be resumed by hand, so it is a cliff rather than a slope.
 	"limit_projection": true,
 	"saturation":       true,
+	// A session whose recent turns have outgrown its own average, which is
+	// the run-up to a compaction. Opt-in per directory, and scoped to the one
+	// session it is about.
+	"recommendation": true,
 }
+
+// Deliberately not announceable: cache.expiring, which looks like it belongs
+// here and cannot be delivered. It is populated only in the last fifth of a
+// cache TTL, which a session reaches by sitting idle, and the gate admits only
+// sessions that are mid-turn. A session working hard enough to hear us has
+// just written its cache and is never in the band. The fact is real and worth
+// having in the log; there is simply nobody awake to tell.
 
 // Stats is what one pass did, for the daemon log.
 type Stats struct {
@@ -238,6 +249,12 @@ func filterWorthSaying(evs []events.Event) []events.Event {
 			if state == "saturated" {
 				out = append(out, e)
 			}
+		case "recommendation":
+			// "watch" and "ok" are dashboard states. Only the one that says a
+			// compaction is coming is worth a line in a conversation.
+			if state == "compact" {
+				out = append(out, e)
+			}
 		}
 	}
 	return out
@@ -282,7 +299,7 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 	}
 
 	for _, sess := range admitted {
-		text := textFor(evs, sess, now, wakeupNudgeWanted(sess.CWD))
+		text := textFor(evs, sess, now, nudgesFor(sess.CWD))
 		if text == "" {
 			continue // nothing in this batch concerns this session
 		}
@@ -311,7 +328,7 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 // is tight is noise, and it is the mistake a global broadcast makes. The
 // limit events are account-wide and go to everyone admitted, because the 5h
 // cliff stops every session on the machine, not just the one that caused it.
-func textFor(evs []events.Event, sess ccsock.Session, now time.Time, nudgeWakeup bool) string {
+func textFor(evs []events.Event, sess ccsock.Session, now time.Time, nudges projectconfig.Config) string {
 	var lines []string
 	// The soonest reset among the lines that made it in, and which bucket it
 	// belongs to. Two buckets crossing together is one situation with two
@@ -320,6 +337,14 @@ func textFor(evs []events.Event, sess ccsock.Session, now time.Time, nudgeWakeup
 	soonestBucket := ""
 	for _, e := range evs {
 		if e.Scope.Cwd != "" && !sameDir(e.Scope.Cwd, sess.CWD) {
+			continue
+		}
+		// A session-scoped event is about one conversation and is meaningless
+		// in any other, however interested its neighbours might be.
+		if e.Scope.Session != "" && e.Scope.Session != sess.SessionID {
+			continue
+		}
+		if !wanted(e, nudges) {
 			continue
 		}
 		line := describe(e, now)
@@ -341,7 +366,7 @@ func textFor(evs []events.Event, sess ccsock.Session, now time.Time, nudgeWakeup
 	// Only when a reset actually made it into the text above. Without one the
 	// note would point at a moment the reader was never told, and there would
 	// be nothing to arm a wakeup for.
-	if nudgeWakeup && soonestBucket != "" {
+	if nudges.WakeupNudge && soonestBucket != "" {
 		lines = append(lines, wakeupNote(soonestBucket))
 	}
 	return strings.Join(lines, "\n")
@@ -364,21 +389,35 @@ func wakeupNote(bucket string) string {
 		budget.BucketLabel(bucket))
 }
 
-// wakeupNudgeWanted asks the directory a session is working in whether it
-// wants the note.
+// wanted reports whether an opt-in event may be said to this session at all.
+//
+// The pressure events are unconditional: a limit that stops every session on
+// the machine is not something a directory gets to switch off. The writeup
+// nudge is different in kind. Nothing is going wrong when it fires, and it is
+// advice about how to work rather than a fact about the meter, so it goes only
+// where it was asked for.
+func wanted(e events.Event, nudges projectconfig.Config) bool {
+	kind, _, ok := splitKind(e.Kind)
+	if ok && kind == "recommendation" {
+		return nudges.WriteupNudge
+	}
+	return true
+}
+
+// nudgesFor asks the directory a session is working in what it wants to hear.
 //
 // Silent on every failure. A directory with no file, an unreadable one, or a
 // session with no cwd at all all mean the same thing here: nobody asked for
-// the extra line, so it is not added.
-func wakeupNudgeWanted(cwd string) bool {
+// the extra lines, so they are left out.
+func nudgesFor(cwd string) projectconfig.Config {
 	if cwd == "" {
-		return false
+		return projectconfig.Default()
 	}
 	cfg, _, err := projectconfig.Load(cwd)
 	if err != nil {
-		return false
+		return projectconfig.Default()
 	}
-	return cfg.WakeupNudge
+	return cfg
 }
 
 func sameDir(a, b string) bool {
@@ -424,6 +463,15 @@ func describe(e events.Event, now time.Time) string {
 			return fmt.Sprintf("The %s meter is on pace to reach 100%% before it resets %s.", b, reset)
 		}
 		return fmt.Sprintf("The %s meter is on pace to reach 100%% before it resets.", b)
+	case "recommendation":
+		line := "This session's recent turns have outgrown its own average, which is the run-up to a compaction."
+		if reason, _ := e.Detail["reason"].(string); reason != "" {
+			line = "This session: " + reason + "."
+		}
+		// The second sentence is the whole point of saying it early. After the
+		// compaction the detail is gone and the writeup has to be rebuilt from
+		// a summary; before it, the detail is still sitting in the context.
+		return line + " Writing up where things stand costs less now than reconstructing it afterwards."
 	case "saturation":
 		line := fmt.Sprintf("The %s meter has stopped moving at its cap, so every figure downstream is now an estimate.", b)
 		if reset != "" {

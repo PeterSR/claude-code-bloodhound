@@ -22,8 +22,8 @@ toward sessions working in that directory: whether to speak up before a
 compaction, whether a warning may suggest arming a wakeup.
 
 It is not an override of the global config and shares no keys with it. The
-global config is how the daemon operates — where the database lives, which
-claude binary to drive — and a working directory has no say over any of that.
+global config is how the daemon operates: where the database lives, which
+claude binary to drive. A working directory has no say over any of that.
 This file only makes bloodhound quieter or chattier in one project, which is
 what makes it safe to check in.
 

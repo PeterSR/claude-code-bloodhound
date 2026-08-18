@@ -55,7 +55,7 @@ func fillBurn(ctx context.Context, s pctSource, ws *routes.NowWindow, pct int, i
 	}
 	etaMS := int64(float64(remaining) / slope * 3600 * 1000)
 	// The three suppressions below all need a window shape. Without a parsed
-	// reset there is none, and the projection goes out as measured — the same
+	// reset there is none, and the projection goes out as measured, the same
 	// thing it did before any of these gates existed.
 	if ws.TimeToResetMS > 0 {
 		// Suppress when the projected limit is after the natural reset — not
@@ -134,7 +134,7 @@ const evidenceMultiple = 3
 //
 // This is what keeps the weekly bucket honest. A 168-hour window is spent by
 // someone who sleeps, and the last hour of a working day extrapolated across
-// six days always projects a crossing — the weaverbird weekly widget rendered
+// six days always projects a crossing. The weaverbird weekly widget rendered
 // danger at 2% used for exactly that reason. The average since the reset has
 // the idle hours in it and the last hour does not.
 //

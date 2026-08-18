@@ -218,7 +218,7 @@ func TestFillBurn_WeeklyOnPaceDoesNotProject(t *testing.T) {
 }
 
 // TestFillBurn_WeeklyOffPaceStillProjects is the other half of the fix. The
-// week must still be able to raise a hand — quieting it permanently would
+// week must still be able to raise a hand. Quieting it permanently would
 // have been the easy wrong answer. Two days in at 60% used projects to 210%
 // at reset, which is worth saying.
 func TestFillBurn_WeeklyOffPaceStillProjects(t *testing.T) {

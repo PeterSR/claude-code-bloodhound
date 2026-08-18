@@ -168,11 +168,19 @@ quieter or chattier in one project and can do nothing else.
 }
 ```
 
-`writeup_nudge` asks bloodhound to say something while there is still context
-left to say it in, so a session can be written up before a compaction takes
-the detail away. `wakeup_nudge` lets a budget or limit warning add that the
-window reopens at a known time and that a wakeup could be armed for it;
-bloodhound suggests, it never arms anything itself. Both default to off.
+`writeup_nudge` asks bloodhound to speak up when a session's recent turns have
+outgrown its own average, which is the run-up to a compaction, so the work can
+be written up while the detail is still in the context rather than
+reconstructed from a summary afterwards. It goes only to the session it is
+about. `wakeup_nudge` lets a budget or limit warning add that the window
+reopens at a known time and that a wakeup could be armed for it; bloodhound
+suggests, it never arms anything itself. Both default to off.
+
+Either way bloodhound only ever speaks into a session that is already
+mid-turn. Delivering to one sitting at its prompt would start a turn it was
+not going to take, and if its cache had gone cold that turn re-pays the whole
+conversation prefix before reading a word, charged to the very budget the
+warning was about.
 
 `bloodhound project init` writes a starter file, `bloodhound project show`
 resolves which one governs a directory. The search walks up from the working

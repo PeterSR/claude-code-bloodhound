@@ -10,6 +10,7 @@ import (
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/events"
 	"github.com/PeterSR/claude-code-bloodhound/internal/notify"
+	"github.com/PeterSR/claude-code-bloodhound/internal/projectconfig"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
@@ -94,10 +95,10 @@ func TestTextForScopesBudgetsToTheirDirectory(t *testing.T) {
 	mine := ccsock.Session{CWD: "/home/dev/myapp"}
 	theirs := ccsock.Session{CWD: "/home/dev/other"}
 
-	if got := textFor(evs, mine, testNow, false); got == "" {
+	if got := textFor(evs, mine, testNow, projectconfig.Config{}); got == "" {
 		t.Error("the directory that owns the budget was told nothing")
 	}
-	if got := textFor(evs, theirs, testNow, false); got != "" {
+	if got := textFor(evs, theirs, testNow, projectconfig.Config{}); got != "" {
 		t.Errorf("an unrelated directory was told %q", got)
 	}
 }
@@ -107,7 +108,7 @@ func TestTextForSendsAccountWideEventsToEveryone(t *testing.T) {
 	// caused it, so these carry no cwd and reach anyone admitted.
 	evs := []events.Event{ev("limit_projection.projected", "session", "", map[string]any{"eta_ts": iso(testNow.Add(40 * time.Minute))})}
 	for _, cwd := range []string{"/home/dev/myapp", "/home/dev/other", ""} {
-		if got := textFor(evs, ccsock.Session{CWD: cwd}, testNow, false); got == "" {
+		if got := textFor(evs, ccsock.Session{CWD: cwd}, testNow, projectconfig.Config{}); got == "" {
 			t.Errorf("cwd %q was not told about an account-wide event", cwd)
 		}
 	}
@@ -117,7 +118,7 @@ func TestTextForNormalizesDirectories(t *testing.T) {
 	// A trailing separator must not make a session look like a different
 	// directory than the budget it owns.
 	evs := []events.Event{ev("budget.exceeded", "week", "/home/dev/myapp", map[string]any{"reason": "spent"})}
-	if got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow, false); got == "" {
+	if got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow, projectconfig.Config{}); got == "" {
 		t.Error("a trailing separator hid a session from its own budget")
 	}
 }
@@ -455,7 +456,7 @@ func TestTextForAddsTheWakeupNoteOnce(t *testing.T) {
 	}
 	sess := ccsock.Session{CWD: "/home/dev/myapp"}
 
-	got := textFor(evs, sess, testNow, true)
+	got := textFor(evs, sess, testNow, projectconfig.Config{WakeupNudge: true})
 	if n := countOccurrences(got, wakeupNote("session")); n != 1 {
 		t.Errorf("the note appears %d times, want exactly 1:\n%s", n, got)
 	}
@@ -470,7 +471,7 @@ func TestTextForLeavesTheWakeupNoteOutUnlessAsked(t *testing.T) {
 	evs := []events.Event{
 		ev("saturation.saturated", "session", "", map[string]any{"reset_ts": iso(testNow.Add(90 * time.Minute))}),
 	}
-	got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, false)
+	got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, projectconfig.Config{})
 	if countOccurrences(got, wakeupNote("session")) != 0 {
 		t.Errorf("the note went out to a directory that did not ask for it:\n%s", got)
 	}
@@ -481,7 +482,7 @@ func TestTextForLeavesTheWakeupNoteOutUnlessAsked(t *testing.T) {
 // nothing for it to point at and nothing to arm a wakeup for.
 func TestTextForSkipsTheWakeupNoteWithoutAReset(t *testing.T) {
 	evs := []events.Event{ev("saturation.saturated", "session", "", nil)}
-	got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, true)
+	got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, projectconfig.Config{WakeupNudge: true})
 	if countOccurrences(got, wakeupNote("session")) != 0 {
 		t.Errorf("the note went out with no reset to point at:\n%s", got)
 	}
@@ -507,4 +508,56 @@ func splitLines(s string) []string {
 		}
 	}
 	return append(out, s[start:])
+}
+
+// TestRecommendationGoesOnlyToTheSessionItIsAbout is the routing the other
+// events do not need. A budget belongs to a directory and a limit belongs to
+// the whole account, but "your context has bloated" belongs to one
+// conversation and means nothing in the window next to it.
+func TestRecommendationGoesOnlyToTheSessionItIsAbout(t *testing.T) {
+	e := ev("recommendation.compact", "", "", map[string]any{"reason": "recent turns are heavy"})
+	e.Scope.Session = "session-abc12345"
+	evs := []events.Event{e}
+	on := projectconfig.Config{WriteupNudge: true}
+
+	mine := ccsock.Session{SessionID: "session-abc12345", CWD: "/home/dev/myapp"}
+	theirs := ccsock.Session{SessionID: "session-def67890", CWD: "/home/dev/myapp"}
+
+	if got := textFor(evs, mine, testNow, on); got == "" {
+		t.Error("the session it is about was told nothing")
+	}
+	if got := textFor(evs, theirs, testNow, on); got != "" {
+		t.Errorf("another session in the same directory was told %q", got)
+	}
+}
+
+// TestRecommendationNeedsTheDirectoryToAskForIt separates the two kinds of
+// thing bloodhound says. A limit stopping every session on the machine is not
+// something a directory gets to switch off; advice about how to work is.
+func TestRecommendationNeedsTheDirectoryToAskForIt(t *testing.T) {
+	e := ev("recommendation.compact", "", "", map[string]any{"reason": "recent turns are heavy"})
+	e.Scope.Session = "session-abc12345"
+	sess := ccsock.Session{SessionID: "session-abc12345", CWD: "/home/dev/myapp"}
+
+	if got := textFor([]events.Event{e}, sess, testNow, projectconfig.Config{}); got != "" {
+		t.Errorf("the nudge went out unasked: %q", got)
+	}
+	if got := textFor([]events.Event{e}, sess, testNow, projectconfig.Config{WriteupNudge: true}); got == "" {
+		t.Error("the nudge was asked for and did not arrive")
+	}
+}
+
+// TestFilterWorthSayingIgnoresTheCalmRecommendations keeps the dashboard
+// states out of conversations. "ok" and "watch" are things to look at on a
+// page, not things to interrupt someone with.
+func TestFilterWorthSayingIgnoresTheCalmRecommendations(t *testing.T) {
+	evs := []events.Event{
+		ev("recommendation.ok", "", "", nil),
+		ev("recommendation.watch", "", "", nil),
+		ev("recommendation.compact", "", "", nil),
+	}
+	got := filterWorthSaying(evs)
+	if len(got) != 1 || got[0].Kind != "recommendation.compact" {
+		t.Errorf("kept %v, want only recommendation.compact", got)
+	}
 }

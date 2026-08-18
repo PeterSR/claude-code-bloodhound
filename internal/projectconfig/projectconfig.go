@@ -17,7 +17,7 @@
 //
 // That disjointness is also what makes reading a file out of a working
 // directory safe. A checked-in .bloodhound/config.json can make bloodhound
-// quieter or chattier in that project and can do nothing else — it cannot
+// quieter or chattier in that project and can do nothing else. It cannot
 // point the daemon at another database or another binary, because those words
 // mean nothing in this schema.
 //

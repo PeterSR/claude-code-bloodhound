@@ -51,7 +51,7 @@ type doctorReport struct {
 
 	// ProjectConfig is what the working directory doctor was run from says
 	// about bloodhound's behaviour toward its sessions. A separate schema
-	// from Config rather than an overlay on it — see internal/projectconfig.
+	// from Config rather than an overlay on it. See internal/projectconfig.
 	ProjectConfig *projectConfigReport `json:"project_config,omitempty"`
 
 	ClaudeBinaryPath  string `json:"claude_binary_path,omitempty"`
