@@ -89,6 +89,7 @@ func init() {
 					r.State = "clear"
 					r.Detail = map[string]any{"pct": win.Pct}
 				}
+				withReset(&r, win)
 				out = append(out, r)
 			}
 			return out, nil
@@ -112,6 +113,7 @@ func init() {
 				} else {
 					r.State = fmt.Sprintf("%d", (win.Pct/10)*10)
 					r.Detail = map[string]any{"pct": win.Pct}
+					withReset(&r, win)
 				}
 				out = append(out, r)
 			}
@@ -140,6 +142,7 @@ func init() {
 				default:
 					r.State = "clear"
 				}
+				withReset(&r, win)
 				out = append(out, r)
 			}
 			return out, nil
@@ -181,4 +184,26 @@ func init() {
 			return []events.Reading{r}, nil
 		},
 	})
+}
+
+// withReset records when the window a reading is about turns over.
+//
+// Every meter reading is about pressure inside a window that ends, and the
+// end is half the answer: "the 5h meter will hit the cap" is a different
+// message depending on whether the window reopens in twenty minutes or on
+// Friday. Announcements read from the event rather than from live state, so
+// the moment has to be captured at the time the reading was taken; recomputing
+// it at delivery would be answering about a window that may already have
+// turned over.
+//
+// Absolute rather than a countdown, for the same reason. An event sits in the
+// log and is read later, and a stored duration silently ages.
+func withReset(r *events.Reading, win *routes.NowWindow) {
+	if win == nil || win.ResetTSISO == "" || r.State == "" {
+		return
+	}
+	if r.Detail == nil {
+		r.Detail = map[string]any{}
+	}
+	r.Detail["reset_ts"] = win.ResetTSISO
 }

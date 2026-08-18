@@ -97,10 +97,14 @@ func readBudgetPressure(ctx context.Context, w events.World) ([]events.Reading, 
 	var out []events.Reading
 	for _, b := range live {
 		win := budget.Window{}
-		if w.Pool != nil {
-			if nw := buckets(w.Pool)[b.Bucket]; nw != nil {
-				win.Pct, win.PctKnown = nw.Pct, true
-			}
+		// meter is the bucket's live window, kept past the read because the
+		// reading wants its reset as well as its percentage. Its reset is the
+		// one /usage shows the user, which is not always the millisecond
+		// windowEnds derives from the stored limit windows below; the message
+		// should agree with the panel the reader can go and look at.
+		meter := buckets(w.Pool)[b.Bucket]
+		if meter != nil {
+			win.Pct, win.PctKnown = meter.Pct, true
 		}
 		if measured[b.Bucket] {
 			// A directory absent from the rollup caused no measured movement
@@ -131,6 +135,7 @@ func readBudgetPressure(ctx context.Context, w events.World) ([]events.Reading, 
 				r.Detail["meter_stop_pct"] = b.MeterPct
 			}
 		}
+		withReset(&r, meter)
 		out = append(out, r)
 	}
 	return out, nil

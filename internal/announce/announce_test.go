@@ -13,6 +13,13 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
+// testNow anchors the tests that render a moment. Fixed, and in a zone with
+// an offset, so a weekday name is the same one on every machine that runs
+// this: Wednesday 2026-08-05 08:00 at UTC+01:00.
+var testNow = time.Date(2026, 8, 5, 8, 0, 0, 0, time.FixedZone("test", 3600))
+
+func iso(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
 func ev(kind, bucket, cwd string, detail map[string]any) events.Event {
 	return events.Event{
 		Kind:   kind,
@@ -87,10 +94,10 @@ func TestTextForScopesBudgetsToTheirDirectory(t *testing.T) {
 	mine := ccsock.Session{CWD: "/home/dev/myapp"}
 	theirs := ccsock.Session{CWD: "/home/dev/other"}
 
-	if got := textFor(evs, mine); got == "" {
+	if got := textFor(evs, mine, testNow); got == "" {
 		t.Error("the directory that owns the budget was told nothing")
 	}
-	if got := textFor(evs, theirs); got != "" {
+	if got := textFor(evs, theirs, testNow); got != "" {
 		t.Errorf("an unrelated directory was told %q", got)
 	}
 }
@@ -98,9 +105,9 @@ func TestTextForScopesBudgetsToTheirDirectory(t *testing.T) {
 func TestTextForSendsAccountWideEventsToEveryone(t *testing.T) {
 	// The 5h cliff stops every session on the machine, not just the one that
 	// caused it, so these carry no cwd and reach anyone admitted.
-	evs := []events.Event{ev("limit_projection.projected", "session", "", map[string]any{"eta_ts": "18:20"})}
+	evs := []events.Event{ev("limit_projection.projected", "session", "", map[string]any{"eta_ts": iso(testNow.Add(40 * time.Minute))})}
 	for _, cwd := range []string{"/home/dev/myapp", "/home/dev/other", ""} {
-		if got := textFor(evs, ccsock.Session{CWD: cwd}); got == "" {
+		if got := textFor(evs, ccsock.Session{CWD: cwd}, testNow); got == "" {
 			t.Errorf("cwd %q was not told about an account-wide event", cwd)
 		}
 	}
@@ -110,7 +117,7 @@ func TestTextForNormalizesDirectories(t *testing.T) {
 	// A trailing separator must not make a session look like a different
 	// directory than the budget it owns.
 	evs := []events.Event{ev("budget.exceeded", "week", "/home/dev/myapp", map[string]any{"reason": "spent"})}
-	if got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp/"}); got == "" {
+	if got := textFor(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow); got == "" {
 		t.Error("a trailing separator hid a session from its own budget")
 	}
 }
@@ -121,11 +128,11 @@ func TestDescribeReadsAsObservationNotInstruction(t *testing.T) {
 	// switched off.
 	cases := []events.Event{
 		ev("budget.tight", "week", "/home/dev/myapp", map[string]any{"reason": "myapp has 4.0% left"}),
-		ev("limit_projection.projected", "session", "", map[string]any{"eta_ts": "18:20"}),
+		ev("limit_projection.projected", "session", "", map[string]any{"eta_ts": iso(testNow.Add(40 * time.Minute))}),
 		ev("saturation.saturated", "week", "", nil),
 	}
 	for _, e := range cases {
-		got := describe(e)
+		got := describe(e, testNow)
 		if got == "" {
 			t.Errorf("%s produced no text", e.Kind)
 			continue
@@ -172,7 +179,7 @@ func equalFold(a, b string) bool {
 func TestDescribeFallsBackWithoutADetailReason(t *testing.T) {
 	// The reason is written by the sensor, but an event replayed from an older
 	// schema may not carry one and must still say something true.
-	got := describe(ev("budget.exceeded", "week", "/home/dev/myapp", nil))
+	got := describe(ev("budget.exceeded", "week", "/home/dev/myapp", nil), testNow)
 	if got == "" {
 		t.Fatal("no fallback text")
 	}
@@ -359,4 +366,79 @@ type failingSender struct{}
 
 func (failingSender) Send(context.Context, notify.Target, string) (string, error) {
 	return "", errors.New("socket exploded")
+}
+
+// TestDescribeSaysWhenTheWindowResets is the point of carrying reset_ts on the
+// reading at all. "The 5h meter will hit the cap" is a different message
+// depending on whether the window reopens in twenty minutes or on Friday, and
+// without the second half the reader has to go and look it up.
+func TestDescribeSaysWhenTheWindowResets(t *testing.T) {
+	in90m := iso(testNow.Add(90 * time.Minute))
+	onFriday := iso(testNow.Add(58 * time.Hour)) // Fri 18:00 local
+
+	cases := []struct {
+		name string
+		ev   events.Event
+		want string
+	}{
+		{
+			"a budget under pressure",
+			ev("budget.tight", "session", "/home/dev/myapp", map[string]any{
+				"reason": "myapp has 4.0% of its 20% 5h allowance left", "reset_ts": in90m}),
+			"Budget: myapp has 4.0% of its 20% 5h allowance left. The 5h window resets in 1h30m.",
+		},
+		{
+			"a projection with an ETA of its own",
+			ev("limit_projection.projected", "session", "", map[string]any{
+				"eta_ts": iso(testNow.Add(40 * time.Minute)), "reset_ts": in90m}),
+			"The 5h meter is on pace to reach 100% in 40m, before it resets in 1h30m.",
+		},
+		{
+			"a weekly window far enough out to name the day",
+			ev("saturation.saturated", "week", "", map[string]any{"reset_ts": onFriday}),
+			"The week meter has stopped moving at its cap, so every figure downstream is now an estimate. It resets on fri 18:00.",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := describe(c.ev, testNow); got != c.want {
+				t.Errorf("describe =\n  %q\nwant\n  %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestDescribeDropsAResetThatHasAlreadyPassed covers the gap between writing
+// an event and delivering it. A window that turned over in between must not be
+// announced as resetting in the past, and the sentence has to still parse
+// without the clause.
+func TestDescribeDropsAResetThatHasAlreadyPassed(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   events.Event
+		want string
+	}{
+		{
+			"already turned over",
+			ev("saturation.saturated", "session", "", map[string]any{"reset_ts": iso(testNow.Add(-time.Minute))}),
+			"The 5h meter has stopped moving at its cap, so every figure downstream is now an estimate.",
+		},
+		{
+			"never recorded",
+			ev("saturation.saturated", "session", "", nil),
+			"The 5h meter has stopped moving at its cap, so every figure downstream is now an estimate.",
+		},
+		{
+			"not a timestamp at all",
+			ev("saturation.saturated", "session", "", map[string]any{"reset_ts": "18:20"}),
+			"The 5h meter has stopped moving at its cap, so every figure downstream is now an estimate.",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := describe(c.ev, testNow); got != c.want {
+				t.Errorf("describe =\n  %q\nwant\n  %q", got, c.want)
+			}
+		})
+	}
 }

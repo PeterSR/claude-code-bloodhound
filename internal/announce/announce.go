@@ -37,6 +37,7 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/notify"
 	"github.com/PeterSR/claude-code-bloodhound/internal/sessioninsight"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
+	"github.com/PeterSR/claude-code-bloodhound/internal/whenfmt"
 )
 
 // cursorKey remembers the last event announced, so a restart does not replay
@@ -280,7 +281,7 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 	}
 
 	for _, sess := range admitted {
-		text := textFor(evs, sess)
+		text := textFor(evs, sess, now)
 		if text == "" {
 			continue // nothing in this batch concerns this session
 		}
@@ -309,13 +310,13 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 // is tight is noise, and it is the mistake a global broadcast makes. The
 // limit events are account-wide and go to everyone admitted, because the 5h
 // cliff stops every session on the machine, not just the one that caused it.
-func textFor(evs []events.Event, sess ccsock.Session) string {
+func textFor(evs []events.Event, sess ccsock.Session, now time.Time) string {
 	var lines []string
 	for _, e := range evs {
 		if e.Scope.Cwd != "" && !sameDir(e.Scope.Cwd, sess.CWD) {
 			continue
 		}
-		if line := describe(e); line != "" {
+		if line := describe(e, now); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -339,28 +340,63 @@ func sameDir(a, b string) bool {
 // Phrased as an observation, never an instruction. Bloodhound measures; what
 // to do about the measurement is the reader's call, and a monitoring tool that
 // starts issuing orders into conversations is one users turn off.
-func describe(e events.Event) string {
+func describe(e events.Event, now time.Time) string {
 	kind, state, ok := splitKind(e.Kind)
 	if !ok {
 		return ""
 	}
+	b := budget.BucketLabel(e.Scope.Bucket)
+	reset := when(e.Detail["reset_ts"], now)
+
 	switch kind {
 	case "budget":
+		line := fmt.Sprintf("Budget for %s is %s.", budget.Label(e.Scope.Cwd), state)
 		if reason, _ := e.Detail["reason"].(string); reason != "" {
-			return "Budget: " + reason + "."
+			line = "Budget: " + reason + "."
 		}
-		return fmt.Sprintf("Budget for %s is %s.", budget.Label(e.Scope.Cwd), state)
+		if reset != "" {
+			line += fmt.Sprintf(" The %s window resets %s.", b, reset)
+		}
+		return line
 	case "limit_projection":
-		b := budget.BucketLabel(e.Scope.Bucket)
-		if eta, ok := e.Detail["eta_ts"].(string); ok && eta != "" {
-			return fmt.Sprintf("The %s meter is on pace to reach 100%% at %s, before it resets.", b, eta)
+		eta := when(e.Detail["eta_ts"], now)
+		switch {
+		case eta != "" && reset != "":
+			return fmt.Sprintf("The %s meter is on pace to reach 100%% %s, before it resets %s.", b, eta, reset)
+		case eta != "":
+			return fmt.Sprintf("The %s meter is on pace to reach 100%% %s, before it resets.", b, eta)
+		case reset != "":
+			return fmt.Sprintf("The %s meter is on pace to reach 100%% before it resets %s.", b, reset)
 		}
 		return fmt.Sprintf("The %s meter is on pace to reach 100%% before it resets.", b)
 	case "saturation":
-		return fmt.Sprintf("The %s meter has stopped moving at its cap, so every figure downstream is now an estimate.",
-			budget.BucketLabel(e.Scope.Bucket))
+		line := fmt.Sprintf("The %s meter has stopped moving at its cap, so every figure downstream is now an estimate.", b)
+		if reset != "" {
+			line += fmt.Sprintf(" It resets %s.", reset)
+		}
+		return line
 	}
 	return ""
+}
+
+// when renders a stored RFC 3339 moment as a sentence fragment on the
+// reader's clock: "in 42m", "on fri 15:30".
+//
+// Empty for anything it cannot stand behind, and every caller above is
+// written to read as a sentence without it. A moment that has already passed
+// is one of those cases: events are read after they are written, and a
+// window that turned over between the reading and the delivery would
+// otherwise be announced as resetting in the past.
+func when(v any, now time.Time) string {
+	iso, _ := v.(string)
+	if iso == "" {
+		return ""
+	}
+	at, err := time.Parse(time.RFC3339, iso)
+	if err != nil || !at.After(now) {
+		return ""
+	}
+	return whenfmt.Phrase(at, now)
 }
 
 // coldCache asks bloodhound's own transcripts which sessions would have to
