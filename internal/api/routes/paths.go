@@ -7,6 +7,8 @@ const (
 	PathHealth           = "/api/health"
 	PathDoctor           = "/api/doctor"
 	PathNow              = "/api/now"
+	PathEvents           = "/api/events"
+	PathEventsLevels     = "/api/events/levels"
 	PathDebug            = "/api/debug"
 	PathSessions         = "/api/sessions"
 	PathSessionsPrefix   = "/api/sessions/"

@@ -52,8 +52,20 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 		return prefix + "STALE " + fmtDur(age)
 	}
 
+	// A poll that produced no reading falls back to the last one that did,
+	// marked stale, rather than replacing the whole line with an error.
+	// Same reasoning as nowstate.Compute's fallback: the failure is usually
+	// one transient capture, and blanking a 5-hour gauge for the rest of
+	// the poll interval loses more than the stale number was worth. Only
+	// when nothing has ever parsed is there genuinely nothing to say.
+	staleMark := ""
 	if !obs.ParseOK {
-		return prefix + "extraction failed"
+		prev, prevErr := s.LatestParsedUsage(ctx)
+		if prevErr != nil || prev == nil {
+			return prefix + "extraction failed"
+		}
+		staleMark = "◷" + fmtDur(time.Duration(now.UnixMilli()-prev.TSUnixMS)*time.Millisecond) + " "
+		obs = prev
 	}
 
 	parts := []string{}
@@ -76,7 +88,7 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 	if len(parts) == 0 {
 		return prefix + "no data"
 	}
-	return prefix + strings.Join(parts, " · ")
+	return prefix + staleMark + strings.Join(parts, " · ")
 }
 
 // formatActiveSession returns a single compact alert about the

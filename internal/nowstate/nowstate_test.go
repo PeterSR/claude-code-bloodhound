@@ -204,3 +204,108 @@ func TestBuildWindow_FutureResetComputesWindowStartAndTTR(t *testing.T) {
 		t.Errorf("reset - windowStart = %v, want the 5h span", got)
 	}
 }
+
+// insertFailedObs writes one observation that did not extract: parse_ok=0
+// with both percentages NULL, which is exactly what RecordUsage persists
+// when the capture never showed the panel.
+func insertFailedObs(t *testing.T, s *store.Store, tsMS int64) {
+	t.Helper()
+	_, err := s.DB.Exec(`
+		INSERT INTO usage_observations (
+			ts, ts_unix_ms, session_pct, week_pct,
+			session_reset_detected, week_reset_detected, parse_ok
+		) VALUES (?, ?, NULL, NULL, 0, 0, 0)`,
+		time.UnixMilli(tsMS).UTC().Format(time.RFC3339), tsMS,
+	)
+	if err != nil {
+		t.Fatalf("insert failed obs at %d: %v", tsMS, err)
+	}
+}
+
+func TestCompute_FailedLatestPollFallsBackToLastParsedReading(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+	reset := now.Add(2 * time.Hour).UTC().Format(time.RFC3339)
+
+	insertObs(t, s, now.Add(-10*time.Minute).UnixMilli(), 61, reset, false)
+	insertObs(t, s, now.Add(-5*time.Minute).UnixMilli(), 64, reset, false)
+	insertFailedObs(t, s, now.UnixMilli())
+
+	out, err := Compute(context.Background(), s, now)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+
+	// The gauge survives the failed poll, carrying the last real reading.
+	if out.Session == nil {
+		t.Fatal("Session = nil, want the carried-over window (a failed poll must not blank the gauge)")
+	}
+	if out.Session.Pct != 64 {
+		t.Errorf("Session.Pct = %d, want 64 (the newest reading that parsed)", out.Session.Pct)
+	}
+	if !out.Session.Stale {
+		t.Error("Session.Stale = false, want true (this reading is carried over, not current)")
+	}
+	if out.Session.StaleTSISO == "" {
+		t.Error("Session.StaleTSISO empty, want when the carried-over reading was taken")
+	}
+
+	// ...while the failure itself stays visible rather than being papered over.
+	if out.OK {
+		t.Error("OK = true, want false (the latest poll did fail)")
+	}
+	if out.LastPoll == nil {
+		t.Fatal("LastPoll = nil, want the failed attempt")
+	}
+	if out.LastPoll.ParseOK {
+		t.Error("LastPoll.ParseOK = true, want false")
+	}
+	if out.LastPoll.TSISO != time.UnixMilli(now.UnixMilli()).UTC().Format(time.RFC3339) {
+		t.Errorf("LastPoll.TSISO = %q, want the failed poll's timestamp, not the fallback's",
+			out.LastPoll.TSISO)
+	}
+}
+
+func TestCompute_SuccessfulPollIsNotMarkedStale(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+	reset := now.Add(2 * time.Hour).UTC().Format(time.RFC3339)
+
+	insertObs(t, s, now.Add(-5*time.Minute).UnixMilli(), 40, reset, false)
+	insertObs(t, s, now.UnixMilli(), 42, reset, false)
+
+	out, err := Compute(context.Background(), s, now)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if out.Session == nil {
+		t.Fatal("Session = nil, want a window")
+	}
+	if out.Session.Stale {
+		t.Error("Session.Stale = true on a poll that parsed, want false")
+	}
+	if out.Session.StaleTSISO != "" {
+		t.Errorf("Session.StaleTSISO = %q, want empty on a fresh reading", out.Session.StaleTSISO)
+	}
+}
+
+func TestCompute_FailedPollWithNothingEverParsedStaysEmpty(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+
+	insertFailedObs(t, s, now.Add(-5*time.Minute).UnixMilli())
+	insertFailedObs(t, s, now.UnixMilli())
+
+	out, err := Compute(context.Background(), s, now)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	// Nothing to carry forward, so the honest answer is still no window.
+	if out.Session != nil || out.Week != nil {
+		t.Errorf("Session/Week = %+v / %+v, want both nil (nothing has ever parsed)",
+			out.Session, out.Week)
+	}
+	if out.LastPoll == nil {
+		t.Fatal("LastPoll = nil, want the failed attempt to still be reported")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/events"
 	"github.com/PeterSR/claude-code-bloodhound/internal/usage"
 )
 
@@ -142,6 +143,33 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 		   FROM usage_observations WHERE id = ?`, id,
 	).Scan(&sessReset, &weekReset); err != nil {
 		return Observation{}, err
+	}
+
+	// A window reset is an edge, not a level: there is no "reset state" that
+	// stays true for a while, so a differ would have nothing to diff. Append
+	// it here, inside the transaction that discovered it, so the fact and the
+	// event land together. Attaching it to RecordUsage rather than the daemon
+	// is also what keeps it scheduler-agnostic, since `bloodhound poll` on
+	// cron goes through exactly this path.
+	for _, e := range []struct {
+		detected bool
+		bucket   string
+		pct      sql.NullInt64
+	}{
+		{sessReset == 1, "session", sessionPct},
+		{weekReset == 1, "week", weekPct},
+	} {
+		if !e.detected {
+			continue
+		}
+		detail := map[string]any{"obs_id": id}
+		if e.pct.Valid {
+			detail["pct"] = e.pct.Int64
+		}
+		if _, err := events.AppendTx(ctx, tx, tsMS, "window.reset",
+			events.Scope{Bucket: e.bucket}, detail); err != nil {
+			return Observation{}, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

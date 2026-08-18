@@ -32,6 +32,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(routes.PathHealth, s.handleHealth)
 	mux.HandleFunc(routes.PathDoctor, s.handleDoctor)
 	mux.HandleFunc(routes.PathNow, s.handleNow)
+	// Levels first: ServeMux matches the longer pattern, but stating the
+	// order makes the intent obvious next to a prefix-shaped sibling.
+	mux.HandleFunc(routes.PathEventsLevels, s.handleEventsLevels)
+	mux.HandleFunc(routes.PathEvents, s.handleEvents)
 	mux.HandleFunc(routes.PathDebug, s.handleDebug)
 	mux.HandleFunc(routes.PathSessions, s.handleSessions)
 	mux.HandleFunc(routes.PathSessionsPrefix, s.handleSessionDetail)

@@ -69,10 +69,40 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 		ElapsedS: obs.ElapsedS,
 	}
 
+	// When the newest poll produced no reading, fall back to the newest one
+	// that did and mark the windows stale. LastPoll and OK above keep
+	// reporting the real latest attempt, so "the last poll failed" is still
+	// visible; what changes is that the failure no longer takes the
+	// percentages down with it.
+	//
+	// A failed poll is usually transient (a capture that timed out while
+	// the panel was still loading), and on a 5-minute interval the old
+	// behaviour left every consumer with nil windows until the next
+	// success. Consumers read nil as "no data ever", so a single dropped
+	// poll made bloodhound look uninstalled rather than briefly behind.
+	//
+	// Only the whole observation is swapped, never mixed per bucket: the
+	// two percentages and their resets are one reading of one panel, and
+	// pairing a live week with a carried-over session would be a state
+	// that never existed on screen.
+	stale := false
+	if !obs.ParseOK {
+		prev, err := s.LatestParsedUsage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if prev == nil {
+			return out, nil
+		}
+		obs = prev
+		stale = true
+	}
+
 	if obs.SessionPct != nil {
 		ws := buildWindow(*obs.SessionPct, obs.SessionResetTSISO, 5*time.Hour, obs.SessionResetDetected, now)
 		ws.Saturated = obs.SessionSaturated
 		fillBurn(ctx, s, ws, *obs.SessionPct, true, now)
+		markStale(ws, stale, obs.TSISO)
 		out.Session = ws
 	}
 
@@ -80,10 +110,22 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 		ws := buildWindow(*obs.WeekPct, obs.WeekResetTSISO, 7*24*time.Hour, obs.WeekResetDetected, now)
 		ws.Saturated = obs.WeekSaturated
 		fillBurn(ctx, s, ws, *obs.WeekPct, false, now)
+		markStale(ws, stale, obs.TSISO)
 		out.Week = ws
 	}
 
 	return out, nil
+}
+
+// markStale tags a window as carried forward from tsISO. A no-op on the
+// normal path, so the two bucket blocks above stay symmetric rather than
+// each growing its own conditional.
+func markStale(ws *routes.NowWindow, stale bool, tsISO string) {
+	if !stale {
+		return
+	}
+	ws.Stale = true
+	ws.StaleTSISO = tsISO
 }
 
 // buildWindow derives reset / window-start / time-to-reset from a parsed

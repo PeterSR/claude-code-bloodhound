@@ -20,6 +20,8 @@ import (
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/costweight"
 	"github.com/PeterSR/claude-code-bloodhound/internal/costweight/priceheal"
+	"github.com/PeterSR/claude-code-bloodhound/internal/events"
+	"github.com/PeterSR/claude-code-bloodhound/internal/events/sensors"
 	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 	"github.com/PeterSR/claude-code-bloodhound/internal/trail"
@@ -143,6 +145,7 @@ For one-shot CI-style execution that does each job once and exits, pass
 		runIngestOnce(ctx, s, w)
 		runAggregateOnce(ctx, s, w)
 		runPollOnce(ctx, cfg, s, w)
+		runReconcileOnce(ctx, s, w)
 		if cfg.PriceSelfHeal {
 			runPriceHealOnce(ctx, cfg, s, w)
 		}
@@ -182,7 +185,13 @@ For one-shot CI-style execution that does each job once and exits, pass
 
 		schedule("poll", pollIvl, func() { runPollOnce(ctx, cfg, s, w) })
 		schedule("ingest", ingestIvl, func() { runIngestOnce(ctx, s, w) })
+		// Reconcile gets its own short cadence rather than riding the poll.
+		// Pending one-shots have to fire, and expiries have to be swept, even
+		// while polls are failing, which is precisely when a consumer waiting
+		// on collection health most needs to hear something.
+		schedule("events", reconcileIvl, func() { runReconcileOnce(ctx, s, w) })
 		schedule("aggregate", aggIvl, func() { runAggregateOnce(ctx, s, w) })
+		schedule("event-retention", aggIvl, func() { runEventRetentionOnce(ctx, s, w) })
 		// Price discovery rides the aggregate cadence. Gated per-tick on the
 		// live config so toggling it in the UI takes effect without a daemon
 		// restart, same as Trail.
@@ -251,7 +260,19 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	// validated and persisted. Gated by config so users who want manual
 	// control (or who don't want self-heal consuming usage on their
 	// account) can flip it off and use the Debug page's manual retrain.
-	if cfg.ExtractorSelfHeal && fetchErr == nil && !res.OK {
+	//
+	// Gated on the panel actually having rendered. A capture that timed
+	// out while /usage was still loading has no percentages on screen for
+	// any extractor to find, so a heal against it burns ~30s of the user's
+	// own quota to "fix" regexes that were never wrong, then saves the
+	// result, replacing a working extractor with one trained on a screen
+	// that never showed the panel. Those polls just retry next cycle.
+	switch {
+	case !cfg.ExtractorSelfHeal || fetchErr != nil || res.OK:
+		// Nothing to heal, or self-heal is off.
+	case !usage.PanelCaptured(res.RawFull):
+		fmt.Fprintf(w, "[daemon] poll: no /usage panel in capture after %.1fs (still loading?), skipping self-heal\n", res.ElapsedS)
+	default:
 		fmt.Fprintf(w, "[daemon] poll: extraction missed, starting orchestrator self-heal\n")
 		tracePath, traceFile := openSelfHealTrace(w)
 		heal := selfheal.Run(pollCtx, selfheal.Options{
@@ -285,6 +306,11 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 		fmt.Fprintf(w, "[daemon] poll: record error %v\n", err)
 	case fetchErr != nil && !errors.Is(fetchErr, context.Canceled):
 		fmt.Fprintf(w, "[daemon] poll: scrape failed (%v)\n", fetchErr)
+	case !res.OK && !usage.PanelCaptured(res.RawFull):
+		// Distinct from the line below on purpose: "extraction failed"
+		// reads as the extractor being wrong, and here it never got a
+		// panel to read in the first place.
+		fmt.Fprintf(w, "[daemon] poll: no usage panel captured in %.1fs, nothing to extract\n", res.ElapsedS)
 	case !res.OK:
 		fmt.Fprintf(w, "[daemon] poll: extraction failed (missing %v)\n", res.Extracted.Missing)
 	default:
@@ -298,6 +324,81 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 		}
 		fmt.Fprintf(w, "[daemon] poll: ok session=%s week=%s (#%d, %.1fs)\n",
 			sess, week, obs.ID, res.ElapsedS)
+	}
+}
+
+// reconcileIvl is the events cadence. Fixed rather than configurable for now:
+// it is pure reads plus a small transaction, so it is cheap in a way the poll
+// is not, and a one-shot that has to wait five minutes to fire is a worse
+// default than a tick nobody notices.
+const reconcileIvl = 60 * time.Second
+
+// eventRetention is how long the log and finished one-shots are kept. Long
+// enough that a consumer down for an ordinary interval (an overnight suspend,
+// a weekend) still finds what it missed, and the floor below still protects
+// anything a pending one-shot has not been matched against.
+const eventRetention = 14 * 24 * time.Hour
+
+func runReconcileOnce(ctx context.Context, s *store.Store, w io.Writer) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	// A budget of its own, like every other job. Without one this inherits the
+	// daemon's root context, and a hook claimed just before SIGTERM would be
+	// killed after being marked fired.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	st, err := sensors.Run(ctx, s, time.Now())
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] events: %v\n", err)
+		return
+	}
+	// Stay quiet on the ordinary no-op tick, which is most of them.
+	if st.Emitted > 0 || st.HooksFired > 0 || st.HooksExpired > 0 {
+		fmt.Fprintf(w, "[daemon] events: emitted=%d hooks_fired=%d hooks_expired=%d\n",
+			st.Emitted, st.HooksFired, st.HooksExpired)
+	}
+	for _, e := range st.Errors {
+		fmt.Fprintf(w, "[daemon] events: warn %s\n", e)
+	}
+}
+
+// runEventRetentionOnce trims the log. Rides the aggregate cadence rather than
+// the events tick, since there is nothing to gain from running it every minute.
+func runEventRetentionOnce(ctx context.Context, s *store.Store, w io.Writer) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	now := time.Now()
+	cutoff := now.Add(-eventRetention).UnixMilli()
+
+	// Never delete below what a pending one-shot still has to be matched
+	// against. Age alone would silently swallow the event a hook is waiting
+	// for, which is the one outcome that makes this worse than not pruning.
+	floor, err := events.OldestPendingCursor(ctx, s.DB, now)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] events: retention floor: %v\n", err)
+		return
+	}
+
+	n, err := events.Prune(ctx, s.DB, cutoff, floor)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] events: prune: %v\n", err)
+		return
+	}
+	hn, err := events.PruneHooks(ctx, s.DB, cutoff)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] events: prune hooks: %v\n", err)
+		return
+	}
+	ln, err := events.PruneLevels(ctx, s.DB, cutoff)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] events: prune levels: %v\n", err)
+		return
+	}
+	if n > 0 || hn > 0 || ln > 0 {
+		fmt.Fprintf(w, "[daemon] events: pruned %d events, %d finished one-shots, %d dormant session levels\n", n, hn, ln)
 	}
 }
 

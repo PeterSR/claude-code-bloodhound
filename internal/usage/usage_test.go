@@ -223,3 +223,48 @@ func TestParseReset_Garbage(t *testing.T) {
 		t.Error("ParseReset garbage: want ok=false")
 	}
 }
+
+// TestPanelCaptured_SeparatesCaptureFailureFromExtractorDrift pins the
+// distinction the daemon gates self-heal on. The "Refreshing…" body is the
+// real shape of a capture that timed out while /usage was still loading:
+// it is what the panel looks like before its data arrives, and it is the
+// case that must NOT trigger a retrain, because no extractor can pull
+// percentages off a screen that has none.
+func TestPanelCaptured_SeparatesCaptureFailureFromExtractorDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		screen string
+		want   bool
+	}{
+		{
+			name: "panel still loading",
+			screen: "  Refreshing…\n\n  Esc to cancel\n" +
+				"────────────────────────\n❯ \n",
+			want: false,
+		},
+		{
+			name:   "empty capture",
+			screen: "",
+			want:   false,
+		},
+		{
+			name: "panel rendered",
+			screen: "  Current session\n  ████      90% used\n" +
+				"  Resets 12:40pm (Europe/Copenhagen)\n",
+			want: true,
+		},
+		{
+			name: "panel rendered but at zero",
+			screen: "  Current session\n  ▏      0% used\n" +
+				"  Resets 12:40pm (Europe/Copenhagen)\n",
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PanelCaptured(tc.screen); got != tc.want {
+				t.Errorf("PanelCaptured() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
