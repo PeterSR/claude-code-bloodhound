@@ -46,6 +46,13 @@ import (
 // one already returns Default() with no error) must not fail pool state
 // along with it, so on error both are just left at zero rather than
 // aborting the computation.
+// The two limit windows Claude Code meters. Named because buildWindow and
+// fillBurn both need the span and must not be able to disagree about it.
+const (
+	sessionSpan = 5 * time.Hour
+	weekSpan    = 7 * 24 * time.Hour
+)
+
 func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowResponse, error) {
 	out := &routes.NowResponse{NowMS: now.UnixMilli()}
 
@@ -99,17 +106,17 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 	}
 
 	if obs.SessionPct != nil {
-		ws := buildWindow(*obs.SessionPct, obs.SessionResetTSISO, 5*time.Hour, obs.SessionResetDetected, now)
+		ws := buildWindow(*obs.SessionPct, obs.SessionResetTSISO, sessionSpan, obs.SessionResetDetected, now)
 		ws.Saturated = obs.SessionSaturated
-		fillBurn(ctx, s, ws, *obs.SessionPct, true, now)
+		fillBurn(ctx, s, ws, *obs.SessionPct, true, sessionSpan, now)
 		markStale(ws, stale, obs.TSISO)
 		out.Session = ws
 	}
 
 	if obs.WeekPct != nil {
-		ws := buildWindow(*obs.WeekPct, obs.WeekResetTSISO, 7*24*time.Hour, obs.WeekResetDetected, now)
+		ws := buildWindow(*obs.WeekPct, obs.WeekResetTSISO, weekSpan, obs.WeekResetDetected, now)
 		ws.Saturated = obs.WeekSaturated
-		fillBurn(ctx, s, ws, *obs.WeekPct, false, now)
+		fillBurn(ctx, s, ws, *obs.WeekPct, false, weekSpan, now)
 		markStale(ws, stale, obs.TSISO)
 		out.Week = ws
 	}
