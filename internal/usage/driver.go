@@ -153,16 +153,30 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 	sentExit := false
 	var typedAt, sentExitAt time.Time
 
+	// panelBytes is the capture as it stood just before we sent Ctrl-C on a
+	// rendered panel. That, not the full stream, is what we hand back:
+	// since Claude Code 2.1.280 dismissing the settings dialog redraws the
+	// screen, and on a panel taller than the terminal the redraw erases the
+	// gauge rows while leaving the rest of the panel behind. The full
+	// stream then renders without a single "% used", every poll.
+	var panelBytes []byte
+	result := func() []byte {
+		b := cleanup()
+		if panelBytes != nil {
+			return panelBytes
+		}
+		return b
+	}
+
 	for {
 		if time.Now().After(deadline) {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			b := cleanup()
-			return b, ctx.Err()
+			return result(), ctx.Err()
 		case <-readDone:
-			return cleanup(), nil
+			return result(), nil
 		case <-time.After(200 * time.Millisecond):
 		}
 
@@ -235,6 +249,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 			panelRendered := PanelCaptured(screen)
 			if time.Since(typedAt) > minRenderAfterType && panelRendered {
 				time.Sleep(700 * time.Millisecond)
+				panelBytes, _ = snapshot()
 				_, _ = ptyFile.Write([]byte{0x03, 0x03})
 				sentExit = true
 				sentExitAt = time.Now()
@@ -254,5 +269,5 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 		}
 	}
 
-	return cleanup(), nil
+	return result(), nil
 }
