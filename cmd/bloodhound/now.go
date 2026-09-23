@@ -94,9 +94,30 @@ func writeNowHuman(w io.Writer, out *routes.NowResponse) error {
 	return nil
 }
 
+// capStateLabel puts the cap state in the table's own register: short,
+// lowercase, and readable in a parenthetical next to a percentage.
+func capStateLabel(state string) string {
+	switch state {
+	case routes.CapLowPriority:
+		return "low priority"
+	case routes.CapExtraUsage:
+		return "extra usage"
+	case routes.CapRefused:
+		return "refused"
+	}
+	return state
+}
+
 func writeNowBucketRow(tw *tabwriter.Writer, label string, ws *routes.NowWindow) {
+	// "saturated" says the number stopped moving; the cap state says what
+	// that turned out to mean, and it is the more useful of the two whenever
+	// bloodhound knows it. Only one of them goes in the column: printing
+	// both would repeat the same fact in two vocabularies.
 	used := fmtPct(float64(ws.Pct))
-	if ws.Saturated {
+	switch {
+	case ws.CapState != "":
+		used += " (" + capStateLabel(ws.CapState) + ")"
+	case ws.Saturated:
 		used += " (saturated)"
 	}
 	left := fmtPct(float64(100 - ws.Pct))

@@ -86,7 +86,12 @@ func RenderPreview(cfg projectconfig.Config, cwd string, now time.Time) Preview 
 		},
 	}
 
-	msg := compose(evs, sess, now, cfg)
+	// The zero verdict on purpose. A preview exists to show what a project's
+	// own wording does to the built-in lines, and it has to render the same
+	// on Tuesday as it did on Monday; the quota clause is a fact about right
+	// now and would make the sample depend on whether the machine happened
+	// to be rate limited while someone was editing their config.
+	msg := compose(evs, sess, now, cfg, store.QuotaVerdict{})
 	out := Preview{Pressure: msg.Text, Armed: msg.Arm != nil}
 
 	if cfg.Wakeup.Arms() {

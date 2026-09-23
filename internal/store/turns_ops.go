@@ -54,13 +54,29 @@ type UserPromptRow struct {
 	TextPreview string
 }
 
+// QuotaSignalRow mirrors the `quota_signals` table.
+type QuotaSignalRow struct {
+	SessionUUID           string
+	TSUnixMS              int64
+	Kind                  string
+	Bucket                string
+	ResetTSUnixMS         int64
+	OverageStatus         string
+	OverageDisabledReason string
+	UsingOverage          bool
+	LowPriorityOffer      string
+	Project               string
+	Cwd                   string
+}
+
 // SessionPersist bundles the data ingested for a single session_uuid.
 type SessionPersist struct {
-	SessionUUID string
-	Project     string
-	Turns       []TurnRow
-	Compactions []CompactionRow
-	UserPrompts []UserPromptRow
+	SessionUUID  string
+	Project      string
+	Turns        []TurnRow
+	Compactions  []CompactionRow
+	UserPrompts  []UserPromptRow
+	QuotaSignals []QuotaSignalRow
 }
 
 // IngestedFileRecord tracks per-file mtime so we can skip unchanged files
@@ -97,6 +113,11 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM user_prompts WHERE session_uuid = ?`, sp.SessionUUID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM quota_signals WHERE session_uuid = ?`, sp.SessionUUID,
 	); err != nil {
 		return err
 	}
@@ -178,6 +199,33 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 		defer ps.Close()
 		for _, p := range sp.UserPrompts {
 			if _, err := ps.ExecContext(ctx, p.SessionUUID, p.TSUnixMS, p.TextPreview); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(sp.QuotaSignals) > 0 {
+		qs, err := tx.PrepareContext(ctx, `
+			INSERT OR REPLACE INTO quota_signals (
+				session_uuid, ts_unix_ms, kind, bucket, reset_ts_unix_ms,
+				overage_status, overage_disabled_reason, using_overage,
+				low_priority_offer, project, cwd
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		`)
+		if err != nil {
+			return err
+		}
+		defer qs.Close()
+		for _, q := range sp.QuotaSignals {
+			over := 0
+			if q.UsingOverage {
+				over = 1
+			}
+			if _, err := qs.ExecContext(ctx,
+				q.SessionUUID, q.TSUnixMS, q.Kind, q.Bucket, q.ResetTSUnixMS,
+				q.OverageStatus, q.OverageDisabledReason, over,
+				q.LowPriorityOffer, q.Project, q.Cwd,
+			); err != nil {
 				return err
 			}
 		}

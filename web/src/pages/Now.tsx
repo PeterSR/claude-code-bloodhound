@@ -8,8 +8,8 @@ import {
   Clock,
   MessageSquare,
   Sparkles,
-  Zap,
 } from 'lucide-react';
+import CapBadge, { type CapState, type QuotaState } from '../components/CapBadge';
 import Spark from '../components/Spark';
 import ReloadButton from '../components/ReloadButton';
 import { useApi } from '../hooks/useApi';
@@ -27,6 +27,12 @@ type WindowState = {
   limit_eta_ts?: string;
   reset_detected_in_last_obs: boolean;
   saturated: boolean;
+  // What being at the cap means right now, from the refusals the
+  // transcripts recorded: extra usage billing, requests refused, or
+  // requests still going through at a lower priority. Absent when nothing
+  // has been refused in this window, in which case `saturated` is a
+  // percentage that has stopped moving and nothing more.
+  cap_state?: CapState;
   // Set when the latest poll produced no reading and this one was carried
   // forward from stale_ts. The number is real but older than last_poll
   // implies, so it has to be labelled or the gauge reads as current.
@@ -89,6 +95,7 @@ type NowResponse = {
   session_history?: HistoryPoint[];
   week_history?: HistoryPoint[];
   recent_sessions?: SessionInsight[];
+  quota?: QuotaState | null;
 };
 
 export default function Now() {
@@ -127,6 +134,7 @@ export default function Now() {
               fitWindowS={30 * 60}
               pollAgeS={data.last_poll?.age_s}
               pollIntervalS={data.poll_interval_s}
+              quota={data.quota}
             />
             <WindowCard
               label="Week"
@@ -137,6 +145,7 @@ export default function Now() {
               fitWindowS={2 * 3600}
               pollAgeS={data.last_poll?.age_s}
               pollIntervalS={data.poll_interval_s}
+              quota={data.quota}
             />
           </div>
 
@@ -364,6 +373,7 @@ function WindowCard({
   fitWindowS,
   pollAgeS,
   pollIntervalS,
+  quota,
 }: {
   label: string;
   window: WindowState | null;
@@ -375,6 +385,8 @@ function WindowCard({
   pollAgeS?: number;
   /** Configured poll interval in seconds. */
   pollIntervalS?: number;
+  /** Account-level quota verdict, for the cap badge's tooltip. */
+  quota?: QuotaState | null;
 }) {
   const chart = useMemo(() => {
     if (!w || !w.window_start_ts || !w.reset_ts) return null;
@@ -584,15 +596,7 @@ function WindowCard({
       <div className="flex items-baseline justify-between gap-3 mb-4">
         <div className="flex items-center gap-2">
           <span className="text-xs uppercase tracking-wider text-zinc-500">{label}</span>
-          {w.saturated && (
-            <span
-              className="inline-flex items-center gap-1 rounded-full bg-red-500/15 text-red-700 dark:text-red-300 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider"
-              title="At cap — additional spend is on Anthropic's pay-per-use Extra usage tier. Pct stops moving here."
-            >
-              <Zap className="size-3" />
-              On extra usage
-            </span>
-          )}
+          <CapBadge saturated={w.saturated} capState={w.cap_state} quota={quota} />
           {w.stale && (
             <span
               className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider"

@@ -1,4 +1,5 @@
-import { AlertTriangle, Zap } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
+import CapBadge, { type CapState, type QuotaState } from './CapBadge';
 import { fmtAbs, fmtDuration, pctBgColor, pctColor } from '../lib/format';
 
 type Props = {
@@ -13,6 +14,8 @@ type Props = {
   limitETAMS?: number;
   limitETATS?: string;
   saturated?: boolean;
+  capState?: CapState;
+  quota?: QuotaState | null;
 };
 
 /**
@@ -37,6 +40,8 @@ export default function UsageGauge({
   limitETAMS,
   limitETATS,
   saturated,
+  capState,
+  quota,
 }: Props) {
   const clampedPct = Math.max(0, Math.min(100, pct));
   return (
@@ -44,15 +49,7 @@ export default function UsageGauge({
       <div className="flex items-baseline justify-between mb-3">
         <div className="flex items-center gap-2">
           <span className="text-xs uppercase tracking-wider text-zinc-500">{label}</span>
-          {saturated && (
-            <span
-              className="inline-flex items-center gap-1 rounded-full bg-red-500/15 text-red-700 dark:text-red-300 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider"
-              title="At cap — additional spend is on Anthropic's pay-per-use Extra usage tier. Pct stops moving here."
-            >
-              <Zap className="size-3" />
-              On extra usage
-            </span>
-          )}
+          <CapBadge saturated={saturated} capState={capState} quota={quota} />
         </div>
         <span className={`text-3xl font-semibold tabular-nums ${pctColor(clampedPct)}`}>
           {clampedPct}%

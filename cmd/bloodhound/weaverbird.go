@@ -45,9 +45,22 @@ import (
 // (U+25A0..25FF) when picking a replacement.
 const (
 	glyphLimit     = "⚠" // U+26A0: burn rate projects this window hits 100% before its reset
-	glyphSaturated = "⊘" // U+2298: pinned at the cap, pct has stopped moving and extra usage is billing
+	glyphSaturated = "⊘" // U+2298: pinned at the cap, pct has stopped moving
 	glyphReset     = "↻" // U+21BB: time until this window's natural reset
 	glyphStale     = "◷" // U+25F7: how long ago this carried-over reading was actually taken
+	glyphLowPri    = "↓" // U+2193: at the cap but still working, at the lower request priority
+
+	// glyphLowPri replaces glyphSaturated rather than joining it, and the
+	// substitution is the whole point of the mark. ⊘ reads as a stop,
+	// which is exactly right when requests are being refused and exactly
+	// wrong when they are still going through slowly; a user who reads a
+	// stop where there is none stops working for no reason, which is the
+	// more expensive of the two mistakes.
+	//
+	// U+2193 obeys the block rule this file's header sets out: base Arrows,
+	// single cell everywhere, no overhang, and it needs no limitPad. It also
+	// carries the right meaning without a legend, which the alternatives in
+	// Geometric Shapes did not.
 
 	// glyphStale is the one circular shape next to glyphReset's circular
 	// arrow, which is a real cost: at terminal sizes ◷ and ↻ are more alike
@@ -325,6 +338,7 @@ func wants(requested []string, id string) bool {
 //	5h 72% (↻3h12m)         nothing unusual, resets in 3h12m
 //	5h 72% (⚠ 33m ↻3h12m)   projects 100% in 33m, well before that reset
 //	5h 99% (⊘ ↻3h12m)       already pinned at the cap, resets in 3h12m
+//	5h 100% (↓ ↻1h04m)      at the cap and still working, at low priority
 //	wk 39% (↻fri 15:30)     a day or more out, so named rather than counted
 //
 // Only the reset mark can go absolute (see whenfmt.Deadline). The limit mark
@@ -346,6 +360,12 @@ func bucketValue(id, label string, w *routes.NowWindow, now time.Time) wb.Value 
 
 	var marks []string
 	switch {
+	case w.CapState == routes.CapLowPriority:
+		// Outranks plain saturation, and is checked before it, because
+		// the two disagree: the meter says pinned, the transcripts say
+		// requests are still going through. The transcripts are the ones
+		// that saw an actual request.
+		marks = append(marks, glyphLowPri)
 	case w.Saturated:
 		// Saturated outranks the limit projection rather than joining
 		// it: "will hit the cap" is not worth saying next to "is at the
@@ -367,8 +387,16 @@ func bucketValue(id, label string, w *routes.NowWindow, now time.Time) wb.Value 
 		text += " (" + strings.Join(marks, " ") + ")"
 	}
 
+	// Low priority is the one case where the class is talked DOWN rather
+	// than up, and it has to override the percentage outright: 100% resolves
+	// to danger on its own, and danger is what a user reads as "stop". They
+	// are not stopped. Warn is the honest reading — work continues, more
+	// slowly, and it is coming out of the weekly allowance now.
 	var explicit string
-	if (w.Saturated || w.LimitOK) && w.Pct < 90 {
+	switch {
+	case w.CapState == routes.CapLowPriority:
+		explicit = wb.ClassWarn
+	case (w.Saturated || w.LimitOK) && w.Pct < 90:
 		explicit = wb.ClassDanger
 	}
 
@@ -418,10 +446,15 @@ func staleAge(tsISO string, now time.Time) string {
 // class off the record and never derives one (weaverbird SPEC.md section
 // 4.1). Danger at or above 90,
 // warn at or above 70, else ok. explicit, when non-empty, is an
-// already-decided override (bucketValue's saturated/limit-projection
-// case) and always wins outright — matching ResolveClass's "explicit class
-// on the record wins" rule, so intent stated directly by the provider
-// still beats the threshold calculation.
+// already-decided override and always wins outright — matching
+// ResolveClass's "explicit class on the record wins" rule, so intent
+// stated directly by the provider still beats the threshold calculation.
+//
+// bucketValue sets it in both directions. Upward for saturation and for a
+// limit projection under a percentage that has not caught up yet; downward
+// for a window at the cap that is nonetheless still serving requests at low
+// priority, where the percentage's own answer of danger would tell a
+// working user to stop.
 func classForPercentage(explicit string, pct int) string {
 	if explicit != "" {
 		return explicit

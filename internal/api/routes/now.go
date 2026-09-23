@@ -40,7 +40,70 @@ type NowResponse struct {
 	// than the cluster are dropped so a stale list doesn't pad out the
 	// panel.
 	RecentSessions []sessioninsight.Insight `json:"recent_sessions,omitempty"`
+
+	// Quota is what the transcripts say about the quota verdict, as
+	// opposed to what the percentage implies. Nil when nothing has been
+	// refused inside a window that is still closed, which is the ordinary
+	// case; a consumer must read nil as "no claim either way" rather than
+	// as "not at the cap", since Session.Pct is the field that answers
+	// that.
+	Quota *NowQuota `json:"quota,omitempty"`
 }
+
+// NowQuota is the account's current quota situation as read off the
+// transcripts, which is the half a percentage cannot express.
+//
+// The meter stops moving at 100% in three situations that look identical on
+// screen and are nothing alike to work under: spend flowing to the
+// pay-per-use tier, requests refused outright, and requests still going
+// through at the lower priority Claude Code offers when the five hour
+// window closes. UsingOverage, Refused and LowPriorityActive are the three
+// answers, and a consumer that renders "at the cap" without consulting them
+// is guessing between them.
+type NowQuota struct {
+	// Refused is whether a request is on record as turned away for quota
+	// reasons inside a window that has not reopened.
+	Refused      bool   `json:"refused"`
+	RefusedTSISO string `json:"refused_ts,omitempty"`
+
+	// Bucket is which window the refusal was about ("session" | "week").
+	Bucket string `json:"bucket,omitempty"`
+
+	// ResetTSISO is when that window reopens, taken from the server's own
+	// timestamp on the refusal rather than parsed off the /usage panel.
+	ResetTSISO string `json:"reset_ts,omitempty"`
+
+	// The pay-per-use tier's verdict at the moment of the refusal.
+	// UsingOverage is the one that settles whether "on extra usage" is a
+	// true sentence to put on a gauge.
+	OverageStatus         string `json:"overage_status,omitempty"`
+	OverageDisabledReason string `json:"overage_disabled_reason,omitempty"`
+	UsingOverage          bool   `json:"using_overage"`
+
+	// LowPriorityOffered is whether the fallback was on the table;
+	// LowPriorityActive whether at least one session took it and the
+	// window it stands in for is still closed.
+	LowPriorityOffered    bool     `json:"low_priority_offered"`
+	LowPriorityActive     bool     `json:"low_priority_active"`
+	LowPrioritySinceTSISO string   `json:"low_priority_since_ts,omitempty"`
+	LowPriorityUntilTSISO string   `json:"low_priority_until_ts,omitempty"`
+	LowPrioritySessions   []string `json:"low_priority_sessions,omitempty"`
+}
+
+// Cap states, the values NowWindow.CapState takes. Named because the UI,
+// the weaverbird provider and the announcer all branch on them and a typo
+// in any one of them would silently pick the wrong wording.
+const (
+	// CapExtraUsage: past the included quota and billing to the
+	// pay-per-use tier. Spend continues, the meter does not move.
+	CapExtraUsage = "extra_usage"
+	// CapRefused: past the quota with nothing absorbing the overflow.
+	// Requests are being turned away and work stops here.
+	CapRefused = "refused"
+	// CapLowPriority: past the quota and still working, at the lower
+	// request priority, against the weekly allowance. Slower, not stopped.
+	CapLowPriority = "low_priority"
+)
 
 // NowHistoryPoint is one observation slimmed for the in-window chart.
 type NowHistoryPoint struct {
@@ -93,6 +156,17 @@ type NowWindow struct {
 	// indistinguishable from "bloodhound has never seen your usage".
 	Stale      bool   `json:"stale"`
 	StaleTSISO string `json:"stale_ts,omitempty"`
+
+	// CapState says what this window being at its cap actually means right
+	// now, from the transcript evidence in NowQuota: one of the Cap*
+	// constants above, or "" when nothing has been refused in this window
+	// and there is therefore no evidence to interpret Saturated with.
+	//
+	// Saturated alone was read for a long time as "extra usage is billing",
+	// which is one of three possible readings and the wrong one whenever
+	// the pay-per-use tier is unavailable. A consumer that has this field
+	// should say nothing about billing without it.
+	CapState string `json:"cap_state,omitempty"`
 }
 
 // NowPoll summarises the freshness of the latest /usage observation.

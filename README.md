@@ -17,7 +17,7 @@ Bloodhound watches the JSONL session logs Claude Code already writes to your dis
 
 **v0.1 alpha - usable, but expect rough edges.** The data model and the daily-driver UI are in place:
 
-- `Now` - gauges for session and week, time to natural reset, burn-rate projection (only when actionable), and an "On extra usage" badge once you blow past 100%.
+- `Now` - gauges for session and week, time to natural reset, burn-rate projection (only when actionable), and a badge once you blow past 100% saying which of the three things that turned out to mean: extra usage billing, requests refused, or requests still going through at the lower priority Claude Code offers.
 - `History` - `/usage` % over time, the calibration trend (tokens per 1%), and a weekday × hour heatmap of when you spend.
 - `Sessions` - every session on disk, sortable, click-through to a per-turn view with classification (idle / rotation / restructure) and inline compactions.
 - `Settings` - edit `config.json` from the UI, copy-paste statusline + hook + systemd snippets.

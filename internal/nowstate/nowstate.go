@@ -61,6 +61,22 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 		out.StaleAfterS = cfg.StaleAfterS
 	}
 
+	// Read ahead of the observation, and past every early return below,
+	// because the quota verdict does not depend on the meter. An install
+	// that has never managed a /usage capture, or whose last poll produced
+	// nothing, still knows perfectly well that a request was refused and
+	// that a session took the low priority offer — and that is exactly the
+	// install where the percentages are missing and the verdict is the only
+	// thing left to say.
+	//
+	// A failure here must not take the percentages down with it: not
+	// knowing why the meter stopped is better than not knowing where it
+	// stopped, so on error the verdict is simply absent.
+	verdict, verr := s.QuotaNow(ctx, now.UnixMilli())
+	if verr == nil {
+		out.Quota = quotaOut(verdict)
+	}
+
 	obs, err := s.LatestUsage(ctx)
 	if err != nil {
 		return nil, err
@@ -108,6 +124,7 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 	if obs.SessionPct != nil {
 		ws := buildWindow(*obs.SessionPct, obs.SessionResetTSISO, sessionSpan, obs.SessionResetDetected, now)
 		ws.Saturated = obs.SessionSaturated
+		ws.CapState = capState(verdict, "session")
 		fillBurn(ctx, s, ws, *obs.SessionPct, true, sessionSpan, now)
 		markStale(ws, stale, obs.TSISO)
 		out.Session = ws
@@ -116,12 +133,83 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 	if obs.WeekPct != nil {
 		ws := buildWindow(*obs.WeekPct, obs.WeekResetTSISO, weekSpan, obs.WeekResetDetected, now)
 		ws.Saturated = obs.WeekSaturated
+		ws.CapState = capState(verdict, "week")
 		fillBurn(ctx, s, ws, *obs.WeekPct, false, weekSpan, now)
 		markStale(ws, stale, obs.TSISO)
 		out.Week = ws
 	}
 
 	return out, nil
+}
+
+// quotaOut renders the store's verdict for the wire, or nil when there is
+// nothing on record. Nil rather than a zero struct on purpose: a consumer
+// has to be able to tell "no refusal has happened" from "a refusal happened
+// and none of its details were legible", and a struct of zero values says
+// the second while meaning the first.
+func quotaOut(v store.QuotaVerdict) *routes.NowQuota {
+	if !v.Refused && !v.LowPriorityActive {
+		return nil
+	}
+	q := &routes.NowQuota{
+		Refused:               v.Refused,
+		Bucket:                v.Bucket,
+		OverageStatus:         v.OverageStatus,
+		OverageDisabledReason: v.OverageDisabledReason,
+		UsingOverage:          v.UsingOverage,
+		LowPriorityOffered:    v.LowPriorityOffered,
+		LowPriorityActive:     v.LowPriorityActive,
+		LowPrioritySessions:   v.LowPrioritySessions,
+	}
+	q.RefusedTSISO = isoMS(v.RefusedAtMS)
+	q.ResetTSISO = isoMS(v.ResetTSUnixMS)
+	q.LowPrioritySinceTSISO = isoMS(v.LowPrioritySinceMS)
+	q.LowPriorityUntilTSISO = isoMS(v.LowPriorityUntilMS)
+	return q
+}
+
+// capState decides what being at the cap means for one bucket.
+//
+// Ordered by what the person working would want said first. Still working
+// beats billing beats stopped, because that is the order in which the
+// answer changes what they do next: a session running at low priority is
+// not stopped and should not be told it is, and a refusal with the
+// pay-per-use tier absorbing it is not a stop either.
+//
+// A refusal that never named its window is treated as the five hour one.
+// That is not a guess about the data; it is the only window Claude Code
+// offers the low priority fallback against, and the weekly allowance is
+// what the fallback spends, so a nameless refusal belongs to the session
+// bucket by construction.
+func capState(v store.QuotaVerdict, bucket string) string {
+	if !v.Refused && !v.LowPriorityActive {
+		return ""
+	}
+	about := v.Bucket
+	if about == "" {
+		about = "session"
+	}
+	if about != bucket {
+		return ""
+	}
+	switch {
+	case v.LowPriorityActive:
+		return routes.CapLowPriority
+	case v.UsingOverage:
+		return routes.CapExtraUsage
+	default:
+		return routes.CapRefused
+	}
+}
+
+// isoMS renders a unix-millisecond moment for the wire, and "" for the zero
+// one, so every optional timestamp above omits itself rather than
+// serialising the epoch.
+func isoMS(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
 
 // markStale tags a window as carried forward from tsISO. A no-op on the

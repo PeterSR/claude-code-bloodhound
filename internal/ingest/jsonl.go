@@ -32,6 +32,28 @@ type rawRecord struct {
 	// API charge is counted once per block instead of once per response.
 	RequestID string          `json:"requestId,omitempty"`
 	Message   json.RawMessage `json:"message,omitempty"`
+
+	// Content is the payload of a type:"system" record. Distinct from
+	// Message, which is where the user and assistant records put theirs;
+	// no record shape carries both.
+	Content json.RawMessage `json:"content,omitempty"`
+
+	// The quota fields, read by quotaSignals in quota.go. Error names why
+	// a request failed ("rate_limit"), QuotaLimits is the server's verdict
+	// attached to that failure, and QueuePriority is the priority the
+	// prompt on this record was queued at ("later" once low priority mode
+	// is on).
+	Error         string          `json:"error,omitempty"`
+	QuotaLimits   *rawQuotaLimits `json:"quotaLimits,omitempty"`
+	QueuePriority string          `json:"queuePriority,omitempty"`
+
+	// Origin says what put a prompt in the queue. Only "auto-continuation"
+	// matters here, and only alongside QueuePriority — see quotaSignals.
+	Origin *rawOrigin `json:"origin,omitempty"`
+}
+
+type rawOrigin struct {
+	Kind string `json:"kind"`
 }
 
 type rawMessage struct {
@@ -105,12 +127,13 @@ type Compaction struct {
 
 // FileResult is the parsed output of one JSONL file.
 type FileResult struct {
-	SessionUUID string
-	Project     string
-	Turns       []Turn
-	Compactions []Compaction
-	UserPrompts []UserPrompt
-	PathHash    string
+	SessionUUID  string
+	Project      string
+	Turns        []Turn
+	Compactions  []Compaction
+	UserPrompts  []UserPrompt
+	QuotaSignals []QuotaSignal
+	PathHash     string
 }
 
 // subagentContext marks path as a subagent transcript, either the Task-tool
@@ -217,6 +240,10 @@ func parseFile(path string, sa *subagentContext) (FileResult, error) {
 		// used to build dedupeLast, so comparing the two tells us whether the
 		// record we're on now is the last (surviving) occurrence of its key.
 		assistantIdx int
+
+		// Carried across lines for quotaSignals, which reads evidence that
+		// is spread over several records rather than held in any one.
+		quota quotaState
 	)
 
 	finalizeCompaction := func(curPrefix int, confirmed bool, reason string) {
@@ -238,6 +265,12 @@ func parseFile(path string, sa *subagentContext) (FileResult, error) {
 			// in practice; tracking parse errors will land in Stats later.
 			continue
 		}
+
+		// Ahead of the switch rather than inside it, because a refusal is
+		// a type "assistant" record and claiming it as a case here would
+		// change what turn parsing sees. Nothing below reads quota fields,
+		// so the two passes over the record are independent.
+		res.QuotaSignals = append(res.QuotaSignals, quotaSignals(rec, sessionUUID, project, &quota)...)
 
 		switch {
 		case rec.Type == "system" && rec.Subtype == "compact_boundary":

@@ -423,9 +423,19 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 		sender = notify.New()
 	}
 
+	// Read once for the whole pass rather than per session: the refusal half
+	// is an account fact, and re-asking it for every conversation on the
+	// machine would let two sessions in the same batch be told contradictory
+	// things about the same window. An error here costs the qualifier, not
+	// the warning — the zero verdict simply claims nothing.
+	quota, qerr := s.QuotaNow(ctx, now.UnixMilli())
+	if qerr != nil {
+		st.Errors = append(st.Errors, fmt.Sprintf("quota verdict: %v", qerr))
+	}
+
 	for _, sess := range sessions {
 		cfg := configFor(sess.CWD)
-		msg := compose(evs, sess, now, cfg)
+		msg := compose(evs, sess, now, cfg, quota)
 		if msg.Text == "" {
 			// Nothing in this batch concerns this session. Not a skip: there
 			// was never anything to deliver, so counting it would make the log
@@ -515,7 +525,7 @@ type message struct {
 // belongs to it, then the opt-in nudges, then the project's own closing line.
 // Facts first and advice last, so a message that gets skimmed is skimmed in
 // the useful direction.
-func compose(evs []events.Event, sess ccsock.Session, now time.Time, cfg projectconfig.Config) message {
+func compose(evs []events.Event, sess ccsock.Session, now time.Time, cfg projectconfig.Config, quota store.QuotaVerdict) message {
 	var msg message
 	var pressure, nudges []string
 
@@ -541,7 +551,7 @@ func compose(evs []events.Event, sess ccsock.Session, now time.Time, cfg project
 		if !wanted(e, cfg) {
 			continue
 		}
-		line, err := lineFor(e, sess, now, cfg)
+		line, err := lineFor(e, sess, now, cfg, quota)
 		if line == "" {
 			continue
 		}
@@ -585,7 +595,7 @@ func compose(evs []events.Event, sess ccsock.Session, now time.Time, cfg project
 		}
 		out = append(out, body)
 
-		if line, plan := wakeupLine(cfg, sess, now, soonest, soonestBucket, soonestReason); line != "" {
+		if line, plan := wakeupLine(cfg, sess, now, soonest, soonestBucket, soonestReason, quota); line != "" {
 			out = append(out, line)
 			msg.Arm = plan
 		}
@@ -611,8 +621,18 @@ func (m *message) wordingProblem(e events.Event, err error) {
 // Resume promises, and only when there is a deadline close enough to keep the
 // promise honest: past armHorizon, or with no reset in the text at all,
 // bloodhound has nothing it can commit to and says so by saying nothing.
-func wakeupLine(cfg projectconfig.Config, sess ccsock.Session, now time.Time, at time.Time, bucket, reason string) (string, *armPlan) {
+func wakeupLine(cfg projectconfig.Config, sess ccsock.Session, now time.Time, at time.Time, bucket, reason string, quota store.QuotaVerdict) (string, *armPlan) {
 	if bucket == "" || at.IsZero() {
+		return "", nil
+	}
+	// Both forms of this line, and the promise underneath them, start from
+	// "work that stops here". A session already running at the lower request
+	// priority is not stopping: its requests are still being served, slower,
+	// until the window it is standing in for reopens. Offering to wake it
+	// then would be waking a conversation that never paused, and the nudge
+	// form is worse than useless — it tells someone who is working that they
+	// are about to stop.
+	if quota.LowPriority(sess.SessionID) {
 		return "", nil
 	}
 	v := projectconfig.Vars{
@@ -935,8 +955,8 @@ func sameDir(a, b string) bool {
 // The error is returned alongside the line rather than instead of it: a
 // template that failed still yields the built-in sentence, and the caller
 // logs the failure without anybody losing a warning over it.
-func lineFor(e events.Event, sess ccsock.Session, now time.Time, cfg projectconfig.Config) (string, error) {
-	base := describe(e, now)
+func lineFor(e events.Event, sess ccsock.Session, now time.Time, cfg projectconfig.Config, quota store.QuotaVerdict) (string, error) {
+	base := describe(e, now, quota, sess.SessionID)
 	if base == "" {
 		return "", nil
 	}
@@ -988,7 +1008,7 @@ func varsFor(e events.Event, sess ccsock.Session, now time.Time, text string, at
 // Phrased as an observation, never an instruction. Bloodhound measures; what
 // to do about the measurement is the reader's call, and a monitoring tool that
 // starts issuing orders into conversations is one users turn off.
-func describe(e events.Event, now time.Time) string {
+func describe(e events.Event, now time.Time, quota store.QuotaVerdict, sessionUUID string) string {
 	kind, state, ok := splitKind(e.Kind)
 	if !ok {
 		return ""
@@ -1076,9 +1096,66 @@ func describe(e events.Event, now time.Time) string {
 		if reset != "" {
 			line += fmt.Sprintf(" It resets %s.", reset)
 		}
+		if clause := quotaClause(quota, sessionUUID, e.Scope.Bucket); clause != "" {
+			line += " " + clause
+		}
 		return line
 	}
 	return ""
+}
+
+// quotaClause says what the meter stopping actually means, which the meter
+// itself cannot.
+//
+// Without it a saturation line says a number stopped moving and leaves the
+// reader to guess between three situations: spend billing to the pay-per-use
+// tier, requests refused outright, and requests still being served at the
+// lower priority Claude Code offers when the five hour window closes. Guessing
+// wrong in the cautious direction is not free. A session told only that the
+// meter is pinned reads it as a stop, writes up where it got to and waits,
+// while the requests it would have made were going through the whole time.
+// That is the failure this clause exists to prevent, and it is why the
+// low-priority case is phrased around what still works rather than what
+// does not.
+//
+// Empty whenever there is nothing on record, which is most of the time. The
+// sentence above it is written to stand alone.
+func quotaClause(v store.QuotaVerdict, sessionUUID, bucket string) string {
+	if !v.Refused && !v.LowPriorityActive {
+		return ""
+	}
+	about := v.Bucket
+	if about == "" {
+		about = "session"
+	}
+	if bucket != "" && bucket != about {
+		return ""
+	}
+
+	if v.LowPriority(sessionUUID) {
+		return "This session is running at the lower request priority until then, so requests are still going through: they may wait for spare capacity, and they draw on the weekly allowance rather than this window."
+	}
+	if v.UsingOverage {
+		return "Spend past the cap is billing to the pay-per-use extra usage tier rather than being refused."
+	}
+	if !v.Refused {
+		return ""
+	}
+
+	line := "Requests are being refused rather than billed to extra usage"
+	if v.OverageDisabledReason != "" {
+		line += fmt.Sprintf(" (%s)", strings.ReplaceAll(v.OverageDisabledReason, "_", " "))
+	}
+	line += "."
+	if v.LowPriorityOffered {
+		// The one place bloodhound comes close to naming a remedy, and it is
+		// still an observation: the offer is Claude Code's, already on the
+		// reader's screen, and what is being said is that it exists and what
+		// it costs. Someone who does not know it is there reads a refusal as
+		// the end of the window.
+		line += " Claude Code offers to carry on at a lower request priority instead, against the weekly allowance."
+	}
+	return line
 }
 
 // pctFigure renders a percentage the way the rest of bloodhound's prose does:

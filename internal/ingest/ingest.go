@@ -148,7 +148,7 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 			st.Errors = append(st.Errors, fmt.Sprintf("parse %s: %v", p, err))
 			continue
 		}
-		if len(fr.Turns) == 0 && len(fr.Compactions) == 0 {
+		if len(fr.Turns) == 0 && len(fr.Compactions) == 0 && len(fr.QuotaSignals) == 0 {
 			// Nothing useful; record mtime so we skip next time.
 			_ = s.RecordIngestedFile(ctx, store.IngestedFileRecord{
 				PathHash:        hash,
@@ -163,11 +163,12 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 		}
 
 		if err := s.ReplaceSessionData(ctx, store.SessionPersist{
-			SessionUUID: fr.SessionUUID,
-			Project:     fr.Project,
-			Turns:       toStoreTurns(fr.Turns),
-			Compactions: toStoreCompactions(fr.Compactions),
-			UserPrompts: toStoreUserPrompts(fr.UserPrompts),
+			SessionUUID:  fr.SessionUUID,
+			Project:      fr.Project,
+			Turns:        toStoreTurns(fr.Turns),
+			Compactions:  toStoreCompactions(fr.Compactions),
+			UserPrompts:  toStoreUserPrompts(fr.UserPrompts),
+			QuotaSignals: toStoreQuotaSignals(fr.QuotaSignals),
 		}); err != nil {
 			st.Errors = append(st.Errors, fmt.Sprintf("persist %s: %v", p, err))
 			continue
@@ -339,6 +340,31 @@ func toStoreTurns(in []Turn) []store.TurnRow {
 			ParentSessionUUID: t.ParentSessionUUID,
 			Cwd:               t.Cwd,
 		}
+	}
+	return out
+}
+
+// toStoreQuotaSignals is the transport hop for what a transcript said about
+// quota. Kept as a mapping rather than having parseFile emit store rows
+// directly, for the same reason the three above are: internal/ingest reads
+// JSONL and nothing else, and a parser that imported the database's row
+// shapes would be one step from being written against them.
+func toStoreQuotaSignals(in []QuotaSignal) []store.QuotaSignalRow {
+	out := make([]store.QuotaSignalRow, 0, len(in))
+	for _, q := range in {
+		out = append(out, store.QuotaSignalRow{
+			SessionUUID:           q.SessionUUID,
+			TSUnixMS:              q.TSUnixMS,
+			Kind:                  q.Kind,
+			Bucket:                q.Bucket,
+			ResetTSUnixMS:         q.ResetTSUnixMS,
+			OverageStatus:         q.OverageStatus,
+			OverageDisabledReason: q.OverageDisabledReason,
+			UsingOverage:          q.UsingOverage,
+			LowPriorityOffer:      q.LowPriorityOffer,
+			Project:               q.Project,
+			Cwd:                   q.Cwd,
+		})
 	}
 	return out
 }

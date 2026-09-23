@@ -95,10 +95,10 @@ func TestTextForScopesBudgetsToTheirDirectory(t *testing.T) {
 	mine := ccsock.Session{CWD: "/home/dev/myapp"}
 	theirs := ccsock.Session{CWD: "/home/dev/other"}
 
-	if got := compose(evs, mine, testNow, projectconfig.Config{}).Text; got == "" {
+	if got := compose(evs, mine, testNow, projectconfig.Config{}, store.QuotaVerdict{}).Text; got == "" {
 		t.Error("the directory that owns the budget was told nothing")
 	}
-	if got := compose(evs, theirs, testNow, projectconfig.Config{}).Text; got != "" {
+	if got := compose(evs, theirs, testNow, projectconfig.Config{}, store.QuotaVerdict{}).Text; got != "" {
 		t.Errorf("an unrelated directory was told %q", got)
 	}
 }
@@ -108,7 +108,7 @@ func TestTextForSendsAccountWideEventsToEveryone(t *testing.T) {
 	// caused it, so these carry no cwd and reach anyone admitted.
 	evs := []events.Event{ev("limit_projection.projected", "session", "", map[string]any{"eta_ts": iso(testNow.Add(40 * time.Minute))})}
 	for _, cwd := range []string{"/home/dev/myapp", "/home/dev/other", ""} {
-		if got := compose(evs, ccsock.Session{CWD: cwd}, testNow, projectconfig.Config{}).Text; got == "" {
+		if got := compose(evs, ccsock.Session{CWD: cwd}, testNow, projectconfig.Config{}, store.QuotaVerdict{}).Text; got == "" {
 			t.Errorf("cwd %q was not told about an account-wide event", cwd)
 		}
 	}
@@ -118,7 +118,7 @@ func TestTextForNormalizesDirectories(t *testing.T) {
 	// A trailing separator must not make a session look like a different
 	// directory than the budget it owns.
 	evs := []events.Event{ev("budget.exceeded", "week", "/home/dev/myapp", map[string]any{"reason": "spent"})}
-	if got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow, projectconfig.Config{}).Text; got == "" {
+	if got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp/"}, testNow, projectconfig.Config{}, store.QuotaVerdict{}).Text; got == "" {
 		t.Error("a trailing separator hid a session from its own budget")
 	}
 }
@@ -133,7 +133,7 @@ func TestDescribeReadsAsObservationNotInstruction(t *testing.T) {
 		ev("saturation.saturated", "week", "", nil),
 	}
 	for _, e := range cases {
-		got := describe(e, testNow)
+		got := describe(e, testNow, store.QuotaVerdict{}, "")
 		if got == "" {
 			t.Errorf("%s produced no text", e.Kind)
 			continue
@@ -180,7 +180,7 @@ func equalFold(a, b string) bool {
 func TestDescribeFallsBackWithoutADetailReason(t *testing.T) {
 	// The reason is written by the sensor, but an event replayed from an older
 	// schema may not carry one and must still say something true.
-	got := describe(ev("budget.exceeded", "week", "/home/dev/myapp", nil), testNow)
+	got := describe(ev("budget.exceeded", "week", "/home/dev/myapp", nil), testNow, store.QuotaVerdict{}, "")
 	if got == "" {
 		t.Fatal("no fallback text")
 	}
@@ -402,7 +402,7 @@ func TestDescribeSaysWhenTheWindowResets(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := describe(c.ev, testNow); got != c.want {
+			if got := describe(c.ev, testNow, store.QuotaVerdict{}, ""); got != c.want {
 				t.Errorf("describe =\n  %q\nwant\n  %q", got, c.want)
 			}
 		})
@@ -437,7 +437,7 @@ func TestDescribeDropsAResetThatHasAlreadyPassed(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := describe(c.ev, testNow); got != c.want {
+			if got := describe(c.ev, testNow, store.QuotaVerdict{}, ""); got != c.want {
 				t.Errorf("describe =\n  %q\nwant\n  %q", got, c.want)
 			}
 		})
@@ -456,7 +456,7 @@ func TestTextForAddsTheWakeupNoteOnce(t *testing.T) {
 	}
 	sess := ccsock.Session{CWD: "/home/dev/myapp"}
 
-	got := compose(evs, sess, testNow, wantsNudge).Text
+	got := compose(evs, sess, testNow, wantsNudge, store.QuotaVerdict{}).Text
 	if n := countOccurrences(got, nudgeNote(testNow.Add(90*time.Minute), "session")); n != 1 {
 		t.Errorf("the note appears %d times, want exactly 1:\n%s", n, got)
 	}
@@ -471,7 +471,7 @@ func TestTextForLeavesTheWakeupNoteOutUnlessAsked(t *testing.T) {
 	evs := []events.Event{
 		ev("saturation.saturated", "session", "", map[string]any{"reset_ts": iso(testNow.Add(90 * time.Minute))}),
 	}
-	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, projectconfig.Config{}).Text
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, projectconfig.Config{}, store.QuotaVerdict{}).Text
 	if countOccurrences(got, nudgeNote(testNow.Add(90*time.Minute), "session")) != 0 {
 		t.Errorf("the note went out to a directory that did not ask for it:\n%s", got)
 	}
@@ -482,7 +482,7 @@ func TestTextForLeavesTheWakeupNoteOutUnlessAsked(t *testing.T) {
 // nothing for it to point at and nothing to arm a wakeup for.
 func TestTextForSkipsTheWakeupNoteWithoutAReset(t *testing.T) {
 	evs := []events.Event{ev("saturation.saturated", "session", "", nil)}
-	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, wantsNudge).Text
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, wantsNudge, store.QuotaVerdict{}).Text
 	if countOccurrences(got, nudgeNote(testNow.Add(90*time.Minute), "session")) != 0 {
 		t.Errorf("the note went out with no reset to point at:\n%s", got)
 	}
@@ -523,10 +523,10 @@ func TestRecommendationGoesOnlyToTheSessionItIsAbout(t *testing.T) {
 	mine := ccsock.Session{SessionID: "session-abc12345", CWD: "/home/dev/myapp"}
 	theirs := ccsock.Session{SessionID: "session-def67890", CWD: "/home/dev/myapp"}
 
-	if got := compose(evs, mine, testNow, on).Text; got == "" {
+	if got := compose(evs, mine, testNow, on, store.QuotaVerdict{}).Text; got == "" {
 		t.Error("the session it is about was told nothing")
 	}
-	if got := compose(evs, theirs, testNow, on).Text; got != "" {
+	if got := compose(evs, theirs, testNow, on, store.QuotaVerdict{}).Text; got != "" {
 		t.Errorf("another session in the same directory was told %q", got)
 	}
 }
@@ -539,10 +539,10 @@ func TestRecommendationNeedsTheDirectoryToAskForIt(t *testing.T) {
 	e.Scope.Session = "session-abc12345"
 	sess := ccsock.Session{SessionID: "session-abc12345", CWD: "/home/dev/myapp"}
 
-	if got := compose([]events.Event{e}, sess, testNow, projectconfig.Config{}).Text; got != "" {
+	if got := compose([]events.Event{e}, sess, testNow, projectconfig.Config{}, store.QuotaVerdict{}).Text; got != "" {
 		t.Errorf("the nudge went out unasked: %q", got)
 	}
-	if got := compose([]events.Event{e}, sess, testNow, wantsWriteup).Text; got == "" {
+	if got := compose([]events.Event{e}, sess, testNow, wantsWriteup, store.QuotaVerdict{}).Text; got == "" {
 		t.Error("the nudge was asked for and did not arrive")
 	}
 }
@@ -574,7 +574,7 @@ var (
 // nudgeNote is the suggestion as the code under test renders it, rather than a
 // copy of the sentence. A test that repeats the wording only pins the wording.
 func nudgeNote(at time.Time, bucket string) string {
-	line, _ := wakeupLine(wantsNudge, ccsock.Session{}, testNow, at, bucket, "")
+	line, _ := wakeupLine(wantsNudge, ccsock.Session{}, testNow, at, bucket, "", store.QuotaVerdict{})
 	return line
 }
 
@@ -614,7 +614,7 @@ func TestTheProjectionLineSaysWhereTheMeterIs(t *testing.T) {
 		"reset_ts":       iso(testNow.Add(58 * time.Hour)),
 	})
 	want := "The week meter is at 56%, rising about 2.4%/h, and is on pace to reach 100% in 4h, before it resets on fri 18:00."
-	if got := describe(e, testNow); got != want {
+	if got := describe(e, testNow, store.QuotaVerdict{}, ""); got != want {
 		t.Errorf("describe =\n  %q\nwant\n  %q", got, want)
 	}
 }
@@ -629,10 +629,10 @@ func TestTheCacheNudgeNeedsAsking(t *testing.T) {
 	e.Scope.Session = "session-abc12345"
 	sess := ccsock.Session{SessionID: "session-abc12345", CWD: "/home/dev/myapp"}
 
-	if got := compose([]events.Event{e}, sess, testNow, projectconfig.Config{}); got.Text != "" {
+	if got := compose([]events.Event{e}, sess, testNow, projectconfig.Config{}, store.QuotaVerdict{}); got.Text != "" {
 		t.Errorf("the nudge went out unasked: %q", got.Text)
 	}
-	got := compose([]events.Event{e}, sess, testNow, wantsCache)
+	got := compose([]events.Event{e}, sess, testNow, wantsCache, store.QuotaVerdict{})
 	if got.Text == "" {
 		t.Fatal("the nudge was asked for and did not arrive")
 	}
@@ -667,12 +667,12 @@ func TestResumeModePromisesRatherThanSuggests(t *testing.T) {
 		"reason": "myapp has 4.0% left", "reset_ts": iso(testNow.Add(90 * time.Minute))})}
 	sess := ccsock.Session{CWD: "/home/dev/myapp"}
 
-	suggested := compose(evs, sess, testNow, wantsNudge)
+	suggested := compose(evs, sess, testNow, wantsNudge, store.QuotaVerdict{})
 	if suggested.Arm != nil {
 		t.Error("nudge mode armed something; it is supposed to arm nothing")
 	}
 
-	promised := compose(evs, sess, testNow, wantsResume)
+	promised := compose(evs, sess, testNow, wantsResume, store.QuotaVerdict{})
 	if promised.Arm == nil {
 		t.Fatal("resume mode promised nothing")
 	}
@@ -690,7 +690,7 @@ func TestResumeModePromisesRatherThanSuggests(t *testing.T) {
 func TestNoPromiseIsMadeForAWindowDaysAway(t *testing.T) {
 	evs := []events.Event{ev("saturation.saturated", "week", "", map[string]any{
 		"reset_ts": iso(testNow.Add(58 * time.Hour))})}
-	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, wantsResume)
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, wantsResume, store.QuotaVerdict{})
 
 	if got.Arm != nil {
 		t.Error("promised a wakeup past the horizon")
@@ -715,7 +715,7 @@ func TestAProjectSpeaksInItsOwnWords(t *testing.T) {
 	evs := []events.Event{ev("budget.tight", "session", "/home/dev/myapp", map[string]any{
 		"reason": "myapp has 4.0% left", "reset_ts": iso(testNow.Add(90 * time.Minute))})}
 
-	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, cfg).Text
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, cfg, store.QuotaVerdict{}).Text
 	if !containsFold(got, "myapp has 4.0% left") {
 		t.Errorf("{{.Text}} lost the facts it was standing in for:\n%s", got)
 	}
@@ -735,7 +735,7 @@ func TestABrokenTemplateStillDeliversTheWarning(t *testing.T) {
 	evs := []events.Event{ev("budget.tight", "session", "/home/dev/myapp", map[string]any{
 		"reason": "myapp has 4.0% left"})}
 
-	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, cfg)
+	got := compose(evs, ccsock.Session{CWD: "/home/dev/myapp"}, testNow, cfg, store.QuotaVerdict{})
 	if !containsFold(got.Text, "myapp has 4.0% left") {
 		t.Errorf("the warning was lost with the template:\n%s", got.Text)
 	}
