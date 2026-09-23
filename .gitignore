@@ -1,6 +1,11 @@
 # Local scratch — never tracked
 .agent-workspace/
 
+# This repo's own project config: dogfooding, not a checked-in example.
+# .bloodhound/config.json is designed to be committable, but the copy here
+# is whatever the current session wants to hear, not a recommendation.
+/.bloodhound/
+
 # Go build artifacts
 /bloodhound
 /bloodhound.exe
