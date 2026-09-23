@@ -805,6 +805,18 @@ func TestWeaverbirdValue_FastOnEmptyStore(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
+	// Create the database before the clock starts. Every render on a real
+	// machine opens one the daemon has already migrated, so the one-time
+	// schema build is not part of the budget; timing it made this test
+	// grow slower with every migration and fail on a busy CI runner.
+	s, err := store.Open(context.Background())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
 	start := time.Now()
 	if _, err := weaverbirdValue(wb.Session{}, nil); err != nil {
 		t.Fatalf("weaverbirdValue: %v", err)
