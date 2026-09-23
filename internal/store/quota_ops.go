@@ -71,8 +71,12 @@ func (v QuotaVerdict) LowPriority(sessionUUID string) bool {
 // account fact and wants the single newest row; the priority is a per
 // session fact and wants the newest row for each session separately, since
 // one conversation switching back to waiting says nothing about the others.
-func (s *Store) QuotaNow(ctx context.Context, nowMS int64) (QuotaVerdict, error) {
+//
+// Both are about one account: a refusal on another account's quota says
+// nothing about this one's.
+func (s *Store) QuotaNow(ctx context.Context, accountID int64, nowMS int64) (QuotaVerdict, error) {
 	var v QuotaVerdict
+	accountID = accountOr1(accountID)
 
 	// A refusal matters while the window it was about is still closed. Rows
 	// that carried no reset fall back to their own age, because an hours-old
@@ -84,13 +88,14 @@ func (s *Store) QuotaNow(ctx context.Context, nowMS int64) (QuotaVerdict, error)
 		       low_priority_offer
 		  FROM quota_signals
 		 WHERE kind = 'rate_limited'
+		   AND account_id = ?
 		   AND ts_unix_ms <= ?
 		   AND (CASE WHEN reset_ts_unix_ms > 0
 		             THEN reset_ts_unix_ms > ?
 		             ELSE ts_unix_ms > ? - ? END)
 		 ORDER BY ts_unix_ms DESC
 		 LIMIT 1
-	`, nowMS, nowMS, nowMS, fiveHourMS).Scan(
+	`, accountID, nowMS, nowMS, nowMS, fiveHourMS).Scan(
 		&v.RefusedAtMS, &v.Bucket, &v.ResetTSUnixMS,
 		&v.OverageStatus, &v.OverageDisabledReason, &v.UsingOverage,
 		&offer,
@@ -110,7 +115,7 @@ func (s *Store) QuotaNow(ctx context.Context, nowMS int64) (QuotaVerdict, error)
 		v.LowPriorityOffered = offer != ""
 	}
 
-	sess, err := s.lowPrioritySessions(ctx, nowMS)
+	sess, err := s.lowPrioritySessions(ctx, accountID, nowMS)
 	if err != nil {
 		return QuotaVerdict{}, err
 	}
@@ -142,7 +147,7 @@ type lowPriSession struct {
 // mode is standing in for and what Claude Code itself says it lasts until.
 // Without such a refusal on record the acceptance gets five hours from its
 // own timestamp, which is the window's own length.
-func (s *Store) lowPrioritySessions(ctx context.Context, nowMS int64) ([]lowPriSession, error) {
+func (s *Store) lowPrioritySessions(ctx context.Context, accountID, nowMS int64) ([]lowPriSession, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT q.session_uuid, q.kind, q.ts_unix_ms
 		  FROM quota_signals q
@@ -156,7 +161,8 @@ func (s *Store) lowPrioritySessions(ctx context.Context, nowMS int64) ([]lowPriS
 		    ON newest.session_uuid = q.session_uuid
 		   AND newest.ts = q.ts_unix_ms
 		 WHERE q.kind IN ('low_priority_on', 'low_priority_off')
-	`, nowMS)
+		   AND q.account_id = ?
+	`, nowMS, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +186,7 @@ func (s *Store) lowPrioritySessions(ctx context.Context, nowMS int64) ([]lowPriS
 
 	live := out[:0]
 	for _, ls := range out {
-		until, err := s.resetForAcceptance(ctx, ls.sinceMS)
+		until, err := s.resetForAcceptance(ctx, accountID, ls.sinceMS)
 		if err != nil {
 			return nil, err
 		}
@@ -201,18 +207,19 @@ func (s *Store) lowPrioritySessions(ctx context.Context, nowMS int64) ([]lowPriS
 // acceptedMS was answering, or 0 when no refusal precedes it. Bounded to
 // the five hours before the acceptance so that a stale refusal from an
 // earlier window cannot lend its reset to a later one.
-func (s *Store) resetForAcceptance(ctx context.Context, acceptedMS int64) (int64, error) {
+func (s *Store) resetForAcceptance(ctx context.Context, accountID, acceptedMS int64) (int64, error) {
 	var reset int64
 	err := s.DB.QueryRowContext(ctx, `
 		SELECT reset_ts_unix_ms
 		  FROM quota_signals
 		 WHERE kind = 'rate_limited'
+		   AND account_id = ?
 		   AND reset_ts_unix_ms > 0
 		   AND ts_unix_ms <= ?
 		   AND ts_unix_ms > ? - ?
 		 ORDER BY ts_unix_ms DESC
 		 LIMIT 1
-	`, acceptedMS, acceptedMS, fiveHourMS).Scan(&reset)
+	`, accountID, acceptedMS, acceptedMS, fiveHourMS).Scan(&reset)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}

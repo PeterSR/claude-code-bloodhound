@@ -162,7 +162,7 @@ func TestGroupAttribution_BySessionFoldsSubagentsIntoParent(t *testing.T) {
 	insertTestAttribution(t, s, "week", 5000, parent, "proj", 10, 0)
 	insertTestAttribution(t, s, "week", 5000, sub, "proj", 6, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "session", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "session", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestGroupAttribution_BySessionCwdIsParentsNotSubagents(t *testing.T) {
 	insertTestAttribution(t, s, "week", 7000, parent, "proj", 10, 0)
 	insertTestAttribution(t, s, "week", 7000, sub, "proj", 6, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "session", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "session", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestGroupAttribution_ByProjectCwdIsEmpty(t *testing.T) {
 	insertTestWindow(t, s, "week", 9000)
 	insertTestAttribution(t, s, "week", 9000, sess, "proj", 10, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "project", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "project", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestGroupAttribution_ByCwdGroupsUnderParentDirectory(t *testing.T) {
 	insertTestAttribution(t, s, "week", 13000, parent, "proj", 10, 0)
 	insertTestAttribution(t, s, "week", 13000, sub, "proj", 6, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "cwd", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "cwd", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestGroupAttribution_ByCwdUnknownBucketDistinctFromUnattributed(t *testing.
 	// attribute.Unattributed uses everywhere else.
 	insertTestAttribution(t, s, "week", 15000, "", "", 3, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "cwd", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "cwd", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestGroupAttribution_ByCwdRealDirectoryPopulatesCwdField(t *testing.T) {
 	insertTestWindow(t, s, "week", 17000)
 	insertTestAttribution(t, s, "week", 17000, sess, "proj", 12, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "cwd", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "cwd", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestWindowSlices_CwdIsParentsNotSubagents(t *testing.T) {
 	insertTestAttribution(t, s, "5h", 19000, parent, "proj", 5, 0)
 	insertTestAttribution(t, s, "5h", 19000, sub, "proj", 3, 0)
 
-	rows, err := s.WindowSlices(ctx, "5h", 0)
+	rows, err := s.WindowSlices(ctx, 1, "5h", 0)
 	if err != nil {
 		t.Fatalf("WindowSlices: %v", err)
 	}
@@ -627,7 +627,7 @@ func TestGroupAttribution_ByProjectPeakSumsWindowBeforeMax(t *testing.T) {
 	// Window 2: one session alone, well under window 1's pooled total.
 	insertTestAttribution(t, s, "week", 2000, sessA, "proj", 10, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "project", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "project", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}
@@ -666,7 +666,7 @@ func TestGroupAttribution_ByCwdPeakSumsWindowBeforeMax(t *testing.T) {
 	insertTestAttribution(t, s, "week", 1000, sessB, "proj", 9, 0)
 	insertTestAttribution(t, s, "week", 2000, sessA, "proj", 5, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "cwd", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "cwd", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestGroupAttribution_SingleWindowPeakEqualsPctForProjectAndCwd(t *testing.T
 	insertTestAttribution(t, s, "week", 1000, sessB, "proj", 25, 1)
 
 	for _, by := range []string{"project", "cwd"} {
-		groups, err := s.GroupAttribution(ctx, "week", by, 0)
+		groups, err := s.GroupAttribution(ctx, 1, "week", by, 0)
 		if err != nil {
 			t.Fatalf("GroupAttribution(%s): %v", by, err)
 		}
@@ -766,7 +766,7 @@ func TestGroupAttribution_BySessionPeakSumsSupervisorAndSubagents(t *testing.T) 
 	// from the bug: the old MAX() over raw rows would report 10 here.
 	insertTestAttribution(t, s, "week", 2000, parent, "proj", 10, 0)
 
-	groups, err := s.GroupAttribution(ctx, "week", "session", 0)
+	groups, err := s.GroupAttribution(ctx, 1, "week", "session", 0)
 	if err != nil {
 		t.Fatalf("GroupAttribution: %v", err)
 	}

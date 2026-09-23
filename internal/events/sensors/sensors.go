@@ -31,14 +31,26 @@ import (
 func Run(ctx context.Context, s *store.Store, now time.Time) (events.Stats, error) {
 	w := events.World{DB: s.DB, Now: now}
 
-	// A failure here is not fatal. The collection sensor's whole job is to
-	// report that the meter is unreadable, and it cannot do that if an
-	// unreadable meter stops the pass.
-	pool, err := nowstate.Compute(ctx, s, now)
+	// One pool per metered account, primary first. A failure here is not
+	// fatal. The collection sensor's whole job is to report that the meter is
+	// unreadable, and it cannot do that if an unreadable meter stops the pass.
+	ids, err := s.MeteredAccountIDs(ctx)
 	if err == nil {
-		w.Pool = pool
+		for i, id := range ids {
+			pool, perr := nowstate.Compute(ctx, s, id, now)
+			if perr != nil {
+				err = perr
+				continue
+			}
+			if i == 0 {
+				w.Pool = pool
+			}
+			w.Meters = append(w.Meters, events.AccountPool{Account: id, Pool: pool})
+		}
 	}
-	w.TokensPerPctCW, _, _, w.HasCalibration, _ = s.LatestCalibrationMedian(ctx, "session", 10)
+	if len(ids) > 0 {
+		w.TokensPerPctCW, _, _, w.HasCalibration, _ = s.LatestCalibrationMedian(ctx, ids[0], "session", 10)
+	}
 
 	st, rerr := events.Reconcile(ctx, s.DB, w)
 	if err != nil {
@@ -59,6 +71,26 @@ func buckets(pool *routes.NowResponse) map[string]*routes.NowWindow {
 	return map[string]*routes.NowWindow{"session": pool.Session, "week": pool.Week}
 }
 
+// meterWindow is one bucket of one account's meter.
+type meterWindow struct {
+	bucket  string
+	win     *routes.NowWindow
+	account int64
+}
+
+// meterWindows lists every bucket of every metered account. An account whose
+// pool failed to compute is absent from Meters and so contributes nothing,
+// which is the nil-pool bail the comment on buckets asks for, per account.
+func meterWindows(w events.World) []meterWindow {
+	var out []meterWindow
+	for _, m := range w.Meters {
+		for bucket, win := range buckets(m.Pool) {
+			out = append(out, meterWindow{bucket, win, m.Account})
+		}
+	}
+	return out
+}
+
 func init() {
 	// Whether the pace of the last hour crosses 100% before this window
 	// resets. nowstate.fillBurn already decides this, including the deliberate
@@ -68,12 +100,10 @@ func init() {
 	events.Register(events.Sensor{
 		Name: "burn/limit",
 		Read: func(ctx context.Context, w events.World) ([]events.Reading, error) {
-			if w.Pool == nil {
-				return nil, nil // nothing to say, which is not the same as not knowing
-			}
 			var out []events.Reading
-			for bucket, win := range buckets(w.Pool) {
-				r := events.Reading{Kind: "limit_projection", Scope: events.Scope{Bucket: bucket}}
+			for _, mw := range meterWindows(w) {
+				win := mw.win
+				r := events.Reading{Kind: "limit_projection", Scope: events.Scope{Bucket: mw.bucket, Account: mw.account}}
 				switch {
 				case win == nil:
 					r.State = "" // recorded as unknown, never silently dropped
@@ -102,12 +132,10 @@ func init() {
 	events.Register(events.Sensor{
 		Name: "meter/threshold",
 		Read: func(ctx context.Context, w events.World) ([]events.Reading, error) {
-			if w.Pool == nil {
-				return nil, nil
-			}
 			var out []events.Reading
-			for bucket, win := range buckets(w.Pool) {
-				r := events.Reading{Kind: "threshold", Scope: events.Scope{Bucket: bucket}}
+			for _, mw := range meterWindows(w) {
+				win := mw.win
+				r := events.Reading{Kind: "threshold", Scope: events.Scope{Bucket: mw.bucket, Account: mw.account}}
 				if win == nil {
 					r.State = "" // recorded as unknown, never silently dropped
 				} else {
@@ -127,12 +155,10 @@ func init() {
 	events.Register(events.Sensor{
 		Name: "meter/saturation",
 		Read: func(ctx context.Context, w events.World) ([]events.Reading, error) {
-			if w.Pool == nil {
-				return nil, nil
-			}
 			var out []events.Reading
-			for bucket, win := range buckets(w.Pool) {
-				r := events.Reading{Kind: "saturation", Scope: events.Scope{Bucket: bucket}}
+			for _, mw := range meterWindows(w) {
+				win := mw.win
+				r := events.Reading{Kind: "saturation", Scope: events.Scope{Bucket: mw.bucket, Account: mw.account}}
 				switch {
 				case win == nil:
 					r.State = ""
@@ -155,33 +181,35 @@ func init() {
 	events.Register(events.Sensor{
 		Name: "collection/health",
 		Read: func(ctx context.Context, w events.World) ([]events.Reading, error) {
-			if w.Pool == nil {
-				// The pool state itself would not compute, which says nothing
-				// about collection health. Staying silent leaves the recorded
-				// level alone rather than laundering a transient database
-				// error into a claim about the meter.
-				return nil, nil
-			}
-			r := events.Reading{Kind: "collection"}
-			switch {
-			case w.Pool.LastPoll == nil:
-				r.State = "" // nothing captured yet, so we assert nothing
-			case !w.Pool.LastPoll.ParseOK:
-				// The known drift mode: the panel rendered but the extractor
-				// missed. Self-heal usually catches it on the next poll.
-				r.State = "extraction_failed"
-				r.Detail = map[string]any{"age_s": w.Pool.LastPoll.AgeS, "ts": w.Pool.LastPoll.TSISO}
-			case w.Pool.StaleAfterS > 0 && w.Pool.LastPoll.AgeS > int64(w.Pool.StaleAfterS):
-				r.State = "stale"
-				r.Detail = map[string]any{
-					"age_s":         w.Pool.LastPoll.AgeS,
-					"stale_after_s": w.Pool.StaleAfterS,
+			// An account whose pool would not compute is absent from Meters,
+			// which says nothing about collection health. Staying silent
+			// leaves its recorded level alone rather than laundering a
+			// transient database error into a claim about the meter.
+			var out []events.Reading
+			for _, m := range w.Meters {
+				pool := m.Pool
+				r := events.Reading{Kind: "collection", Scope: events.Scope{Account: m.Account}}
+				switch {
+				case pool.LastPoll == nil:
+					r.State = "" // nothing captured yet, so we assert nothing
+				case !pool.LastPoll.ParseOK:
+					// The known drift mode: the panel rendered but the extractor
+					// missed. Self-heal usually catches it on the next poll.
+					r.State = "extraction_failed"
+					r.Detail = map[string]any{"age_s": pool.LastPoll.AgeS, "ts": pool.LastPoll.TSISO}
+				case pool.StaleAfterS > 0 && pool.LastPoll.AgeS > int64(pool.StaleAfterS):
+					r.State = "stale"
+					r.Detail = map[string]any{
+						"age_s":         pool.LastPoll.AgeS,
+						"stale_after_s": pool.StaleAfterS,
+					}
+				default:
+					r.State = "ok"
+					r.Detail = map[string]any{"age_s": pool.LastPoll.AgeS}
 				}
-			default:
-				r.State = "ok"
-				r.Detail = map[string]any{"age_s": w.Pool.LastPoll.AgeS}
+				out = append(out, r)
 			}
-			return []events.Reading{r}, nil
+			return out, nil
 		},
 	})
 }

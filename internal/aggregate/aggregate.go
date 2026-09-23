@@ -57,11 +57,17 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 	}
 
 	if !opts.SkipBuckets {
-		n, err := refreshBuckets(ctx, s)
+		ids, err := s.AccountIDs(ctx)
 		if err != nil {
 			return st, fmt.Errorf("refresh buckets: %w", err)
 		}
-		st.BucketsRebuilt = n
+		for _, id := range ids {
+			n, err := refreshBuckets(ctx, s, id)
+			if err != nil {
+				return st, fmt.Errorf("refresh buckets (account %d): %w", id, err)
+			}
+			st.BucketsRebuilt += n
+		}
 	}
 
 	if !opts.SkipCalibration {

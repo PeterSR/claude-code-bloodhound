@@ -11,6 +11,10 @@ import (
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
 
 	// window_days controls how far back observations go. Default 7.
 	days := 7
@@ -32,7 +36,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	out := routes.HistoryResponse{OK: true, WindowDays: days}
 
-	obs, err := s.observationsSince(ctx, cutoff)
+	obs, err := s.observationsSince(ctx, acct, cutoff)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -75,24 +79,24 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	out.BurnWindowMin = burnWindowMin
 	out.BurnRate = burnRateSeries(out.Observations, int64(burnWindowMin)*60*1000)
 
-	sessPts, err := s.Store.CalibrationPoints(ctx, "session")
+	sessPts, err := s.Store.CalibrationPoints(ctx, acct, "session")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	out.SessionCalibration = convertCalPoints(sessPts)
-	weekPts, err := s.Store.CalibrationPoints(ctx, "week")
+	weekPts, err := s.Store.CalibrationPoints(ctx, acct, "week")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	out.WeekCalibration = convertCalPoints(weekPts)
 
-	if cw, _, n, ok, _ := s.Store.LatestCalibrationMedian(ctx, "session", 10); ok {
+	if cw, _, n, ok, _ := s.Store.LatestCalibrationMedian(ctx, acct, "session", 10); ok {
 		out.LatestSessionMedianCW = round2(cw)
 		out.LatestSessionMedianN = n
 	}
-	if cw, _, n, ok, _ := s.Store.LatestCalibrationMedian(ctx, "week", 10); ok {
+	if cw, _, n, ok, _ := s.Store.LatestCalibrationMedian(ctx, acct, "week", 10); ok {
 		out.LatestWeekMedianCW = round2(cw)
 		out.LatestWeekMedianN = n
 	}
@@ -103,8 +107,8 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		       (input_tokens + output_tokens + cache_read +
 		        cache_create_5m + cache_create_1h) AS raw
 		FROM turns
-		WHERE ts_unix_ms >= ?
-	`, cutoff)
+		WHERE account_id = ? AND ts_unix_ms >= ?
+	`, acct, cutoff)
 	if err == nil {
 		defer hrows.Close()
 		for hrows.Next() {

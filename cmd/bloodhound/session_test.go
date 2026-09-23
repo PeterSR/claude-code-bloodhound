@@ -87,7 +87,7 @@ func TestBuildSessionJSON_KnownSessionWithAttribution(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ReplaceSessions: %v", err)
 	}
-	if err := s.ReplaceAttribution(ctx, "week",
+	if err := s.ReplaceAttribution(ctx, 1, "week",
 		[]store.LimitWindowRow{{Bucket: "week", StartUnixMS: 1000, EndUnixMS: 2000}},
 		[]store.AttributionRow{{Bucket: "week", WindowStartUnixMS: 1000, SessionUUID: uuid, Project: "-home-user-projects-myapp", MeasuredPct: 12.5}},
 	); err != nil {

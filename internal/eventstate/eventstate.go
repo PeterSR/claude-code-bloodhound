@@ -52,7 +52,12 @@ func Compute(ctx context.Context, s *store.Store, now time.Time, f events.Filter
 	// Deliberately non-fatal: a log read that cannot describe its own
 	// freshness is still worth returning, as long as the missing LastPoll says
 	// so rather than implying health.
-	if pool, err := nowstate.Compute(ctx, s, now); err == nil {
+	// Freshness is of the meter the filter asks about, or the primary one.
+	acct := f.Account
+	if acct == 0 {
+		acct, _ = s.PrimaryAccountID(ctx)
+	}
+	if pool, err := nowstate.Compute(ctx, s, acct, now); err == nil {
 		out.LastPoll = pool.LastPoll
 		out.StaleAfterS = pool.StaleAfterS
 		if pool.LastPoll != nil && pool.StaleAfterS > 0 {

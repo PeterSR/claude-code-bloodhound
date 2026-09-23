@@ -66,7 +66,11 @@ func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if obs, err := s.Store.LatestUsage(ctx); err == nil && obs != nil {
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
+	if obs, err := s.Store.LatestUsage(ctx, acct); err == nil && obs != nil {
 		res.LastPoll = &routes.DebugLastPollInfo{
 			TS:              obs.TSISO,
 			AgeS:            (now.UnixMilli() - obs.TSUnixMS) / 1000,
@@ -95,7 +99,7 @@ func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 		BucketCount:  bucketCount,
 		SessionCount: sessionCount,
 	}
-	if b, err := s.Store.LatestBucket(ctx); err == nil && b != nil {
+	if b, err := s.Store.LatestBucket(ctx, acct); err == nil && b != nil {
 		res.Aggregate.LatestBucket = &routes.DebugBucketSummary{
 			StartTS:       time.UnixMilli(b.StartUnixMS).UTC().Format(time.RFC3339),
 			EndTS:         time.UnixMilli(b.EndUnixMS).UTC().Format(time.RFC3339),

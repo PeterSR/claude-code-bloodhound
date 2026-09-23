@@ -6,6 +6,8 @@
  * binary, Wails' AssetServer middleware does the same proxy.
  */
 
+import { withAccount } from './account';
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -14,8 +16,9 @@ export class ApiError extends Error {
   }
 }
 
+/** GET JSON. Scoped to the account picked in the sidebar (see account.ts). */
 export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`/api${withAccount(path)}`, {
     ...init,
     headers: { Accept: 'application/json', ...(init?.headers || {}) },
   });

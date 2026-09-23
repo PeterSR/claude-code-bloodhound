@@ -21,7 +21,7 @@ import (
 // This is the simplest reasonable model and matches the POC. A future
 // refinement could anchor every historical bucket to nearby observation
 // resets, but the simple form already drives the UI well.
-func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
+func refreshBuckets(ctx context.Context, s *store.Store, accountID int64) (int, error) {
 	// Anthropic's 5-hour limit window, in milliseconds. Derived from
 	// attribute.SessPeriod rather than restated so this bucketing and
 	// attribute's own window reconstruction can never disagree about how
@@ -33,8 +33,9 @@ func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
 		       input_tokens, output_tokens, cache_read,
 		       cache_create_5m, cache_create_1h
 		FROM turns
+		WHERE account_id = ?
 		ORDER BY ts_unix_ms
-	`)
+	`, accountID)
 	if err != nil {
 		return 0, err
 	}
@@ -81,9 +82,9 @@ func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
 		var ts string
 		err := s.DB.QueryRowContext(ctx, `
 			SELECT session_reset_ts FROM usage_observations
-			WHERE session_reset_ts IS NOT NULL
+			WHERE account_id = ? AND session_reset_ts IS NOT NULL
 			ORDER BY ts_unix_ms DESC LIMIT 1
-		`).Scan(&ts)
+		`, accountID).Scan(&ts)
 		if err == nil {
 			if t, ok := parseISO(ts); ok {
 				resetMS = t
@@ -110,7 +111,7 @@ func refreshBuckets(ctx context.Context, s *store.Store) (int, error) {
 		out = append(out, row)
 	}
 
-	if err := s.ReplaceBuckets(ctx, out); err != nil {
+	if err := s.ReplaceBuckets(ctx, accountID, out); err != nil {
 		return 0, err
 	}
 	return len(out), nil

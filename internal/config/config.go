@@ -62,6 +62,12 @@ type Config struct {
 	// /usage scraper. Empty means look up "claude" on $PATH.
 	ClaudeBinary string `json:"claude_binary"`
 
+	// ClaudeDirs lists the Claude Code config dirs to watch, one per account
+	// for people who run several with CLAUDE_CONFIG_DIR. Each is ingested
+	// and polled for /usage separately. Empty means just ~/.claude. A leading
+	// "~/" is expanded. Resolve with ClaudeConfigDirs rather than reading it.
+	ClaudeDirs []string `json:"claude_dirs,omitempty"`
+
 	// StatuslinePrefix is prepended to the `bloodhound status` output. The
 	// default emoji renders nicely in most modern terminals; on terminals
 	// that don't, set it to "BH" or "" via config.json.

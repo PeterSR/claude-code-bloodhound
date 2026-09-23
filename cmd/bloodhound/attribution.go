@@ -297,9 +297,13 @@ func runAttributionRollup(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
+	acct, err := cliAccount(ctx, s)
+	if err != nil {
+		return err
+	}
 	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 
-	windows, err := s.ListLimitWindows(ctx, bucket, since)
+	windows, err := s.ListLimitWindows(ctx, acct, bucket, since)
 	if err != nil {
 		return err
 	}
@@ -316,7 +320,7 @@ func runAttributionRollup(cmd *cobra.Command, args []string) error {
 	if windowFilter == "current" {
 		curWindows := windows
 		if curSince := attrCurrentWindowSince(bucket); curSince < since {
-			if curWindows, err = s.ListLimitWindows(ctx, bucket, curSince); err != nil {
+			if curWindows, err = s.ListLimitWindows(ctx, acct, bucket, curSince); err != nil {
 				return err
 			}
 		}
@@ -335,11 +339,11 @@ func runAttributionRollup(cmd *cobra.Command, args []string) error {
 	var groups []store.AttributionGroup
 	var slices []store.AttributionRow
 	if windowOpen {
-		if groups, err = s.GroupAttribution(ctx, bucket, by, since); err != nil {
+		if groups, err = s.GroupAttribution(ctx, acct, bucket, by, since); err != nil {
 			return err
 		}
 		if attrPerWindow {
-			if slices, err = s.WindowSlices(ctx, bucket, since); err != nil {
+			if slices, err = s.WindowSlices(ctx, acct, bucket, since); err != nil {
 				return err
 			}
 		}
@@ -685,16 +689,20 @@ func runAttributionWindows(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
+	acct, err := cliAccount(ctx, s)
+	if err != nil {
+		return err
+	}
 	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 
-	windows, err := s.ListLimitWindows(ctx, bucket, since)
+	windows, err := s.ListLimitWindows(ctx, acct, bucket, since)
 	if err != nil {
 		return err
 	}
 
 	var bySlices map[int64][]store.AttributionRow
 	if attrSlices {
-		rows, err := s.WindowSlices(ctx, bucket, since)
+		rows, err := s.WindowSlices(ctx, acct, bucket, since)
 		if err != nil {
 			return err
 		}

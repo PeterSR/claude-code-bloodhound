@@ -19,6 +19,10 @@ const divergenceTol = 0.25
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
 
 	days := clampQueryInt(r, "window_days", 30, 1, 365)
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
@@ -37,7 +41,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	// An unpriced model has no honest cost-weighted share, so it is held
 	// out of the attribution (shown separately in raw terms) rather than
 	// folded in at the fallback rate.
-	totals, err := s.modelTotals(ctx, cutoff)
+	totals, err := s.modelTotals(ctx, acct, cutoff)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -60,7 +64,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	out.TotalCWTokens = round2(out.TotalCWTokens)
 
 	// Daily attribution.
-	out.Days, err = s.modelDays(ctx, cutoff)
+	out.Days, err = s.modelDays(ctx, acct, cutoff)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -72,7 +76,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	// list-vs-measured, and an unpriced model has no list side.
 	weightModels := totals
 	if weightsSince != cutoff {
-		if weightModels, err = s.modelTotals(ctx, weightsSince); err != nil {
+		// Prices are per model, not per account, so the weight estimate
+		// pools every account's turns.
+		if weightModels, err = s.modelTotals(ctx, 0, weightsSince); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -92,7 +98,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) modelTotals(ctx context.Context, cutoff int64) ([]routes.ModelTotal, error) {
+// acct 0 means every account.
+func (s *Server) modelTotals(ctx context.Context, acct, cutoff int64) ([]routes.ModelTotal, error) {
 	// HAVING cw > 0 drops pseudo-models that never spent anything. Claude
 	// Code writes "<synthetic>" as the model on messages it generates
 	// itself (API errors, interrupts); every token column on those rows is
@@ -103,10 +110,10 @@ func (s *Server) modelTotals(ctx context.Context, cutoff int64) ([]routes.ModelT
 		       COALESCE(SUM(`+sessioninsight.RawExpr+`), 0) AS raw,
 		       COALESCE(SUM(`+sessioninsight.CWExpr()+`), 0) AS cw
 		FROM turns
-		WHERE ts_unix_ms >= ?
+		WHERE ts_unix_ms >= ? AND (? = 0 OR account_id = ?)
 		GROUP BY model
 		HAVING cw > 0
-	`, cutoff)
+	`, cutoff, acct, acct)
 	if err != nil {
 		return nil, err
 	}
@@ -142,12 +149,12 @@ func (s *Server) modelTotals(ctx context.Context, cutoff int64) ([]routes.ModelT
 // modelDays buckets spend into local calendar days. Bucketing happens in
 // Go rather than SQL so day boundaries follow the user's timezone (and its
 // DST shifts) instead of UTC.
-func (s *Server) modelDays(ctx context.Context, cutoff int64) ([]routes.ModelDay, error) {
+func (s *Server) modelDays(ctx context.Context, acct, cutoff int64) ([]routes.ModelDay, error) {
 	rows, err := s.Store.DB.QueryContext(ctx, `
 		SELECT ts_unix_ms, model, `+sessioninsight.CWExpr()+` AS cw
 		FROM turns
-		WHERE ts_unix_ms >= ?
-	`, cutoff)
+		WHERE ts_unix_ms >= ? AND account_id = ?
+	`, cutoff, acct)
 	if err != nil {
 		return nil, err
 	}

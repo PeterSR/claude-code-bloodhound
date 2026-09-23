@@ -54,6 +54,9 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 		// than depending on Go's map iteration order.
 		cwdCounts map[string]int
 		cwdOrder  []string
+		// accountID is the account of the session's latest turn. A session
+		// that spans a /login switch is filed under where it ended up.
+		accountID int64
 		// 5h-rolling
 		weights []int64
 		times   []int64
@@ -70,7 +73,7 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 		SELECT session_uuid, project, ts_unix_ms, model,
 		       input_tokens, output_tokens, cache_read,
 		       cache_create_5m, cache_create_1h, classification,
-		       parent_session_uuid, cwd
+		       parent_session_uuid, cwd, account_id
 		FROM turns
 		ORDER BY session_uuid, ts_unix_ms
 	`)
@@ -85,8 +88,9 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 			tsMS                        int64
 			in, out, cr, cw5m, cw1h     int64
 			parentUUID, cwd             string
+			accountID                   int64
 		)
-		if err := rows.Scan(&uuid, &project, &tsMS, &model, &in, &out, &cr, &cw5m, &cw1h, &class, &parentUUID, &cwd); err != nil {
+		if err := rows.Scan(&uuid, &project, &tsMS, &model, &in, &out, &cr, &cw5m, &cw1h, &class, &parentUUID, &cwd, &accountID); err != nil {
 			return 0, err
 		}
 		a, ok := acc[uuid]
@@ -107,6 +111,7 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 			a.cwdCounts[cwd]++
 		}
 		a.lastTSMS = tsMS
+		a.accountID = accountID
 		a.turnCount++
 		w := in + out + cr + cw5m + cw1h
 		a.rawTokens += w
@@ -217,6 +222,7 @@ func refreshSessions(ctx context.Context, s *store.Store) (int, error) {
 			Models:              strings.Join(models, ","),
 			ParentSessionUUID:   a.parentSessionUUID,
 			Cwd:                 cwd,
+			AccountID:           a.accountID,
 		})
 	}
 

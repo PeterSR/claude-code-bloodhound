@@ -37,6 +37,10 @@ type Scope struct {
 	// span many directories, so a directory-scoped level needs its own slot
 	// rather than borrowing Project.
 	Cwd string `json:"cwd,omitempty"`
+	// Account is the Claude account whose meter a reading is about. 0 means
+	// not account-scoped. Each account has its own meter, so meter facts carry
+	// it and session or directory facts leave it at 0.
+	Account int64 `json:"account,omitempty"`
 }
 
 // Event is one recorded transition.
@@ -95,6 +99,11 @@ type World struct {
 	Now  time.Time
 	Pool *routes.NowResponse
 
+	// Meters is one pool per account that has a meter, primary first. Meter
+	// sensors report on every one of them; Pool above is the primary's, for
+	// sensors that are about a session or directory rather than a meter.
+	Meters []AccountPool
+
 	// TokensPerPctCW converts cost-weighted tokens into percentage points.
 	// Shared here for the same reason Pool is: several sensors want it and
 	// none of them should be re-deriving it. HasCalibration is false when
@@ -102,6 +111,12 @@ type World struct {
 	// an Insight are absent rather than zero.
 	TokensPerPctCW float64
 	HasCalibration bool
+}
+
+// AccountPool is one account's meter as nowstate.Compute sees it.
+type AccountPool struct {
+	Account int64
+	Pool    *routes.NowResponse
 }
 
 // Sensor answers "what is true now" for one family of facts. Pure: the same

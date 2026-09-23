@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/account"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/events/sensors"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
@@ -15,8 +17,9 @@ import (
 )
 
 var (
-	pollJSON     bool
-	pollTimeoutS int
+	pollJSON      bool
+	pollTimeoutS  int
+	pollClaudeDir string
 )
 
 var pollCmd = &cobra.Command{
@@ -51,12 +54,31 @@ re-learn the extractor against a fresh capture.`,
 		}
 		defer s.Close()
 
+		dir := pollClaudeDir
+		if dir == "" {
+			dirs, err := config.ClaudeConfigDirs(cfg)
+			if err != nil {
+				return err
+			}
+			dir = dirs[0]
+		} else if dir, err = filepath.Abs(dir); err != nil {
+			return err
+		}
+		accountID, ident, err := account.Observe(ctx, s, dir, time.Now())
+		if err != nil {
+			return fmt.Errorf("account: %w", err)
+		}
+		if !ident.OAuth {
+			return fmt.Errorf("%s has no subscription login, so it has no /usage meter", dir)
+		}
+
 		res, fetchErr := usage.Fetch(ctx, usage.Options{
 			ClaudeBinary: cfg.ClaudeBinary,
 			Timeout:      time.Duration(pollTimeoutS-3) * time.Second,
+			ConfigDir:    dir,
 		})
 
-		obs, recErr := s.RecordUsage(ctx, res, fetchErr)
+		obs, recErr := s.RecordUsage(ctx, accountID, res, fetchErr)
 		if recErr != nil {
 			return fmt.Errorf("record: %w", recErr)
 		}
@@ -138,5 +160,7 @@ func asWriter(w writerOnly) writerOnly { return w }
 func init() {
 	pollCmd.Flags().BoolVar(&pollJSON, "json", false, "emit JSON instead of human text")
 	pollCmd.Flags().IntVar(&pollTimeoutS, "timeout", 30, "overall timeout in seconds")
+	pollCmd.Flags().StringVar(&pollClaudeDir, "claude-dir", "",
+		"Claude Code config dir whose account to scrape (default: the first of claude_dirs)")
 	rootCmd.AddCommand(pollCmd)
 }

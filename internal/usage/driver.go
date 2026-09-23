@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/pty"
 )
 
@@ -79,7 +80,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 	// scratch with the bits the panel actually needs, rather than
 	// inheriting our parent's — keeps the spawn behaviour identical
 	// whether we're launched from a shell or a service manager.
-	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(configDirEnv(cmd.Environ(), opts.ConfigDir), "TERM=xterm-256color")
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		return nil, err
@@ -270,4 +271,20 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 	}
 
 	return result(), nil
+}
+
+// configDirEnv points the spawned claude at dir's account. An inherited
+// CLAUDE_CONFIG_DIR is always dropped first, so the default dir really is
+// the default even when the daemon was started from a shell that set one.
+func configDirEnv(env []string, dir string) []string {
+	out := env[:0:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "CLAUDE_CONFIG_DIR=") {
+			out = append(out, e)
+		}
+	}
+	if dir != "" && !config.IsDefaultClaudeDir(dir) {
+		out = append(out, "CLAUDE_CONFIG_DIR="+dir)
+	}
+	return out
 }

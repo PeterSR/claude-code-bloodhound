@@ -9,6 +9,10 @@ import (
 
 func (s *Server) handleLeaks(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
 	out := routes.LeaksResponse{}
 
 	// Per-class token sums. We use raw (in + out + cr + cw5m + cw1h) here
@@ -20,8 +24,9 @@ func (s *Server) handleLeaks(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(SUM(`+sessioninsight.RawExpr+`), 0) AS raw,
 		       COALESCE(SUM(`+sessioninsight.CWExpr()+`), 0) AS cw
 		FROM turns
+		WHERE account_id = ?
 		GROUP BY classification
-	`)
+	`, acct)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -57,8 +62,8 @@ func (s *Server) handleLeaks(w http.ResponseWriter, r *http.Request) {
 	if err := s.Store.DB.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(prefix_tokens_est), 0)
 		FROM compactions
-		WHERE confirmed = 1 AND cache_state = 'cold'
-	`).Scan(&out.ColdCompactionCount, &out.ColdCompactionTokens); err != nil {
+		WHERE confirmed = 1 AND cache_state = 'cold' AND account_id = ?
+	`, acct).Scan(&out.ColdCompactionCount, &out.ColdCompactionTokens); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
@@ -78,9 +83,10 @@ func (s *Server) handleLeaks(w http.ResponseWriter, r *http.Request) {
 		            AND classification IN ('idle_miss', 'rotation', 'restructure')
 		       ), 0) AS leak_tokens
 		FROM sessions s
+		WHERE s.account_id = ?
 		ORDER BY leak_tokens DESC
 		LIMIT 25
-	`)
+	`, acct)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return

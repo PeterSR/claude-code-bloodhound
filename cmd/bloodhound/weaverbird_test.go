@@ -620,7 +620,7 @@ func TestWeaverbirdValue_SingleObservation_NoBurnYet(t *testing.T) {
 	}
 
 	sessionPct, weekPct := 20, 30
-	if _, err := s.RecordUsage(ctx, usage.Result{
+	if _, err := s.RecordUsage(ctx, 1, usage.Result{
 		OK:         true,
 		FetchedAt:  time.Now(),
 		SessionPct: &sessionPct,
@@ -680,14 +680,14 @@ func TestWeaverbirdValue_TwoObservations_BurnAppears(t *testing.T) {
 
 	first, second := 20, 35
 	now := time.Now()
-	if _, err := s.RecordUsage(ctx, usage.Result{
+	if _, err := s.RecordUsage(ctx, 1, usage.Result{
 		OK:         true,
 		FetchedAt:  now.Add(-30 * time.Minute),
 		SessionPct: &first,
 	}, nil); err != nil {
 		t.Fatalf("RecordUsage (first): %v", err)
 	}
-	if _, err := s.RecordUsage(ctx, usage.Result{
+	if _, err := s.RecordUsage(ctx, 1, usage.Result{
 		OK:         true,
 		FetchedAt:  now,
 		SessionPct: &second,
@@ -769,7 +769,7 @@ func TestStatusCommand_OutputUnchanged_WithObservation(t *testing.T) {
 	}
 
 	sessionPct, weekPct := 42, 68
-	if _, err := s.RecordUsage(ctx, usage.Result{
+	if _, err := s.RecordUsage(ctx, 1, usage.Result{
 		OK:         true,
 		FetchedAt:  time.Now(),
 		SessionPct: &sessionPct,

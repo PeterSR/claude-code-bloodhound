@@ -249,7 +249,11 @@ func nullInt64Ptr(n sql.NullInt64) *int64 {
 // This is the only writer of retired_why = "expired", and it runs from the
 // daemon's reconcile pass so a budget dies on schedule rather than the next
 // time somebody happens to look at it.
-func (s *Store) SettleBudgets(ctx context.Context, now time.Time, windowEnd map[string]int64) ([]budget.Budget, error) {
+//
+// windowEnd gives, per budget, the end of each bucket's current window on the
+// meter that budget is measured against; each account has its own windows.
+// Nil means no window is known anywhere.
+func (s *Store) SettleBudgets(ctx context.Context, now time.Time, windowEnd func(budget.Budget) map[string]int64) ([]budget.Budget, error) {
 	live, err := s.ListBudgets(ctx, false)
 	if err != nil {
 		return nil, err
@@ -260,7 +264,11 @@ func (s *Store) SettleBudgets(ctx context.Context, now time.Time, windowEnd map[
 	for i := range live {
 		b := &live[i]
 		before := expiredIDs(*b)
-		alive := budget.SettleLeases(b, now, windowEnd)
+		var ends map[string]int64
+		if windowEnd != nil {
+			ends = windowEnd(*b)
+		}
+		alive := budget.SettleLeases(b, now, ends)
 
 		// One transaction per budget. Everything that ends a budget has to
 		// land together or not at all: without it, a crash between the retire

@@ -59,7 +59,11 @@ func runNow(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	out, err := nowstate.Compute(ctx, s, time.Now())
+	acct, err := cliAccount(ctx, s)
+	if err != nil {
+		return err
+	}
+	out, err := nowstate.Compute(ctx, s, acct, time.Now())
 	if err != nil {
 		return err
 	}

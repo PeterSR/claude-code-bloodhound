@@ -9,8 +9,9 @@ package routes
 // bucket "5h" a session that ran across several windows can exceed 100: read
 // its total as "1.4 five-hour budgets" and its peak as the worst single one.
 type AttributionResponse struct {
-	OK     bool   `json:"ok"`
-	Bucket string `json:"bucket"` // "week" | "5h"
+	OK        bool   `json:"ok"`
+	AccountID int64  `json:"account_id"` // whose meter; see ?account=
+	Bucket    string `json:"bucket"`     // "week" | "5h"
 	// By is how each window's slices are grouped: "project", "session", or
 	// "cwd". All three rollup tables (Projects, Sessions, Cwds) are
 	// returned regardless; By only selects which grouping the per-window

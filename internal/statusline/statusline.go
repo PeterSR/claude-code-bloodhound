@@ -38,7 +38,16 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 		prefix += " "
 	}
 
-	obs, err := s.LatestUsage(ctx)
+	// The line shows the meter of the account this session is spending,
+	// which is what the person in it can actually run out of.
+	var accountID int64
+	if sessionUUID != "" {
+		accountID, _ = s.AccountForSession(ctx, sessionUUID)
+	} else {
+		accountID, _ = s.PrimaryAccountID(ctx)
+	}
+
+	obs, err := s.LatestUsage(ctx, accountID)
 	if err != nil || obs == nil {
 		return prefix + "no data"
 	}
@@ -60,7 +69,7 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 	// when nothing has ever parsed is there genuinely nothing to say.
 	staleMark := ""
 	if !obs.ParseOK {
-		prev, prevErr := s.LatestParsedUsage(ctx)
+		prev, prevErr := s.LatestParsedUsage(ctx, accountID)
 		if prevErr != nil || prev == nil {
 			return prefix + "extraction failed"
 		}
@@ -71,12 +80,12 @@ func Render(ctx context.Context, cfg config.Config, s *store.Store, now time.Tim
 	parts := []string{}
 
 	if obs.SessionPct != nil {
-		sessPts, _ := s.SessionPctSinceLastReset(ctx)
+		sessPts, _ := s.SessionPctSinceLastReset(ctx, accountID)
 		parts = append(parts, formatBucket(*obs.SessionPct, "5h",
 			obs.SessionResetTSISO, sessPts, now))
 	}
 	if obs.WeekPct != nil {
-		weekPts, _ := s.WeekPctSinceLastReset(ctx)
+		weekPts, _ := s.WeekPctSinceLastReset(ctx, accountID)
 		parts = append(parts, formatBucket(*obs.WeekPct, "wk",
 			obs.WeekResetTSISO, weekPts, now))
 	}
@@ -121,7 +130,8 @@ func formatActiveSession(ctx context.Context, cfg config.Config, s *store.Store,
 		return ""
 	}
 
-	tokensPerPct, _, _, hasCal, _ := s.LatestCalibrationMedian(ctx, "session", 10)
+	acct, _ := s.AccountForSession(ctx, ref.UUID)
+	tokensPerPct, _, _, hasCal, _ := s.LatestCalibrationMedian(ctx, acct, "session", 10)
 	ins := sessioninsight.ForSession(ctx, s.DB, *ref, now, tokensPerPct, hasCal)
 	return formatActiveSegment(ins)
 }

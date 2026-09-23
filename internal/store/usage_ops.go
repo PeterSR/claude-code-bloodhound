@@ -31,8 +31,9 @@ type Observation struct {
 
 // RecordUsage persists a /usage scrape (success or failure) into raw_dumps +
 // usage_observations, computes simple reset detection against the prior
-// observation, and returns a summary of what landed.
-func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr error) (Observation, error) {
+// observation of the same account, and returns a summary of what landed.
+// accountID is the account the polled config dir was logged in to.
+func (s *Store) RecordUsage(ctx context.Context, accountID int64, res usage.Result, fetchErr error) (Observation, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Observation{}, err
@@ -115,15 +116,15 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 			session_reset_detected, week_reset_detected,
 			session_saturated, week_saturated,
 			session_pct_valid, week_pct_valid,
-			elapsed_s, parse_ok
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1, 1, ?, ?)`,
+			elapsed_s, parse_ok, account_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1, 1, ?, ?, ?)`,
 		tsISO, tsMS,
 		nullInt(sessionPct), nullInt(weekPct),
 		nullStr(sessionResetRaw), nullStr(weekResetRaw),
 		nullStr(sessionResetTS), nullStr(weekResetTS),
 		dumpID,
 		sessionSaturated, weekSaturated,
-		res.ElapsedS, parseOK,
+		res.ElapsedS, parseOK, accountOr1(accountID),
 	)
 	if err != nil {
 		return Observation{}, err
@@ -167,7 +168,7 @@ func (s *Store) RecordUsage(ctx context.Context, res usage.Result, fetchErr erro
 			detail["pct"] = e.pct.Int64
 		}
 		if _, err := events.AppendTx(ctx, tx, tsMS, "window.reset",
-			events.Scope{Bucket: e.bucket}, detail); err != nil {
+			events.Scope{Bucket: e.bucket, Account: accountOr1(accountID)}, detail); err != nil {
 			return Observation{}, err
 		}
 	}

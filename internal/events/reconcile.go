@@ -21,6 +21,7 @@ type Stats struct {
 // levelKey identifies one level track.
 type levelKey struct {
 	kind, bucket, session, cwd string
+	account                    int64
 }
 
 // Reconcile runs every registered sensor once, diffs each reading against
@@ -119,14 +120,14 @@ func applyReadingsOnce(ctx context.Context, db *sql.DB, now time.Time, readings 
 	defer func() { _ = tx.Rollback() }()
 
 	current := map[levelKey]string{}
-	rows, err := tx.QueryContext(ctx, `SELECT kind, bucket, session_uuid, cwd, state FROM event_levels`)
+	rows, err := tx.QueryContext(ctx, `SELECT kind, bucket, session_uuid, cwd, account_id, state FROM event_levels`)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var k levelKey
 		var state string
-		if err := rows.Scan(&k.kind, &k.bucket, &k.session, &k.cwd, &state); err != nil {
+		if err := rows.Scan(&k.kind, &k.bucket, &k.session, &k.cwd, &k.account, &state); err != nil {
 			rows.Close()
 			return err
 		}
@@ -144,7 +145,7 @@ func applyReadingsOnce(ctx context.Context, db *sql.DB, now time.Time, readings 
 		if state == "" {
 			state = StateUnknown
 		}
-		k := levelKey{r.Kind, r.Scope.Bucket, r.Scope.Session, r.Scope.Cwd}
+		k := levelKey{r.Kind, r.Scope.Bucket, r.Scope.Session, r.Scope.Cwd, r.Scope.Account}
 
 		prev, had := current[k]
 		if had && prev == state {
@@ -183,10 +184,10 @@ func applyReadingsOnce(ctx context.Context, db *sql.DB, now time.Time, readings 
 
 func upsertLevel(ctx context.Context, ex execer, k levelKey, state string, tsMS int64) error {
 	_, err := ex.ExecContext(ctx, `
-		INSERT INTO event_levels (kind, bucket, session_uuid, cwd, state, since_ms)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(kind, bucket, session_uuid, cwd)
+		INSERT INTO event_levels (kind, bucket, session_uuid, cwd, account_id, state, since_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(kind, bucket, session_uuid, cwd, account_id)
 		DO UPDATE SET state = excluded.state, since_ms = excluded.since_ms`,
-		k.kind, k.bucket, k.session, k.cwd, state, tsMS)
+		k.kind, k.bucket, k.session, k.cwd, k.account, state, tsMS)
 	return err
 }

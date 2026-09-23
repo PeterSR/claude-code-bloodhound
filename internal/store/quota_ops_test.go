@@ -45,7 +45,7 @@ func TestARefusalIsEvidenceOnlyUntilItsWindowReopens(t *testing.T) {
 	reset := now.Add(40 * time.Minute)
 	saveSignals(t, s, ctx, "session-abc12345", refused("session-abc12345", now.Add(-time.Hour), reset, false))
 
-	v, err := s.QuotaNow(ctx, now.UnixMilli())
+	v, err := s.QuotaNow(ctx, 1, now.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestARefusalIsEvidenceOnlyUntilItsWindowReopens(t *testing.T) {
 		t.Fatalf("want a live refusal with the offer on it, got %+v", v)
 	}
 
-	after, err := s.QuotaNow(ctx, reset.Add(time.Minute).UnixMilli())
+	after, err := s.QuotaNow(ctx, 1, reset.Add(time.Minute).UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestLowPriorityRunsUntilTheWindowItStandsInFor(t *testing.T) {
 		priority("session-abc12345", "low_priority_on", now.Add(-4*time.Minute)),
 	)
 
-	v, err := s.QuotaNow(ctx, now.UnixMilli())
+	v, err := s.QuotaNow(ctx, 1, now.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestLowPriorityRunsUntilTheWindowItStandsInFor(t *testing.T) {
 		t.Errorf("until = %d, want the refusal's own reset %d", v.LowPriorityUntilMS, reset.UnixMilli())
 	}
 
-	after, err := s.QuotaNow(ctx, reset.Add(time.Minute).UnixMilli())
+	after, err := s.QuotaNow(ctx, 1, reset.Add(time.Minute).UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestSwitchingLowPriorityOffEndsItEarly(t *testing.T) {
 		priority("session-abc12345", "low_priority_off", now.Add(-2*time.Minute)),
 	)
 
-	v, err := s.QuotaNow(ctx, now.UnixMilli())
+	v, err := s.QuotaNow(ctx, 1, now.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestOneSessionLeavingLowPriorityDoesNotSpeakForTheOthers(t *testing.T) {
 		priority("session-def67890", "low_priority_on", now.Add(-20*time.Minute)),
 	)
 
-	v, err := s.QuotaNow(ctx, now.UnixMilli())
+	v, err := s.QuotaNow(ctx, 1, now.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestExtraUsageAndRefusalAreDifferentAnswers(t *testing.T) {
 	saveSignals(t, s, ctx, "session-abc12345",
 		refused("session-abc12345", now.Add(-time.Minute), now.Add(time.Hour), true))
 
-	v, err := s.QuotaNow(ctx, now.UnixMilli())
+	v, err := s.QuotaNow(ctx, 1, now.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestExtraUsageAndRefusalAreDifferentAnswers(t *testing.T) {
 
 func TestNoSignalsMeansNoClaim(t *testing.T) {
 	s, ctx := budgetStore(t)
-	v, err := s.QuotaNow(ctx, time.Now().UnixMilli())
+	v, err := s.QuotaNow(ctx, 1, time.Now().UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}

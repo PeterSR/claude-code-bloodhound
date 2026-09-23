@@ -388,3 +388,76 @@ func mustWriteJSONL(t *testing.T, path string, records []map[string]any) {
 		}
 	}
 }
+
+// TestRun_TwoConfigDirsAttributeToTheirOwnAccounts drives Run over the
+// default dir and a CLAUDE_CONFIG_DIR-style second one, each logged in to a
+// different account. Every turn must land on its own dir's account, and the
+// default dir must take over the placeholder row that owns pre-accounts data.
+func TestRun_TwoConfigDirsAttributeToTheirOwnAccounts(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	t.Setenv("XDG_STATE_HOME", dataDir)
+	t.Setenv("XDG_CONFIG_HOME", dataDir)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	ctx := context.Background()
+	s, err := store.Open(ctx)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.DB.Close()
+
+	personal := filepath.Join(home, ".claude")
+	work := filepath.Join(home, ".claude-work")
+	writeState := func(path, uuid string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"oauthAccount":{"accountUuid":"` + uuid + `","organizationUuid":"org-` + uuid + `"}}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeState(filepath.Join(home, ".claude.json"), "acc-personal")
+	writeState(filepath.Join(work, ".claude.json"), "acc-work")
+
+	const (
+		personalSession = "11111111-1111-1111-1111-111111111111"
+		workSession     = "22222222-2222-2222-2222-222222222222"
+	)
+	mustWriteJSONL(t, filepath.Join(personal, "projects", "p", personalSession+".jsonl"), []map[string]any{
+		assistantRecord("2026-01-01T00:00:00Z", "req_p", "msg_p", "claude-x", usageMap(100, 10, 0, 0, 0)),
+	})
+	mustWriteJSONL(t, filepath.Join(work, "projects", "p", workSession+".jsonl"), []map[string]any{
+		assistantRecord("2026-01-01T00:00:00Z", "req_w", "msg_w", "claude-x", usageMap(100, 10, 0, 0, 0)),
+	})
+
+	stats, err := Run(ctx, s, Options{ConfigDirs: []string{personal, work}, MinFileSize: 1})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(stats.Errors) > 0 {
+		t.Fatalf("Run errors: %v", stats.Errors)
+	}
+	if stats.Accounts[personal] != store.PlaceholderAccountID {
+		t.Errorf("default dir account = %d, want the placeholder it claims", stats.Accounts[personal])
+	}
+	if stats.Accounts[work] == stats.Accounts[personal] || stats.Accounts[work] == 0 {
+		t.Fatalf("work dir account = %d, want its own", stats.Accounts[work])
+	}
+
+	for session, want := range map[string]int64{
+		personalSession: stats.Accounts[personal],
+		workSession:     stats.Accounts[work],
+	} {
+		var got int64
+		if err := s.DB.QueryRow(`SELECT account_id FROM turns WHERE session_uuid = ?`, session).Scan(&got); err != nil {
+			t.Fatalf("turn for %s: %v", session, err)
+		}
+		if got != want {
+			t.Errorf("session %s turn account = %d, want %d", session, got, want)
+		}
+	}
+}

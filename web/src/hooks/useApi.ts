@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiGet, ApiError } from '../api/client';
+import { useAccount } from '../api/account';
 
 type ApiState<T> = {
   data: T | null;
@@ -19,6 +20,8 @@ export function useApi<T>(path: string, refreshIntervalMs?: number): ApiState<T>
   const [error, setError] = useState<Error | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   const [tick, setTick] = useState(0);
+  // Switching account in the sidebar re-reads every mounted page.
+  const account = useAccount();
 
   useEffect(() => {
     let cancelled = false;
@@ -56,7 +59,7 @@ export function useApi<T>(path: string, refreshIntervalMs?: number): ApiState<T>
       cancelled = true;
       if (interval) window.clearInterval(interval);
     };
-  }, [path, refreshIntervalMs, tick]);
+  }, [path, refreshIntervalMs, tick, account]);
 
   return {
     data,

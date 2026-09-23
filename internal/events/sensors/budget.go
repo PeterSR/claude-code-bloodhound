@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/budget"
 	"github.com/PeterSR/claude-code-bloodhound/internal/events"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
@@ -59,60 +60,105 @@ func readBudgetPressure(ctx context.Context, w events.World) ([]events.Reading, 
 		return nil, fmt.Errorf("prune orphan budget levels: %w", err)
 	}
 
+	// A budget is measured on the meter of the account its directory spends
+	// on: the account of the directory's newest turn. Everything below is
+	// computed per account, once, and shared by that account's budgets.
+	accountOf := map[string]int64{}
+	var lookupErr error
+	accountFor := func(cwd string) int64 {
+		if id, ok := accountOf[cwd]; ok {
+			return id
+		}
+		id, err := s.AccountForCwd(ctx, cwd)
+		if err != nil && lookupErr == nil {
+			lookupErr = err
+		}
+		accountOf[cwd] = id
+		return id
+	}
+	endsOf := map[int64]map[string]int64{}
+	endsFor := func(acct int64) map[string]int64 {
+		if m, ok := endsOf[acct]; ok {
+			return m
+		}
+		m, err := currentWindowEnds(ctx, s, acct, w.Now)
+		if err != nil && lookupErr == nil {
+			lookupErr = err
+		}
+		endsOf[acct] = m
+		return m
+	}
+
 	// Settling first means a budget whose last lease ran out stops producing
 	// readings on the same tick it dies, rather than one tick later.
-	windowEnds, err := currentWindowEnds(ctx, s, w.Now)
-	if err != nil {
-		return nil, err
-	}
-	live, err := s.SettleBudgets(ctx, w.Now, windowEnds)
+	live, err := s.SettleBudgets(ctx, w.Now, func(b budget.Budget) map[string]int64 {
+		return endsFor(accountFor(b.Cwd))
+	})
 	if err != nil {
 		return nil, fmt.Errorf("settle budgets: %w", err)
+	}
+	if lookupErr != nil {
+		return nil, lookupErr
 	}
 	if len(live) == 0 {
 		return nil, nil
 	}
 
-	// Attribution per directory, computed once per bucket rather than once per
-	// budget: several directories usually share a bucket and the query is the
-	// expensive part.
+	pools := map[int64]*routes.NowResponse{}
+	for _, m := range w.Meters {
+		pools[m.Account] = m.Pool
+	}
+
+	// Attribution per directory, computed once per (account, bucket) rather
+	// than once per budget: several directories usually share a bucket and
+	// the query is the expensive part.
 	// measured records that the bucket's open window WAS queried, separately
 	// from what the query returned. A nil map and an absent key are both falsy
 	// on lookup, so without this a bucket with no open window would read as
 	// "measured, zero spent" and every spend rule would report clear off a
 	// measurement that never happened.
-	attributed := map[string]map[string]float64{}
-	measured := map[string]bool{}
-	for _, bucket := range []string{budget.BucketSession, budget.BucketWeek} {
-		if !bucketWanted(live, bucket) {
+	type acctBucket struct {
+		account int64
+		bucket  string
+	}
+	attributed := map[acctBucket]map[string]float64{}
+	measured := map[acctBucket]bool{}
+	for _, b := range live {
+		k := acctBucket{accountFor(b.Cwd), b.Bucket}
+		if _, done := measured[k]; done {
 			continue
 		}
-		byCwd, ok, err := currentWindowByCwd(ctx, s, bucket, w.Now)
+		byCwd, ok, err := currentWindowByCwd(ctx, s, k.account, k.bucket, w.Now)
 		if err != nil {
 			return nil, err
 		}
-		attributed[bucket], measured[bucket] = byCwd, ok
+		attributed[k], measured[k] = byCwd, ok
 	}
 
 	var out []events.Reading
 	for _, b := range live {
+		acct := accountFor(b.Cwd)
+		k := acctBucket{acct, b.Bucket}
 		win := budget.Window{}
 		// meter is the bucket's live window, kept past the read because the
 		// reading wants its reset as well as its percentage. Its reset is the
 		// one /usage shows the user, which is not always the millisecond
 		// windowEnds derives from the stored limit windows below; the message
 		// should agree with the panel the reader can go and look at.
-		meter := buckets(w.Pool)[b.Bucket]
+		var meter *routes.NowWindow
+		if pool := pools[acct]; pool != nil {
+			meter = buckets(pool)[b.Bucket]
+		}
 		if meter != nil {
 			win.Pct, win.PctKnown = meter.Pct, true
 		}
-		if measured[b.Bucket] {
+		if measured[k] {
 			// A directory absent from the rollup caused no measured movement
 			// in this window, which is a real zero rather than a gap: the
 			// query covered the window, the directory simply is not in it.
-			win.AttributedPct, win.AttributedKnown = attributed[b.Bucket][b.Cwd], true
+			win.AttributedPct, win.AttributedKnown = attributed[k][b.Cwd], true
 		}
-		win.EndMS = windowEnds[b.Bucket]
+		win.EndMS = endsFor(acct)[b.Bucket]
 
 		p := budget.Evaluate(b, win)
 		r := events.Reading{
@@ -161,11 +207,11 @@ func bucketWanted(bs []budget.Budget, bucket string) bool {
 // the lease, which then silently rolls to the end of the next window: up to
 // five hours late for the session bucket and a week for the weekly one. The
 // closed rows were in the store the whole time; the lease just never looked.
-func currentWindowEnds(ctx context.Context, s *store.Store, now time.Time) (map[string]int64, error) {
+func currentWindowEnds(ctx context.Context, s *store.Store, accountID int64, now time.Time) (map[string]int64, error) {
 	out := map[string]int64{}
 	for _, bucket := range []string{budget.BucketSession, budget.BucketWeek} {
 		since := now.Add(-budgetLookback[bucket]).UnixMilli()
-		windows, err := s.ListLimitWindows(ctx, budget.AttributeBucket(bucket), since)
+		windows, err := s.ListLimitWindows(ctx, accountID, budget.AttributeBucket(bucket), since)
 		if err != nil {
 			return nil, fmt.Errorf("list %s windows: %w", bucket, err)
 		}
@@ -178,9 +224,9 @@ func currentWindowEnds(ctx context.Context, s *store.Store, now time.Time) (map[
 	return out, nil
 }
 
-func currentWindow(ctx context.Context, s *store.Store, bucket string, now time.Time) (*store.LimitWindowRow, error) {
+func currentWindow(ctx context.Context, s *store.Store, accountID int64, bucket string, now time.Time) (*store.LimitWindowRow, error) {
 	since := now.Add(-budgetLookback[bucket]).UnixMilli()
-	windows, err := s.ListLimitWindows(ctx, budget.AttributeBucket(bucket), since)
+	windows, err := s.ListLimitWindows(ctx, accountID, budget.AttributeBucket(bucket), since)
 	if err != nil {
 		return nil, fmt.Errorf("list %s windows: %w", bucket, err)
 	}
@@ -198,8 +244,8 @@ func currentWindow(ctx context.Context, s *store.Store, bucket string, now time.
 // the caller must not confuse with the map being empty: no open window means a
 // spend rule cannot be evaluated, while an empty map means it can and nobody
 // has spent anything.
-func currentWindowByCwd(ctx context.Context, s *store.Store, bucket string, now time.Time) (map[string]float64, bool, error) {
-	win, err := currentWindow(ctx, s, bucket, now)
+func currentWindowByCwd(ctx context.Context, s *store.Store, accountID int64, bucket string, now time.Time) (map[string]float64, bool, error) {
+	win, err := currentWindow(ctx, s, accountID, bucket, now)
 	if err != nil {
 		return nil, false, err
 	}
@@ -209,7 +255,7 @@ func currentWindowByCwd(ctx context.Context, s *store.Store, bucket string, now 
 	// Since the window's own start, so only this window is in range. That is
 	// the same narrowing `attribution --window current` performs, and the
 	// reason a budget can be denominated in "percent of one window" at all.
-	groups, err := s.GroupAttribution(ctx, budget.AttributeBucket(bucket), "cwd", win.StartUnixMS)
+	groups, err := s.GroupAttribution(ctx, accountID, budget.AttributeBucket(bucket), "cwd", win.StartUnixMS)
 	if err != nil {
 		return nil, false, fmt.Errorf("attribution by cwd for %s: %w", bucket, err)
 	}

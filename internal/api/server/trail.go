@@ -191,7 +191,10 @@ func (s *Server) handleTrail(w http.ResponseWriter, r *http.Request) {
 			CacheCreateTokens:  c.CacheCreateTokens,
 			CostWeightedTokens: round2(cw),
 		}
-		if median, _, n, ok, _ := s.Store.LatestCalibrationMedian(ctx, "week", 10); ok && n > 0 && median > 0 {
+		// Trail's analyzer runs from the default config dir, so it spends
+		// the primary account's week.
+		primary, _ := s.Store.PrimaryAccountID(ctx)
+		if median, _, n, ok, _ := s.Store.LatestCalibrationMedian(ctx, primary, "week", 10); ok && n > 0 && median > 0 {
 			out.Cost.PctOfWeek = round2(cw / median)
 		}
 	}

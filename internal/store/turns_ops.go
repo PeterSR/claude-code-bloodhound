@@ -31,6 +31,9 @@ type TurnRow struct {
 	// (denormalized, like Project) because a subagent's cwd can legitimately
 	// differ from its parent's project directory.
 	Cwd string
+	// AccountID is the account the turn's config dir was logged in to at
+	// the turn's timestamp (see 0016_accounts.sql).
+	AccountID int64
 }
 
 // CompactionRow mirrors the `compactions` table.
@@ -45,6 +48,7 @@ type CompactionRow struct {
 	Confirmed        bool
 	ConfirmReason    string
 	Project          string
+	AccountID        int64
 }
 
 // UserPromptRow mirrors the `user_prompts` table.
@@ -52,6 +56,7 @@ type UserPromptRow struct {
 	SessionUUID string
 	TSUnixMS    int64
 	TextPreview string
+	AccountID   int64
 }
 
 // QuotaSignalRow mirrors the `quota_signals` table.
@@ -67,6 +72,7 @@ type QuotaSignalRow struct {
 	LowPriorityOffer      string
 	Project               string
 	Cwd                   string
+	AccountID             int64
 }
 
 // SessionPersist bundles the data ingested for a single session_uuid.
@@ -130,8 +136,8 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 				cache_create_5m, cache_create_1h,
 				gap_s, classification, post_compact,
 				project, source_path_hash,
-				parent_session_uuid, cwd
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				parent_session_uuid, cwd, account_id
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		`)
 		if err != nil {
 			return err
@@ -148,7 +154,7 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 				t.CacheCreate5m, t.CacheCreate1h,
 				t.GapS, t.Classification, pc,
 				t.Project, t.SourcePathHash,
-				t.ParentSessionUUID, t.Cwd,
+				t.ParentSessionUUID, t.Cwd, accountOr1(t.AccountID),
 			); err != nil {
 				return err
 			}
@@ -161,8 +167,8 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 				session_uuid, ts, ts_unix_ms,
 				prefix_tokens_est, summary_tokens_est,
 				gap_to_prev_s, cache_state,
-				confirmed, confirm_reason, project
-			) VALUES (?,?,?,?,?,?,?,?,?,?)
+				confirmed, confirm_reason, project, account_id
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		`)
 		if err != nil {
 			return err
@@ -181,7 +187,7 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 				c.SessionUUID, c.TS, c.TSUnixMS,
 				c.PrefixTokensEst, c.SummaryTokensEst,
 				gap, c.CacheState,
-				conf, c.ConfirmReason, c.Project,
+				conf, c.ConfirmReason, c.Project, accountOr1(c.AccountID),
 			); err != nil {
 				return err
 			}
@@ -190,15 +196,15 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 
 	if len(sp.UserPrompts) > 0 {
 		ps, err := tx.PrepareContext(ctx, `
-			INSERT OR IGNORE INTO user_prompts (session_uuid, ts_unix_ms, text_preview)
-			VALUES (?,?,?)
+			INSERT OR IGNORE INTO user_prompts (session_uuid, ts_unix_ms, text_preview, account_id)
+			VALUES (?,?,?,?)
 		`)
 		if err != nil {
 			return err
 		}
 		defer ps.Close()
 		for _, p := range sp.UserPrompts {
-			if _, err := ps.ExecContext(ctx, p.SessionUUID, p.TSUnixMS, p.TextPreview); err != nil {
+			if _, err := ps.ExecContext(ctx, p.SessionUUID, p.TSUnixMS, p.TextPreview, accountOr1(p.AccountID)); err != nil {
 				return err
 			}
 		}
@@ -209,8 +215,8 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 			INSERT OR REPLACE INTO quota_signals (
 				session_uuid, ts_unix_ms, kind, bucket, reset_ts_unix_ms,
 				overage_status, overage_disabled_reason, using_overage,
-				low_priority_offer, project, cwd
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+				low_priority_offer, project, cwd, account_id
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		`)
 		if err != nil {
 			return err
@@ -224,7 +230,7 @@ func (s *Store) ReplaceSessionData(ctx context.Context, sp SessionPersist) error
 			if _, err := qs.ExecContext(ctx,
 				q.SessionUUID, q.TSUnixMS, q.Kind, q.Bucket, q.ResetTSUnixMS,
 				q.OverageStatus, q.OverageDisabledReason, over,
-				q.LowPriorityOffer, q.Project, q.Cwd,
+				q.LowPriorityOffer, q.Project, q.Cwd, accountOr1(q.AccountID),
 			); err != nil {
 				return err
 			}
@@ -266,4 +272,13 @@ func (s *Store) RecordIngestedFile(ctx context.Context, r IngestedFileRecord) er
 			compaction_count = excluded.compaction_count
 	`, r.PathHash, r.Path, r.MTimeUnix, r.LastIngestedTS, r.TurnCount, r.CompactionCount)
 	return err
+}
+
+// accountOr1 maps an unset account id to the placeholder, so a caller that
+// predates accounts writes what the column default would have.
+func accountOr1(id int64) int64 {
+	if id == 0 {
+		return PlaceholderAccountID
+	}
+	return id
 }

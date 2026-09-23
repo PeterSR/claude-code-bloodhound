@@ -9,7 +9,11 @@ import (
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	rows, err := s.Store.ListSessions(ctx)
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.Store.ListSessions(ctx, acct)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return

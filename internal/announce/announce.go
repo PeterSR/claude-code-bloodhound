@@ -393,6 +393,18 @@ func crossingIsNear(e events.Event, now time.Time) bool {
 	return at.Sub(now) <= projectionHorizon
 }
 
+// forAccount keeps the events a session on acct should hear: its own
+// account's meter facts and everything that is not about a meter at all.
+func forAccount(evs []events.Event, acct int64) []events.Event {
+	out := make([]events.Event, 0, len(evs))
+	for _, e := range evs {
+		if e.Scope.Account == 0 || e.Scope.Account == acct {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func splitKind(k string) (kind, state string, ok bool) {
 	i := strings.LastIndex(k, ".")
 	if i <= 0 || i == len(k)-1 {
@@ -423,19 +435,36 @@ func deliver(ctx context.Context, s *store.Store, now time.Time, evs []events.Ev
 		sender = notify.New()
 	}
 
-	// Read once for the whole pass rather than per session: the refusal half
-	// is an account fact, and re-asking it for every conversation on the
-	// machine would let two sessions in the same batch be told contradictory
-	// things about the same window. An error here costs the qualifier, not
-	// the warning — the zero verdict simply claims nothing.
-	quota, qerr := s.QuotaNow(ctx, now.UnixMilli())
-	if qerr != nil {
-		st.Errors = append(st.Errors, fmt.Sprintf("quota verdict: %v", qerr))
+	// Read once per account for the whole pass rather than per session: the
+	// refusal half is an account fact, and re-asking it for every
+	// conversation on the machine would let two sessions on the same account
+	// be told contradictory things about the same window. An error here
+	// costs the qualifier, not the warning: the zero verdict simply claims
+	// nothing.
+	quotas := map[int64]store.QuotaVerdict{}
+	quotaFor := func(acct int64) store.QuotaVerdict {
+		if q, ok := quotas[acct]; ok {
+			return q
+		}
+		q, qerr := s.QuotaNow(ctx, acct, now.UnixMilli())
+		if qerr != nil {
+			st.Errors = append(st.Errors, fmt.Sprintf("quota verdict (account %d): %v", acct, qerr))
+		}
+		quotas[acct] = q
+		return q
 	}
 
 	for _, sess := range sessions {
 		cfg := configFor(sess.CWD)
-		msg := compose(evs, sess, now, cfg, quota)
+		// A session hears about its own account's meter and nobody else's:
+		// a projection on the work account is not a warning for a
+		// conversation spending the personal one.
+		acct, aerr := s.AccountForSession(ctx, sess.SessionID)
+		if aerr != nil {
+			st.Errors = append(st.Errors, fmt.Sprintf("%s: account: %v", sess.SessionID, aerr))
+			continue
+		}
+		msg := compose(forAccount(evs, acct), sess, now, cfg, quotaFor(acct))
 		if msg.Text == "" {
 			// Nothing in this batch concerns this session. Not a skip: there
 			// was never anything to deliver, so counting it would make the log
@@ -1203,8 +1232,6 @@ func resetAt(v any, now time.Time) (time.Time, bool) {
 // re-pay their prefix. Best effort: a session it has never ingested is simply
 // absent, which the gate reads as unknown rather than warm.
 func coldCache(ctx context.Context, s *store.Store, sessions []ccsock.Session, now time.Time) map[string]notify.CacheState {
-	tokensPerPctCW, _, _, hasCal, _ := s.LatestCalibrationMedian(ctx, "session", 10)
-
 	out := make(map[string]notify.CacheState, len(sessions))
 	for _, sess := range sessions {
 		if sess.SessionID == "" {
@@ -1214,6 +1241,10 @@ func coldCache(ctx context.Context, s *store.Store, sessions []ccsock.Session, n
 		if err != nil || ref == nil {
 			continue // never ingested; the gate reads absence as unknown
 		}
+		// Priced in the session's own account's points: each meter has its
+		// own calibration.
+		acct, _ := s.AccountForSession(ctx, sess.SessionID)
+		tokensPerPctCW, _, _, hasCal, _ := s.LatestCalibrationMedian(ctx, acct, "session", 10)
 		in := sessioninsight.ForSession(ctx, s.DB, *ref, now, tokensPerPctCW, hasCal)
 		if in == nil {
 			continue

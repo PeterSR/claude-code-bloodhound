@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/ingest"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
@@ -21,7 +22,8 @@ var (
 var ingestCmd = &cobra.Command{
 	Use:   "ingest",
 	Short: "Walk Claude Code's session JSONL files and update the local database",
-	Long: `Scans ~/.claude/projects/*/*.jsonl, parses each assistant turn and
+	Long: `Scans <dir>/projects/*/*.jsonl for every dir in claude_dirs (default
+~/.claude), parses each assistant turn and
 compaction event, and upserts them into the local store. Files whose mtime
 hasn't changed since the last ingest are skipped (use --force to re-process).
 
@@ -38,7 +40,16 @@ alongside the daemon is harmless (the store serializes writes) but redundant.`,
 		}
 		defer s.Close()
 
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
+		dirs, err := config.ClaudeConfigDirs(cfg)
+		if err != nil {
+			return err
+		}
 		opts := ingest.Options{
+			ConfigDirs:  dirs,
 			ProjectsDir: ingestProjectsDir,
 			Force:       ingestForce,
 		}

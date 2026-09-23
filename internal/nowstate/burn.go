@@ -17,6 +17,21 @@ type pctSource interface {
 	WeekPctSinceLastReset(ctx context.Context) ([]store.PctPoint, error)
 }
 
+// accountPctSource binds the store to one account's meter, so the seam
+// above stays account-free and test fakes need not know accounts exist.
+type accountPctSource struct {
+	s  *store.Store
+	id int64
+}
+
+func (a accountPctSource) SessionPctSinceLastReset(ctx context.Context) ([]store.PctPoint, error) {
+	return a.s.SessionPctSinceLastReset(ctx, a.id)
+}
+
+func (a accountPctSource) WeekPctSinceLastReset(ctx context.Context) ([]store.PctPoint, error) {
+	return a.s.WeekPctSinceLastReset(ctx, a.id)
+}
+
 func readPoints(ctx context.Context, s pctSource, session bool) ([]store.PctPoint, error) {
 	if session {
 		return s.SessionPctSinceLastReset(ctx)

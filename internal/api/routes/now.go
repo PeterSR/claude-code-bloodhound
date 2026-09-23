@@ -12,6 +12,10 @@ type NowResponse struct {
 	LastPoll *NowPoll   `json:"last_poll"`
 	NowMS    int64      `json:"server_now_ms"`
 
+	// AccountID is the Claude account whose meter this is. Each account has
+	// its own; see ?account= on the endpoint.
+	AccountID int64 `json:"account_id,omitempty"`
+
 	// PollIntervalS is the configured cadence between /usage scrapes. The
 	// UI uses it to decide whether the latest poll is "fresh" — e.g. to
 	// suppress redundant "now" annotations on the chart.
