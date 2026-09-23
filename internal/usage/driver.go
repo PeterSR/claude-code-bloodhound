@@ -149,6 +149,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 	// runs. We detect the modal text and answer Enter once before
 	// letting the rest of the state machine proceed.
 	trustHandled := false
+	trustMoves := 0
 
 	typed := false
 	sentExit := false
@@ -194,6 +195,20 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 				strings.Contains(screen, "what's new")
 
 			if hasTrustModal && sinceLast >= settleAfterReady {
+				// Confirm only with the cursor on the "yes" option. The
+				// modal used to open on "1. Yes"; current Claude Code opens
+				// on "No, exit", where a bare Enter quits claude and the
+				// poll captures nothing. Step down until "yes" is selected,
+				// bounded so an unrecognised layout fails the poll instead
+				// of cycling forever.
+				if !TrustCursorOnYes(renderVTVisible(curBytes)) {
+					if trustMoves < 4 {
+						_, _ = ptyFile.Write([]byte("\x1b[B"))
+						trustMoves++
+						time.Sleep(300 * time.Millisecond)
+					}
+					continue
+				}
 				time.Sleep(300 * time.Millisecond)
 				_, _ = ptyFile.Write([]byte("\r"))
 				trustHandled = true
@@ -287,4 +302,19 @@ func configDirEnv(env []string, dir string) []string {
 		out = append(out, "CLAUDE_CONFIG_DIR="+dir)
 	}
 	return out
+}
+
+// TrustCursorOnYes reports whether the folder-trust modal's selection cursor
+// sits on the option that trusts the folder. The selected row is the one
+// carrying "❯"; the trusting option says "yes" in every layout seen so far
+// ("1. Yes, proceed", "Yes, I trust this folder").
+func TrustCursorOnYes(screen string) bool {
+	for _, line := range strings.Split(screen, "\n") {
+		i := strings.Index(line, promptChar)
+		if i < 0 {
+			continue
+		}
+		return strings.Contains(strings.ToLower(line[i:]), "yes")
+	}
+	return false
 }
