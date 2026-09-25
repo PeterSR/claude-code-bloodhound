@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/pty"
@@ -25,15 +26,23 @@ const promptChar = "❯"
 // nothing else or just a placeholder suggestion (Try "..."). Menu rows
 // like "❯ 1. Yes, I trust this folder" don't match.
 //
+// The gap after "❯" is any whitespace, not just a space: since Claude
+// Code 2.1.282 the input row renders it as a non-breaking space.
+//
 // Exported so the selfheal package can reuse the same detector for the
 // outer orchestrator pty.
 func HasInputPrompt(screen string) bool {
 	for _, line := range strings.Split(screen, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == promptChar {
+		rest, ok := strings.CutPrefix(trimmed, promptChar)
+		if !ok {
+			continue
+		}
+		if rest == "" {
 			return true
 		}
-		if strings.HasPrefix(trimmed, promptChar+" Try ") {
+		after := strings.TrimLeftFunc(rest, unicode.IsSpace)
+		if after != rest && strings.HasPrefix(after, "Try ") {
 			return true
 		}
 	}
@@ -247,8 +256,12 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 				_, _ = ptyFile.Write([]byte("/usage\r"))
 				typed = true
 				typedAt = time.Now()
-			} else if time.Since(startTime) >= 7*time.Second && len(curBytes) > 2000 {
-				// Last-resort fallback: type and hope.
+			} else if time.Since(startTime) >= 7*time.Second && len(curBytes) > 0 {
+				// Last-resort fallback: type and hope. Only gated on claude
+				// having drawn something at all: a byte threshold here used
+				// to stop the fallback from ever firing, since a quiet
+				// startup screen can stay well under 2 KB for the whole
+				// capture.
 				_, _ = ptyFile.Write([]byte("/usage\r"))
 				typed = true
 				typedAt = time.Now()
