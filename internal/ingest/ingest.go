@@ -16,15 +16,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/account"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/store"
 )
 
 // Options for Run.
 type Options struct {
-	ProjectsDir string // empty => default from config.ClaudeProjectsDir
-	MinFileSize int64  // skip files smaller than this (default 5_000)
-	Force       bool   // re-ingest even if mtime is unchanged
+	// ConfigDirs are the Claude Code config dirs to ingest, each from its
+	// <dir>/projects. Empty => the default dir alone.
+	ConfigDirs []string
+	// ProjectsDir overrides ConfigDirs with a single projects dir, whose
+	// parent is treated as its config dir. For tests and --projects-dir.
+	ProjectsDir string
+	MinFileSize int64 // skip files smaller than this (default 5_000)
+	Force       bool  // re-ingest even if mtime is unchanged
 }
 
 // Stats summarises what one Run did.
@@ -42,6 +48,9 @@ type Stats struct {
 	CompactionsAdded      int
 	Errors                []string
 	ElapsedS              float64
+	// Accounts maps each config dir walked to the account it was logged in
+	// to when this run looked.
+	Accounts map[string]int64 `json:",omitempty"`
 }
 
 // Run is the one-shot ingester. Idempotent; safe to call concurrently with
@@ -50,24 +59,26 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 	t0 := time.Now()
 	st := Stats{}
 
-	if opts.ProjectsDir == "" {
-		dir, err := config.ClaudeProjectsDir()
-		if err != nil {
-			return st, err
+	type walk struct{ configDir, projectsDir string }
+	var walks []walk
+	switch {
+	case opts.ProjectsDir != "":
+		walks = []walk{{filepath.Dir(opts.ProjectsDir), opts.ProjectsDir}}
+	default:
+		dirs := opts.ConfigDirs
+		if len(dirs) == 0 {
+			d, err := config.DefaultClaudeDir()
+			if err != nil {
+				return st, err
+			}
+			dirs = []string{d}
 		}
-		opts.ProjectsDir = dir
+		for _, d := range dirs {
+			walks = append(walks, walk{d, filepath.Join(d, "projects")})
+		}
 	}
 	if opts.MinFileSize == 0 {
 		opts.MinFileSize = 5_000
-	}
-
-	files, err := findSessionFiles(opts.ProjectsDir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			st.ElapsedS = time.Since(t0).Seconds()
-			return st, nil
-		}
-		return st, err
 	}
 
 	// Trail's own analyzer runs as `claude` with a known session-id and
@@ -80,9 +91,55 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 		trailSkip = nil
 	}
 
-	for _, sf := range files {
+	st.Accounts = map[string]int64{}
+	for i, wk := range walks {
 		if err := ctx.Err(); err != nil {
 			return st, err
+		}
+		if _, err := os.Stat(wk.projectsDir); errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		// Record who the dir is logged in to before reading anything, so a
+		// switch since last run opens its interval before the new turns are
+		// resolved against it. A torn read of the state file falls back to
+		// the history already recorded; a dir with no history yet waits for
+		// the next run rather than landing on a guessed account.
+		if id, _, err := account.Observe(ctx, s, wk.configDir, time.Now()); err != nil {
+			st.Errors = append(st.Errors, fmt.Sprintf("account %s: %v", wk.configDir, err))
+		} else {
+			if i == 0 && opts.ProjectsDir == "" {
+				if err := s.SetPrimaryAccount(ctx, id); err != nil {
+					return st, err
+				}
+			}
+			st.Accounts[wk.configDir] = id
+		}
+		logins, err := s.LoginsFor(ctx, wk.configDir)
+		if err != nil {
+			return st, err
+		}
+		if len(logins) == 0 {
+			continue
+		}
+		files, err := findSessionFiles(wk.projectsDir)
+		if err != nil {
+			return st, err
+		}
+		if err := ingestFiles(ctx, s, opts, files, trailSkip, logins, &st); err != nil {
+			return st, err
+		}
+	}
+
+	st.ElapsedS = time.Since(t0).Seconds()
+	return st, nil
+}
+
+// ingestFiles runs one config dir's discovered transcripts through parse and
+// persist, resolving every row's account from that dir's login history.
+func ingestFiles(ctx context.Context, s *store.Store, opts Options, files []sessionFile, trailSkip map[string]bool, logins []store.Login, st *Stats) error {
+	for _, sf := range files {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		st.FilesScanned++
 		p := sf.path
@@ -165,10 +222,10 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 		if err := s.ReplaceSessionData(ctx, store.SessionPersist{
 			SessionUUID:  fr.SessionUUID,
 			Project:      fr.Project,
-			Turns:        toStoreTurns(fr.Turns),
-			Compactions:  toStoreCompactions(fr.Compactions),
-			UserPrompts:  toStoreUserPrompts(fr.UserPrompts),
-			QuotaSignals: toStoreQuotaSignals(fr.QuotaSignals),
+			Turns:        toStoreTurns(fr.Turns, logins),
+			Compactions:  toStoreCompactions(fr.Compactions, logins),
+			UserPrompts:  toStoreUserPrompts(fr.UserPrompts, logins),
+			QuotaSignals: toStoreQuotaSignals(fr.QuotaSignals, logins),
 		}); err != nil {
 			st.Errors = append(st.Errors, fmt.Sprintf("persist %s: %v", p, err))
 			continue
@@ -189,9 +246,7 @@ func Run(ctx context.Context, s *store.Store, opts Options) (Stats, error) {
 		st.TurnsAdded += len(fr.Turns)
 		st.CompactionsAdded += len(fr.Compactions)
 	}
-
-	st.ElapsedS = time.Since(t0).Seconds()
-	return st, nil
+	return nil
 }
 
 // sessionUUIDFromPath derives the session UUID from a JSONL path the
@@ -318,7 +373,7 @@ func findSessionFiles(dir string) ([]sessionFile, error) {
 	return out, nil
 }
 
-func toStoreTurns(in []Turn) []store.TurnRow {
+func toStoreTurns(in []Turn, logins []store.Login) []store.TurnRow {
 	out := make([]store.TurnRow, len(in))
 	for i, t := range in {
 		out[i] = store.TurnRow{
@@ -339,6 +394,7 @@ func toStoreTurns(in []Turn) []store.TurnRow {
 			SourcePathHash:    t.SourcePathHash,
 			ParentSessionUUID: t.ParentSessionUUID,
 			Cwd:               t.Cwd,
+			AccountID:         store.ResolveAccount(logins, t.TSUnixMS),
 		}
 	}
 	return out
@@ -349,7 +405,7 @@ func toStoreTurns(in []Turn) []store.TurnRow {
 // directly, for the same reason the three above are: internal/ingest reads
 // JSONL and nothing else, and a parser that imported the database's row
 // shapes would be one step from being written against them.
-func toStoreQuotaSignals(in []QuotaSignal) []store.QuotaSignalRow {
+func toStoreQuotaSignals(in []QuotaSignal, logins []store.Login) []store.QuotaSignalRow {
 	out := make([]store.QuotaSignalRow, 0, len(in))
 	for _, q := range in {
 		out = append(out, store.QuotaSignalRow{
@@ -364,24 +420,26 @@ func toStoreQuotaSignals(in []QuotaSignal) []store.QuotaSignalRow {
 			LowPriorityOffer:      q.LowPriorityOffer,
 			Project:               q.Project,
 			Cwd:                   q.Cwd,
+			AccountID:             store.ResolveAccount(logins, q.TSUnixMS),
 		})
 	}
 	return out
 }
 
-func toStoreUserPrompts(in []UserPrompt) []store.UserPromptRow {
+func toStoreUserPrompts(in []UserPrompt, logins []store.Login) []store.UserPromptRow {
 	out := make([]store.UserPromptRow, len(in))
 	for i, p := range in {
 		out[i] = store.UserPromptRow{
 			SessionUUID: p.SessionUUID,
 			TSUnixMS:    p.TSUnixMS,
 			TextPreview: p.TextPreview,
+			AccountID:   store.ResolveAccount(logins, p.TSUnixMS),
 		}
 	}
 	return out
 }
 
-func toStoreCompactions(in []Compaction) []store.CompactionRow {
+func toStoreCompactions(in []Compaction, logins []store.Login) []store.CompactionRow {
 	out := make([]store.CompactionRow, len(in))
 	for i, c := range in {
 		out[i] = store.CompactionRow{
@@ -395,6 +453,7 @@ func toStoreCompactions(in []Compaction) []store.CompactionRow {
 			Confirmed:        c.Confirmed,
 			ConfirmReason:    c.ConfirmReason,
 			Project:          c.Project,
+			AccountID:        store.ResolveAccount(logins, c.TSUnixMS),
 		}
 	}
 	return out

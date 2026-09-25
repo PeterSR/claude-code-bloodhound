@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/account"
 	"github.com/PeterSR/claude-code-bloodhound/internal/aggregate"
 	"sort"
 	"strings"
@@ -243,7 +244,43 @@ func durationS(override, configured, fallback int) time.Duration {
 	return time.Duration(fallback) * time.Second
 }
 
+// liveClaudeDirs resolves the config dirs to watch from the config file as it
+// is now, so adding an account's dir takes effect without a daemon restart.
+// Falls back to the default dir alone if the config cannot be read.
+func liveClaudeDirs(w io.Writer) []string {
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = config.Default()
+	}
+	dirs, err := config.ClaudeConfigDirs(cfg)
+	if err != nil {
+		fmt.Fprintf(w, "[daemon] claude_dirs: %v\n", err)
+		return nil
+	}
+	return dirs
+}
+
+// runPollOnce scrapes /usage once for every watched config dir, recording
+// each reading against the account that dir is logged in to. Dirs with no
+// subscription login have no meter and are skipped.
 func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Writer) {
+	for _, dir := range liveClaudeDirs(w) {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		accountID, ident, err := account.Observe(ctx, s, dir, time.Now())
+		if err != nil {
+			fmt.Fprintf(w, "[daemon] poll %s: account: %v\n", dir, err)
+			continue
+		}
+		if !ident.OAuth {
+			continue
+		}
+		pollDirOnce(ctx, cfg, s, w, dir, accountID)
+	}
+}
+
+func pollDirOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Writer, dir string, accountID int64) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
@@ -255,7 +292,7 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	}
 	pollCtx, cancel := context.WithTimeout(ctx, pollBudget)
 	defer cancel()
-	res, fetchErr := usage.Fetch(pollCtx, usage.Options{ClaudeBinary: cfg.ClaudeBinary})
+	res, fetchErr := usage.Fetch(pollCtx, usage.Options{ClaudeBinary: cfg.ClaudeBinary, ConfigDir: dir})
 
 	// Self-heal: if extraction missed required fields, hand the heal
 	// off to selfheal.Run — which spawns its own inner claude in a pty
@@ -304,7 +341,7 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 		}
 	}
 
-	obs, err := s.RecordUsage(pollCtx, res, fetchErr)
+	obs, err := s.RecordUsage(pollCtx, accountID, res, fetchErr)
 	switch {
 	case err != nil:
 		fmt.Fprintf(w, "[daemon] poll: record error %v\n", err)
@@ -326,8 +363,8 @@ func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 		if res.WeekPct != nil {
 			week = fmt.Sprintf("%d%%", *res.WeekPct)
 		}
-		fmt.Fprintf(w, "[daemon] poll: ok session=%s week=%s (#%d, %.1fs)\n",
-			sess, week, obs.ID, res.ElapsedS)
+		fmt.Fprintf(w, "[daemon] poll: ok session=%s week=%s account=%d (#%d, %.1fs)\n",
+			sess, week, accountID, obs.ID, res.ElapsedS)
 	}
 }
 
@@ -474,7 +511,7 @@ func runIngestOnce(ctx context.Context, s *store.Store, w io.Writer) {
 	}
 	ictx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	stats, err := ingest.Run(ictx, s, ingest.Options{})
+	stats, err := ingest.Run(ictx, s, ingest.Options{ConfigDirs: liveClaudeDirs(w)})
 	if err != nil {
 		fmt.Fprintf(w, "[daemon] ingest: error %v\n", err)
 		return

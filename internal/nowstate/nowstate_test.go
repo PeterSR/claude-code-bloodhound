@@ -59,7 +59,7 @@ func TestCompute_NoObservationYieldsEmptyPoolState(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Now()
 
-	out, err := Compute(context.Background(), s, now)
+	out, err := Compute(context.Background(), s, 1, now)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestCompute_BuildsWindowAndBurnFromHistory(t *testing.T) {
 	insertObs(t, s, t1, 12, "", false)
 	insertObs(t, s, t2, 14, resetISO, false)
 
-	out, err := Compute(context.Background(), s, now)
+	out, err := Compute(context.Background(), s, 1, now)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestCompute_OmitsBurnRateWithOnlyOneObservation(t *testing.T) {
 	now := time.Now()
 	insertObs(t, s, now.Add(-30*time.Second).UnixMilli(), 3, "", true)
 
-	out, err := Compute(context.Background(), s, now)
+	out, err := Compute(context.Background(), s, 1, now)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestCompute_FailedLatestPollFallsBackToLastParsedReading(t *testing.T) {
 	insertObs(t, s, now.Add(-5*time.Minute).UnixMilli(), 64, reset, false)
 	insertFailedObs(t, s, now.UnixMilli())
 
-	out, err := Compute(context.Background(), s, now)
+	out, err := Compute(context.Background(), s, 1, now)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestCompute_SuccessfulPollIsNotMarkedStale(t *testing.T) {
 	insertObs(t, s, now.Add(-5*time.Minute).UnixMilli(), 40, reset, false)
 	insertObs(t, s, now.UnixMilli(), 42, reset, false)
 
-	out, err := Compute(context.Background(), s, now)
+	out, err := Compute(context.Background(), s, 1, now)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestCompute_FailedPollWithNothingEverParsedStaysEmpty(t *testing.T) {
 	insertFailedObs(t, s, now.Add(-5*time.Minute).UnixMilli())
 	insertFailedObs(t, s, now.UnixMilli())
 
-	out, err := Compute(context.Background(), s, now)
+	out, err := Compute(context.Background(), s, 1, now)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}

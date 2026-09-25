@@ -24,8 +24,12 @@ import (
 func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
 
-	out, err := nowstate.Compute(ctx, s.Store, now)
+	out, err := nowstate.Compute(ctx, s.Store, acct, now)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -40,7 +44,7 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// History and recent-sessions only mean anything once there's at least
+	// The chart history only means anything once there's at least
 	// one observation to anchor a window to — out.LastPoll != nil is that
 	// same condition nowstate.Compute already checked (mirrors the
 	// pre-extraction "obs == nil" early return this handler used to make
@@ -48,21 +52,24 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 	if out.LastPoll != nil {
 		if out.Session != nil && out.Session.WindowStartTSISO != "" {
 			if start, err := time.Parse(time.RFC3339, out.Session.WindowStartTSISO); err == nil {
-				out.SessionHistory = s.queryNowHistory(ctx, true, start.UnixMilli(), now.UnixMilli())
+				out.SessionHistory = s.queryNowHistory(ctx, acct, true, start.UnixMilli(), now.UnixMilli())
 			}
 		}
 		if out.Week != nil && out.Week.WindowStartTSISO != "" {
 			if start, err := time.Parse(time.RFC3339, out.Week.WindowStartTSISO); err == nil {
-				out.WeekHistory = s.queryNowHistory(ctx, false, start.UnixMilli(), now.UnixMilli())
+				out.WeekHistory = s.queryNowHistory(ctx, acct, false, start.UnixMilli(), now.UnixMilli())
 			}
 		}
-
-		// Per-turn-derived insights for up to 10 most-recent sessions.
-		// tokens_per_pct_cw drives the % estimates; pulled once and reused
-		// across cards for consistency.
-		tokensPerPct, _, _, hasCal, _ := s.Store.LatestCalibrationMedian(ctx, "session", 10)
-		out.RecentSessions = s.recentSessionInsights(ctx, now, recentWindowS, tokensPerPct, hasCal)
 	}
+
+	// Per-turn-derived insights for up to 10 most-recent sessions. Outside
+	// the observation gate above: they come from transcripts, not the meter,
+	// so an account with no /usage reading (an API-key dir, or one not
+	// polled yet) still lists its sessions, just without percentages.
+	// tokens_per_pct_cw drives the % estimates; pulled once and reused
+	// across cards for consistency.
+	tokensPerPct, _, _, hasCal, _ := s.Store.LatestCalibrationMedian(ctx, acct, "session", 10)
+	out.RecentSessions = s.recentSessionInsights(ctx, acct, now, recentWindowS, tokensPerPct, hasCal)
 
 	writeJSON(w, http.StatusOK, out)
 }
@@ -71,14 +78,24 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 // LastUserPrompt for the Now page. A hard cap of recentSessionsMax keeps
 // the panel from blowing up on days where the user has been jumping
 // between many projects.
-func (s *Server) recentSessionInsights(ctx context.Context, now time.Time, windowS int, tokensPerPct float64, hasCal bool) []sessioninsight.Insight {
+// Only sessions spending acct are listed: the page is about one meter, and
+// the percentages on each card are priced in that meter's points.
+func (s *Server) recentSessionInsights(ctx context.Context, acct int64, now time.Time, windowS int, tokensPerPct float64, hasCal bool) []sessioninsight.Insight {
 	const recentSessionsMax = 10
-	refs, err := sessioninsight.RecentN(ctx, s.Store.DB, now, windowS, recentSessionsMax)
+	// Over-fetch so that filtering to one account still fills the panel when
+	// several accounts are active at once.
+	refs, err := sessioninsight.RecentN(ctx, s.Store.DB, now, windowS, recentSessionsMax*4)
 	if err != nil || len(refs) == 0 {
 		return nil
 	}
-	out := make([]sessioninsight.Insight, 0, len(refs))
+	out := make([]sessioninsight.Insight, 0, recentSessionsMax)
 	for _, ref := range refs {
+		if len(out) == recentSessionsMax {
+			break
+		}
+		if a, err := s.Store.AccountForSession(ctx, ref.UUID); err != nil || a != acct {
+			continue
+		}
 		ins := sessioninsight.ForSession(ctx, s.Store.DB, ref, now, tokensPerPct, hasCal)
 		if ins == nil {
 			continue
@@ -105,7 +122,7 @@ func (s *Server) recentSessionInsights(ctx context.Context, now time.Time, windo
 // itself (Now.tsx), not to what the endpoint returns. Same reasoning
 // burnSeries and pctSince apply to their own inputs, just split across the
 // wire instead of filtered out entirely.
-func (s *Server) queryNowHistory(ctx context.Context, isSession bool, startMS, endMS int64) []routes.NowHistoryPoint {
+func (s *Server) queryNowHistory(ctx context.Context, acct int64, isSession bool, startMS, endMS int64) []routes.NowHistoryPoint {
 	pctCol, satCol, validCol := "session_pct", "session_saturated", "session_pct_valid"
 	if !isSession {
 		pctCol, satCol, validCol = "week_pct", "week_saturated", "week_pct_valid"
@@ -113,11 +130,12 @@ func (s *Server) queryNowHistory(ctx context.Context, isSession bool, startMS, e
 	rows, err := s.Store.DB.QueryContext(ctx, `
 		SELECT ts_unix_ms, `+pctCol+`, `+satCol+`
 		FROM usage_observations
-		WHERE ts_unix_ms BETWEEN ? AND ?
+		WHERE account_id = ?
+		  AND ts_unix_ms BETWEEN ? AND ?
 		  AND parse_ok = 1
 		  AND `+validCol+` = 1
 		ORDER BY ts_unix_ms ASC
-	`, startMS, endMS)
+	`, acct, startMS, endMS)
 	if err != nil {
 		return nil
 	}

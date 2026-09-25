@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 const appName = "bloodhound"
@@ -94,16 +95,71 @@ func StateDir() (string, error) {
 	}
 }
 
-// ClaudeProjectsDir returns the path where Claude Code stores its session
-// JSONL files. We assume Anthropic's CLI uses ~/.claude/projects on every
-// platform; if that turns out to be wrong elsewhere this is the place to
-// fix it.
+// ClaudeProjectsDir returns where the default config dir keeps its session
+// JSONL files. Only for callers that are not account-aware yet; ingest walks
+// <dir>/projects for every dir in ClaudeConfigDirs.
 func ClaudeProjectsDir() (string, error) {
+	d, err := DefaultClaudeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "projects"), nil
+}
+
+// DefaultClaudeDir is Claude Code's config dir when CLAUDE_CONFIG_DIR is
+// unset: ~/.claude.
+func DefaultClaudeDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".claude", "projects"), nil
+	return filepath.Join(home, ".claude"), nil
+}
+
+// ClaudeConfigDirs resolves cfg.ClaudeDirs to absolute, cleaned, de-duplicated
+// paths, in the order given. Empty means the default dir alone.
+func ClaudeConfigDirs(cfg Config) ([]string, error) {
+	if len(cfg.ClaudeDirs) == 0 {
+		d, err := DefaultClaudeDir()
+		if err != nil {
+			return nil, err
+		}
+		return []string{d}, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, d := range cfg.ClaudeDirs {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		if d == "~" {
+			d = home
+		} else if strings.HasPrefix(d, "~/") {
+			d = filepath.Join(home, d[2:])
+		}
+		d, err = filepath.Abs(d)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// IsDefaultClaudeDir reports whether dir is ~/.claude, the dir Claude Code
+// uses with CLAUDE_CONFIG_DIR unset. That dir keeps its state file one level
+// up, at ~/.claude.json, and needs no env var to address.
+func IsDefaultClaudeDir(dir string) bool {
+	d, err := DefaultClaudeDir()
+	return err == nil && filepath.Clean(dir) == d
 }
 
 // EnsureDir creates dir (and any parents) with sensible permissions.

@@ -270,7 +270,13 @@ func weaverbirdValue(sess wb.Session, requested []string) ([]wb.Value, error) {
 	defer s.Close()
 
 	var vals []wb.Value
-	if out, err := nowstate.Compute(ctx, s, now); err == nil && out != nil {
+	// The meter of the account this session spends, falling back to the
+	// primary when there is no session or it has not been ingested yet.
+	acct, _ := s.PrimaryAccountID(ctx)
+	if sess.SessionID != "" {
+		acct, _ = s.AccountForSession(ctx, sess.SessionID)
+	}
+	if out, err := nowstate.Compute(ctx, s, acct, now); err == nil && out != nil {
 		if out.Session != nil {
 			vals = append(vals, bucketValue("bloodhound.5h", "5h", out.Session, now))
 		}
@@ -629,7 +635,8 @@ func resumeValues(ctx context.Context, s *store.Store, sessionUUID string, now t
 		return nil
 	}
 
-	sessionPerPct, _, _, hasSessionCal, _ := s.LatestCalibrationMedian(ctx, "session", 10)
+	acct, _ := s.AccountForSession(ctx, sessionUUID)
+	sessionPerPct, _, _, hasSessionCal, _ := s.LatestCalibrationMedian(ctx, acct, "session", 10)
 	ins := sessioninsight.ForSession(ctx, s.DB, *ref, now, sessionPerPct, hasSessionCal)
 	if ins == nil || ins.ColdResumeCostCWTokens <= 0 {
 		return nil
@@ -646,7 +653,7 @@ func resumeValues(ctx context.Context, s *store.Store, sessionUUID string, now t
 	// cache is cold", which the 5h record beside it already says — a
 	// second widget repeating it is noise, where the first one saying it
 	// is the whole point.
-	if weekPerPct, _, _, ok, err := s.LatestCalibrationMedian(ctx, "week", 10); err == nil && ok && weekPerPct > 0 {
+	if weekPerPct, _, _, ok, err := s.LatestCalibrationMedian(ctx, acct, "week", 10); err == nil && ok && weekPerPct > 0 {
 		out = append(out, resumeRecord("bloodhound.resume.week", "wk",
 			ins.ColdResumeCostCWTokens/weekPerPct))
 	}

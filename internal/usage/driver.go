@@ -9,7 +9,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/pty"
 )
 
@@ -24,15 +26,23 @@ const promptChar = "❯"
 // nothing else or just a placeholder suggestion (Try "..."). Menu rows
 // like "❯ 1. Yes, I trust this folder" don't match.
 //
+// The gap after "❯" is any whitespace, not just a space: since Claude
+// Code 2.1.282 the input row renders it as a non-breaking space.
+//
 // Exported so the selfheal package can reuse the same detector for the
 // outer orchestrator pty.
 func HasInputPrompt(screen string) bool {
 	for _, line := range strings.Split(screen, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == promptChar {
+		rest, ok := strings.CutPrefix(trimmed, promptChar)
+		if !ok {
+			continue
+		}
+		if rest == "" {
 			return true
 		}
-		if strings.HasPrefix(trimmed, promptChar+" Try ") {
+		after := strings.TrimLeftFunc(rest, unicode.IsSpace)
+		if after != rest && strings.HasPrefix(after, "Try ") {
 			return true
 		}
 	}
@@ -79,7 +89,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 	// scratch with the bits the panel actually needs, rather than
 	// inheriting our parent's — keeps the spawn behaviour identical
 	// whether we're launched from a shell or a service manager.
-	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(configDirEnv(cmd.Environ(), opts.ConfigDir), "TERM=xterm-256color")
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		return nil, err
@@ -148,6 +158,7 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 	// runs. We detect the modal text and answer Enter once before
 	// letting the rest of the state machine proceed.
 	trustHandled := false
+	trustMoves := 0
 
 	typed := false
 	sentExit := false
@@ -193,6 +204,20 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 				strings.Contains(screen, "what's new")
 
 			if hasTrustModal && sinceLast >= settleAfterReady {
+				// Confirm only with the cursor on the "yes" option. The
+				// modal used to open on "1. Yes"; current Claude Code opens
+				// on "No, exit", where a bare Enter quits claude and the
+				// poll captures nothing. Step down until "yes" is selected,
+				// bounded so an unrecognised layout fails the poll instead
+				// of cycling forever.
+				if !TrustCursorOnYes(renderVTVisible(curBytes)) {
+					if trustMoves < 4 {
+						_, _ = ptyFile.Write([]byte("\x1b[B"))
+						trustMoves++
+						time.Sleep(300 * time.Millisecond)
+					}
+					continue
+				}
 				time.Sleep(300 * time.Millisecond)
 				_, _ = ptyFile.Write([]byte("\r"))
 				trustHandled = true
@@ -231,8 +256,12 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 				_, _ = ptyFile.Write([]byte("/usage\r"))
 				typed = true
 				typedAt = time.Now()
-			} else if time.Since(startTime) >= 7*time.Second && len(curBytes) > 2000 {
-				// Last-resort fallback: type and hope.
+			} else if time.Since(startTime) >= 7*time.Second && len(curBytes) > 0 {
+				// Last-resort fallback: type and hope. Only gated on claude
+				// having drawn something at all: a byte threshold here used
+				// to stop the fallback from ever firing, since a quiet
+				// startup screen can stay well under 2 KB for the whole
+				// capture.
 				_, _ = ptyFile.Write([]byte("/usage\r"))
 				typed = true
 				typedAt = time.Now()
@@ -270,4 +299,35 @@ func drive(ctx context.Context, opts Options) ([]byte, error) {
 	}
 
 	return result(), nil
+}
+
+// configDirEnv points the spawned claude at dir's account. An inherited
+// CLAUDE_CONFIG_DIR is always dropped first, so the default dir really is
+// the default even when the daemon was started from a shell that set one.
+func configDirEnv(env []string, dir string) []string {
+	out := env[:0:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "CLAUDE_CONFIG_DIR=") {
+			out = append(out, e)
+		}
+	}
+	if dir != "" && !config.IsDefaultClaudeDir(dir) {
+		out = append(out, "CLAUDE_CONFIG_DIR="+dir)
+	}
+	return out
+}
+
+// TrustCursorOnYes reports whether the folder-trust modal's selection cursor
+// sits on the option that trusts the folder. The selected row is the one
+// carrying "❯"; the trusting option says "yes" in every layout seen so far
+// ("1. Yes, proceed", "Yes, I trust this folder").
+func TrustCursorOnYes(screen string) bool {
+	for _, line := range strings.Split(screen, "\n") {
+		i := strings.Index(line, promptChar)
+		if i < 0 {
+			continue
+		}
+		return strings.Contains(strings.ToLower(line[i:]), "yes")
+	}
+	return false
 }

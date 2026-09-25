@@ -142,7 +142,13 @@ func (s *Server) postBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	windowEnds, err := s.budgetWindowEnds(ctx, now)
+	// A budget is measured on the meter of the account its directory spends.
+	acct, err := s.Store.AccountForCwd(ctx, cwd)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	windowEnds, err := s.budgetWindowEnds(ctx, acct, now)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -173,13 +179,13 @@ func (s *Server) postBudget(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) budgetWindowEnds(ctx context.Context, now time.Time) (map[string]int64, error) {
+func (s *Server) budgetWindowEnds(ctx context.Context, acct int64, now time.Time) (map[string]int64, error) {
 	out := map[string]int64{}
 	for bucket, back := range map[string]time.Duration{
 		budget.BucketSession: 10 * time.Hour,
 		budget.BucketWeek:    14 * 24 * time.Hour,
 	} {
-		windows, err := s.Store.ListLimitWindows(ctx, budget.AttributeBucket(bucket), now.Add(-back).UnixMilli())
+		windows, err := s.Store.ListLimitWindows(ctx, acct, budget.AttributeBucket(bucket), now.Add(-back).UnixMilli())
 		if err != nil {
 			return nil, err
 		}

@@ -38,6 +38,10 @@ import (
 // against a running peak that only ever rises within a window, instead of
 // over whichever pair happened to tick. See buildCalibrationPoints.
 func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
+	ids, err := s.AccountIDs(ctx)
+	if err != nil {
+		return 0, err
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -47,7 +51,23 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM calibration_points`); err != nil {
 		return 0, err
 	}
+	// Each account is its own meter: its readings are only ever paired with
+	// each other and priced against its own turns.
+	total := 0
+	for _, id := range ids {
+		n, err := calibrateAccount(ctx, tx, id)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
 
+func calibrateAccount(ctx context.Context, tx *sql.Tx, accountID int64) (int, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, ts_unix_ms,
 		       session_pct, week_pct,
@@ -55,8 +75,9 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 		       session_reset_detected, week_reset_detected,
 		       session_pct_valid, week_pct_valid
 		FROM usage_observations
+		WHERE account_id = ?
 		ORDER BY ts_unix_ms ASC, id ASC
-	`)
+	`, accountID)
 	if err != nil {
 		return 0, err
 	}
@@ -89,7 +110,7 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 	}
 
 	if len(sessionObs) < 2 {
-		return 0, tx.Commit()
+		return 0, nil
 	}
 
 	// Pre-load all turns once; buildCalibrationPoints binary-searches them
@@ -101,8 +122,9 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 		       input_tokens, output_tokens, cache_read,
 		       cache_create_5m, cache_create_1h
 		FROM turns
+		WHERE account_id = ?
 		ORDER BY ts_unix_ms ASC
-	`)
+	`, accountID)
 	if err != nil {
 		return 0, err
 	}
@@ -128,13 +150,13 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO calibration_points (
-			bucket, a_obs_id, b_obs_id,
+			account_id, bucket, a_obs_id, b_obs_id,
 			a_ts_unix_ms, b_ts_unix_ms,
 			a_pct, b_pct, delta_pct,
 			raw_tokens, cost_weighted_tokens, output_tokens, turn_count,
 			gap_s,
 			tokens_per_pct_raw, tokens_per_pct_cw
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return 0, err
@@ -144,7 +166,7 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 	insert := func(bucket string, pts []calPoint) error {
 		for _, p := range pts {
 			if _, err := stmt.ExecContext(ctx,
-				bucket, p.AObsID, p.BObsID,
+				accountID, bucket, p.AObsID, p.BObsID,
 				p.ATSUnixMS, p.BTSUnixMS,
 				p.APct, p.BPct, p.DeltaPct,
 				p.RawTokens, p.CostWeightedTokens, p.OutputTokens, p.TurnCount,
@@ -166,9 +188,6 @@ func refreshCalibration(ctx context.Context, s *store.Store) (int, error) {
 		return 0, err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return len(sessionPoints) + len(weekPoints), nil
 }
 

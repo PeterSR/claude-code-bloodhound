@@ -25,6 +25,10 @@ const attrMaxSlices = 20
 
 func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
 
 	bucket := attribute.BucketWeek
 	if r.URL.Query().Get("bucket") == attribute.Bucket5h {
@@ -56,6 +60,7 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 
 	out := routes.AttributionResponse{
 		OK:         true,
+		AccountID:  acct,
 		Bucket:     bucket,
 		By:         by,
 		WindowDays: days,
@@ -64,7 +69,7 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 		Sessions:   []routes.AttrGroup{},
 		Cwds:       []routes.AttrGroup{},
 	}
-	windows, err := s.Store.ListLimitWindows(ctx, bucket, since)
+	windows, err := s.Store.ListLimitWindows(ctx, acct, bucket, since)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -81,7 +86,7 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 		out.Window = "current"
 		curWindows := windows
 		if curSince := currentWindowSince(bucket); curSince < since {
-			if curWindows, err = s.Store.ListLimitWindows(ctx, bucket, curSince); err != nil {
+			if curWindows, err = s.Store.ListLimitWindows(ctx, acct, bucket, curSince); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 				return
 			}
@@ -114,7 +119,7 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if out.TokensPerPctCW == 0 {
-		if cw, _, _, ok, err := s.Store.LatestCalibrationMedian(ctx, calibrationBucketName(bucket), 10); err != nil {
+		if cw, _, _, ok, err := s.Store.LatestCalibrationMedian(ctx, acct, calibrationBucketName(bucket), 10); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		} else if ok {
@@ -124,7 +129,7 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 
 	var slices []store.AttributionRow
 	if windowOpen {
-		if slices, err = s.Store.WindowSlices(ctx, bucket, since); err != nil {
+		if slices, err = s.Store.WindowSlices(ctx, acct, bucket, since); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -132,15 +137,15 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 	out.Windows = buildAttrWindows(windows, slices, by)
 
 	if windowOpen {
-		if out.Projects, err = s.attrGroups(ctx, bucket, "project", since); err != nil {
+		if out.Projects, err = s.attrGroups(ctx, acct, bucket, "project", since); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if out.Sessions, err = s.attrGroups(ctx, bucket, "session", since); err != nil {
+		if out.Sessions, err = s.attrGroups(ctx, acct, bucket, "session", since); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if out.Cwds, err = s.attrGroups(ctx, bucket, "cwd", since); err != nil {
+		if out.Cwds, err = s.attrGroups(ctx, acct, bucket, "cwd", since); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -174,8 +179,8 @@ func (s *Server) handleAttribution(w http.ResponseWriter, r *http.Request) {
 
 // attrGroups converts one rollup into wire form, filling in each group's
 // share of everything attributed in the range.
-func (s *Server) attrGroups(ctx context.Context, bucket, by string, since int64) ([]routes.AttrGroup, error) {
-	groups, err := s.Store.GroupAttribution(ctx, bucket, by, since)
+func (s *Server) attrGroups(ctx context.Context, acct int64, bucket, by string, since int64) ([]routes.AttrGroup, error) {
+	groups, err := s.Store.GroupAttribution(ctx, acct, bucket, by, since)
 	if err != nil {
 		return nil, err
 	}

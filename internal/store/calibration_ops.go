@@ -24,7 +24,7 @@ type CalibrationPoint struct {
 
 // CalibrationPoints returns all calibration points for a bucket
 // ('session' or 'week') in time order.
-func (s *Store) CalibrationPoints(ctx context.Context, bucket string) ([]CalibrationPoint, error) {
+func (s *Store) CalibrationPoints(ctx context.Context, accountID int64, bucket string) ([]CalibrationPoint, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT id,
 		       a_ts_unix_ms, b_ts_unix_ms,
@@ -33,9 +33,9 @@ func (s *Store) CalibrationPoints(ctx context.Context, bucket string) ([]Calibra
 		       gap_s,
 		       tokens_per_pct_raw, tokens_per_pct_cw
 		FROM calibration_points
-		WHERE bucket = ?
+		WHERE account_id = ? AND bucket = ?
 		ORDER BY b_ts_unix_ms ASC
-	`, bucket)
+	`, accountOr1(accountID), bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -60,17 +60,17 @@ func (s *Store) CalibrationPoints(ctx context.Context, bucket string) ([]Calibra
 // LatestCalibrationMedian returns the median tokens-per-1% (cost-weighted
 // and raw) over the most recent N points for a bucket. Returns
 // (cwMedian, rawMedian, count, ok). ok is false when count == 0.
-func (s *Store) LatestCalibrationMedian(ctx context.Context, bucket string, n int) (float64, float64, int, bool, error) {
+func (s *Store) LatestCalibrationMedian(ctx context.Context, accountID int64, bucket string, n int) (float64, float64, int, bool, error) {
 	if n <= 0 {
 		n = 10
 	}
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT tokens_per_pct_cw, tokens_per_pct_raw
 		FROM calibration_points
-		WHERE bucket = ?
+		WHERE account_id = ? AND bucket = ?
 		ORDER BY b_ts_unix_ms DESC
 		LIMIT ?
-	`, bucket, n)
+	`, accountOr1(accountID), bucket, n)
 	if err != nil {
 		return 0, 0, 0, false, err
 	}

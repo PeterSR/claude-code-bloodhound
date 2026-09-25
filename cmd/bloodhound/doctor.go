@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/PeterSR/claude-code-bloodhound/internal/account"
 	"github.com/PeterSR/claude-code-bloodhound/internal/api/routes"
 	"github.com/PeterSR/claude-code-bloodhound/internal/config"
 	"github.com/PeterSR/claude-code-bloodhound/internal/projectconfig"
@@ -63,6 +64,11 @@ type doctorReport struct {
 		DeviceID      string `json:"device_id"`
 	} `json:"database"`
 
+	// Accounts is every Claude account seen, and ClaudeDirs is what each
+	// watched config dir is logged in to right now, per its state file.
+	Accounts   []store.Account   `json:"accounts,omitempty"`
+	ClaudeDirs []doctorClaudeDir `json:"claude_dirs,omitempty"`
+
 	Extractor          *usage.Extractor `json:"extractor,omitempty"`
 	ExtractorOrigin    string           `json:"extractor_origin,omitempty"`
 	ExtractorStatePath string           `json:"extractor_state_path,omitempty"`
@@ -86,6 +92,19 @@ type doctorReport struct {
 	// aborting the rest of the report (mirrors the human output's inline
 	// "ERROR" annotations, just collected in one place for --json).
 	Errors []string `json:"errors,omitempty"`
+}
+
+// doctorClaudeDir is one watched config dir as doctor sees it.
+type doctorClaudeDir struct {
+	Dir         string `json:"dir"`
+	StateFile   string `json:"state_file"`
+	AccountUUID string `json:"account_uuid,omitempty"`
+	OrgUUID     string `json:"org_uuid,omitempty"`
+	OAuth       bool   `json:"oauth"`
+	// AccountID is the dir's newest recorded login, 0 before the first
+	// ingest or poll has observed it.
+	AccountID int64  `json:"account_id,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // projectConfigReport is the doctor view of the nearest .bloodhound file:
@@ -235,6 +254,8 @@ var doctorCmd = &cobra.Command{
 			fmt.Fprintf(w, "  device id: %s\n", id)
 		}
 
+		doctorAccounts(ctx, w, s, &rep)
+
 		fmt.Fprintln(w, "\nExtractor:")
 		ext, origin, exErr := usage.LoadExtractor()
 		if exErr != nil {
@@ -376,4 +397,61 @@ func claudeBinaryStatus(override string) (string, string) {
 		return target, "not found on PATH"
 	}
 	return resolved, "ok"
+}
+
+// doctorAccounts prints the accounts known to the database and, for each
+// watched config dir, who its state file says is logged in. Read-only: it
+// does not record the login, so a dir doctor sees before any ingest shows
+// no account id yet.
+func doctorAccounts(ctx context.Context, w io.Writer, s *store.Store, rep *doctorReport) {
+	fmt.Fprintln(w, "\nAccounts:")
+	accts, err := s.ListAccounts(ctx)
+	if err != nil {
+		fmt.Fprintf(w, "  list: ERROR: %v\n", err)
+		rep.Errors = append(rep.Errors, fmt.Sprintf("accounts: %v", err))
+		return
+	}
+	rep.Accounts = accts
+	for _, a := range accts {
+		fmt.Fprintf(w, "  #%d %s\n", a.ID, a.DisplayName())
+	}
+
+	logins, err := s.CurrentLogins(ctx)
+	if err != nil {
+		rep.Errors = append(rep.Errors, fmt.Sprintf("logins: %v", err))
+	}
+	current := map[string]int64{}
+	for _, l := range logins {
+		current[l.ConfigDir] = l.AccountID
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = config.Default()
+	}
+	dirs, err := config.ClaudeConfigDirs(cfg)
+	if err != nil {
+		fmt.Fprintf(w, "  claude_dirs: ERROR: %v\n", err)
+		rep.Errors = append(rep.Errors, fmt.Sprintf("claude_dirs: %v", err))
+		return
+	}
+	for _, d := range dirs {
+		cd := doctorClaudeDir{Dir: d, StateFile: account.StateFile(d), AccountID: current[d]}
+		ident, err := account.Read(d)
+		switch {
+		case err != nil:
+			cd.Error = err.Error()
+			fmt.Fprintf(w, "  dir %s: ERROR: %v\n", d, err)
+		case !ident.OAuth:
+			fmt.Fprintf(w, "  dir %s: no subscription login (no /usage meter)\n", d)
+		default:
+			cd.AccountUUID, cd.OrgUUID, cd.OAuth = ident.AccountUUID, ident.OrgUUID, true
+			who := "not observed yet"
+			if cd.AccountID != 0 {
+				who = fmt.Sprintf("account #%d", cd.AccountID)
+			}
+			fmt.Fprintf(w, "  dir %s: %s\n", d, who)
+		}
+		rep.ClaudeDirs = append(rep.ClaudeDirs, cd)
+	}
 }

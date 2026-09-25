@@ -60,34 +60,35 @@ type AttributionRow struct {
 	Cwd string
 }
 
-// ReplaceAttribution wipes and re-inserts one bucket's windows and session
-// rows in a single transaction. Scoped per bucket so a failure rebuilding
-// the weekly view doesn't take the 5h view down with it.
+// ReplaceAttribution wipes and re-inserts one account's windows and session
+// rows for one bucket in a single transaction. Scoped per (account, bucket)
+// so a failure rebuilding one view doesn't take the others down with it.
 //
 // Children go first and parents last on the way out, parents first on the
 // way in: session_attribution carries a real foreign key into limit_windows
 // and the store opens SQLite with foreign_keys on.
-func (s *Store) ReplaceAttribution(ctx context.Context, bucket string, windows []LimitWindowRow, rows []AttributionRow) error {
+func (s *Store) ReplaceAttribution(ctx context.Context, accountID int64, bucket string, windows []LimitWindowRow, rows []AttributionRow) error {
+	accountID = accountOr1(accountID)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM session_attribution WHERE bucket = ?`, bucket); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_attribution WHERE account_id = ? AND bucket = ?`, accountID, bucket); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM limit_windows WHERE bucket = ?`, bucket); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM limit_windows WHERE account_id = ? AND bucket = ?`, accountID, bucket); err != nil {
 		return err
 	}
 
 	wstmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO limit_windows (
-			bucket, start_unix_ms, end_unix_ms, reset_unix_ms,
+			account_id, bucket, start_unix_ms, end_unix_ms, reset_unix_ms,
 			inferred, partial, in_progress,
 			measured_pct, attributed_pct, peak_pct, hit_cap,
 			tokens_per_pct_cw
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`)
 	if err != nil {
 		return err
@@ -95,7 +96,7 @@ func (s *Store) ReplaceAttribution(ctx context.Context, bucket string, windows [
 	defer wstmt.Close()
 	for _, w := range windows {
 		if _, err := wstmt.ExecContext(ctx,
-			w.Bucket, w.StartUnixMS, w.EndUnixMS, w.ResetUnixMS,
+			accountID, w.Bucket, w.StartUnixMS, w.EndUnixMS, w.ResetUnixMS,
 			b2i(w.Inferred), b2i(w.Partial), b2i(w.InProgress),
 			w.MeasuredPct, w.AttributedPct, w.PeakPct, b2i(w.HitCap),
 			w.TokensPerPctCW,
@@ -106,11 +107,11 @@ func (s *Store) ReplaceAttribution(ctx context.Context, bucket string, windows [
 
 	rstmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO session_attribution (
-			bucket, window_start_unix_ms, session_uuid, project,
+			account_id, bucket, window_start_unix_ms, session_uuid, project,
 			measured_pct, estimated_pct,
 			cw_tokens, raw_tokens, turn_count,
 			first_ts_unix_ms, last_ts_unix_ms
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 	`)
 	if err != nil {
 		return err
@@ -118,7 +119,7 @@ func (s *Store) ReplaceAttribution(ctx context.Context, bucket string, windows [
 	defer rstmt.Close()
 	for _, r := range rows {
 		if _, err := rstmt.ExecContext(ctx,
-			r.Bucket, r.WindowStartUnixMS, r.SessionUUID, r.Project,
+			accountID, r.Bucket, r.WindowStartUnixMS, r.SessionUUID, r.Project,
 			r.MeasuredPct, r.EstimatedPct,
 			r.CWTokens, r.RawTokens, r.TurnCount,
 			r.FirstTSUnixMS, r.LastTSUnixMS,
@@ -200,7 +201,7 @@ func (s *Store) SessionPctTotalsAll(ctx context.Context) (map[string]*SessionPct
 			LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
 			LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
 			WHERE sa.session_uuid <> ''
-			GROUP BY effective_uuid, sa.bucket, sa.window_start_unix_ms
+			GROUP BY effective_uuid, sa.account_id, sa.bucket, sa.window_start_unix_ms
 		)
 		SELECT effective_uuid, MAX(project) AS project, MAX(cwd) AS cwd, bucket,
 		       SUM(measured + estimated) AS pct,
@@ -282,10 +283,10 @@ func (s *Store) SessionPctWindows(ctx context.Context, uuid, bucket string) ([]A
 		FROM session_attribution a
 		LEFT JOIN sessions sess ON sess.session_uuid = a.session_uuid
 		JOIN limit_windows w
-		  ON w.bucket = a.bucket AND w.start_unix_ms = a.window_start_unix_ms
+		  ON w.account_id = a.account_id AND w.bucket = a.bucket AND w.start_unix_ms = a.window_start_unix_ms
 		WHERE a.bucket = ?
 		  AND (COALESCE(NULLIF(sess.parent_session_uuid, ''), a.session_uuid) = ? OR a.session_uuid = ?)
-		GROUP BY a.window_start_unix_ms
+		GROUP BY a.account_id, a.window_start_unix_ms
 		ORDER BY a.window_start_unix_ms ASC
 	`, bucket, uuid, uuid)
 	if err != nil {
@@ -380,7 +381,7 @@ const UnknownCwd = "__unknown_cwd__"
 // same effective owner's own cwd (never a subagent's), so a supervisor and
 // everything it dispatched fold into whichever directory the supervisor
 // itself ran in - the same rule, applied to directory instead of session id.
-func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS int64) ([]AttributionGroup, error) {
+func (s *Store) GroupAttribution(ctx context.Context, accountID int64, bucket, by string, sinceMS int64) ([]AttributionGroup, error) {
 	// effCwdExpr resolves to the EFFECTIVE owner's cwd, never a subagent's:
 	// when the spending session has a parent, its own cwd is irrelevant to
 	// this group (that's the row this whole rollup already folds it into),
@@ -458,7 +459,7 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 				FROM session_attribution sa
 				LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
 				LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
-				WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
+				WHERE sa.account_id = ? AND sa.bucket = ? AND sa.window_start_unix_ms >= ?
 				GROUP BY k, sa.window_start_unix_ms
 			)
 			GROUP BY k
@@ -483,13 +484,14 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 		LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
 		LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
 		` + joinedPeaks + `
-		WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
+		WHERE sa.account_id = ? AND sa.bucket = ? AND sa.window_start_unix_ms >= ?
 		GROUP BY k
 		ORDER BY pct DESC
 	`
-	// Two pairs, in query order: the peaks subquery is interpolated ahead of
-	// the outer WHERE, so its bucket/since bind first.
-	args := []any{bucket, sinceMS, bucket, sinceMS}
+	// Two triples, in query order: the peaks subquery is interpolated ahead
+	// of the outer WHERE, so its account/bucket/since bind first.
+	accountID = accountOr1(accountID)
+	args := []any{accountID, bucket, sinceMS, accountID, bucket, sinceMS}
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -526,16 +528,16 @@ func (s *Store) GroupAttribution(ctx context.Context, bucket, by string, sinceMS
 
 // ListLimitWindows returns a bucket's windows starting at or after sinceMS,
 // oldest first.
-func (s *Store) ListLimitWindows(ctx context.Context, bucket string, sinceMS int64) ([]LimitWindowRow, error) {
+func (s *Store) ListLimitWindows(ctx context.Context, accountID int64, bucket string, sinceMS int64) ([]LimitWindowRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT start_unix_ms, end_unix_ms, reset_unix_ms,
 		       inferred, partial, in_progress,
 		       measured_pct, attributed_pct, peak_pct, hit_cap,
 		       tokens_per_pct_cw
 		FROM limit_windows
-		WHERE bucket = ? AND start_unix_ms >= ?
+		WHERE account_id = ? AND bucket = ? AND start_unix_ms >= ?
 		ORDER BY start_unix_ms ASC
-	`, bucket, sinceMS)
+	`, accountOr1(accountID), bucket, sinceMS)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +571,7 @@ func (s *Store) ListLimitWindows(ctx context.Context, bucket string, sinceMS int
 // "by cwd" can do the same keyed on directory instead. The row itself stays
 // keyed by the actual spender (SessionUUID); nothing here changes what's
 // stored, only what a consumer can key its own grouping on.
-func (s *Store) WindowSlices(ctx context.Context, bucket string, sinceMS int64) ([]AttributionRow, error) {
+func (s *Store) WindowSlices(ctx context.Context, accountID int64, bucket string, sinceMS int64) ([]AttributionRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT sa.window_start_unix_ms, sa.session_uuid, sa.project,
 		       sa.measured_pct, sa.estimated_pct,
@@ -580,9 +582,9 @@ func (s *Store) WindowSlices(ctx context.Context, bucket string, sinceMS int64) 
 		FROM session_attribution sa
 		LEFT JOIN sessions sess  ON sess.session_uuid = sa.session_uuid
 		LEFT JOIN sessions psess ON psess.session_uuid = sess.parent_session_uuid
-		WHERE sa.bucket = ? AND sa.window_start_unix_ms >= ?
+		WHERE sa.account_id = ? AND sa.bucket = ? AND sa.window_start_unix_ms >= ?
 		ORDER BY sa.window_start_unix_ms ASC, (sa.measured_pct + sa.estimated_pct) DESC
-	`, bucket, sinceMS)
+	`, accountOr1(accountID), bucket, sinceMS)
 	if err != nil {
 		return nil, err
 	}

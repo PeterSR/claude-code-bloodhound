@@ -51,6 +51,10 @@ type capObs struct {
 
 func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
 
 	weeks := capDefaultWeeks
 	if v := r.URL.Query().Get("weeks"); v != "" {
@@ -64,9 +68,9 @@ func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
 		SELECT ts_unix_ms, week_pct, week_pct_valid, week_saturated,
 		       session_reset_ts, week_reset_ts
 		FROM usage_observations
-		WHERE ts_unix_ms >= ?
+		WHERE account_id = ? AND ts_unix_ms >= ?
 		ORDER BY ts_unix_ms ASC
-	`, cutoff)
+	`, acct, cutoff)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -110,8 +114,8 @@ func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
 	// tokens_per_pct(session) tokens per point, the week tokens_per_pct(week);
 	// their ratio is how many maxed sessions fill a week. Free here since the
 	// calibration medians are already computed.
-	if sc, _, sn, ok1, _ := s.Store.LatestCalibrationMedian(ctx, "session", 10); ok1 && sc > 0 && sn > 0 {
-		if wc, _, wn, ok2, _ := s.Store.LatestCalibrationMedian(ctx, "week", 10); ok2 && wc > 0 && wn > 0 {
+	if sc, _, sn, ok1, _ := s.Store.LatestCalibrationMedian(ctx, acct, "session", 10); ok1 && sc > 0 && sn > 0 {
+		if wc, _, wn, ok2, _ := s.Store.LatestCalibrationMedian(ctx, acct, "week", 10); ok2 && wc > 0 && wn > 0 {
 			out.MaxedSessionsPerWeek = round2(wc / sc)
 		}
 	}
@@ -357,16 +361,16 @@ func percentile(sorted []float64, p float64) float64 {
 // observationsSince loads the slimmed /usage observation series since
 // cutoffMS, ascending. Used by the History handler's charts, heatmaps, and
 // burn rate.
-func (s *Server) observationsSince(ctx context.Context, cutoffMS int64) ([]routes.ObservationPoint, error) {
+func (s *Server) observationsSince(ctx context.Context, acct, cutoffMS int64) ([]routes.ObservationPoint, error) {
 	rows, err := s.Store.DB.QueryContext(ctx, `
 		SELECT ts_unix_ms, session_pct, week_pct,
 		       session_saturated, week_saturated,
 		       session_reset_detected, week_reset_detected,
 		       session_pct_valid, week_pct_valid
 		FROM usage_observations
-		WHERE ts_unix_ms >= ?
+		WHERE account_id = ? AND ts_unix_ms >= ?
 		ORDER BY ts_unix_ms ASC
-	`, cutoffMS)
+	`, acct, cutoffMS)
 	if err != nil {
 		return nil, err
 	}

@@ -45,6 +45,9 @@ type Result struct {
 type Options struct {
 	ClaudeBinary string        // empty => "claude" on PATH
 	Timeout      time.Duration // 0 => 22s
+	// ConfigDir is the Claude Code config dir whose account to scrape.
+	// Empty or the default dir => CLAUDE_CONFIG_DIR unset.
+	ConfigDir string
 }
 
 // Fetch spawns Claude Code, captures the /usage panel, and applies the

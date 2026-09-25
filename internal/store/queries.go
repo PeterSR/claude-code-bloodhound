@@ -42,9 +42,9 @@ const observationCols = `
 // none exist. It does not filter on parse_ok: callers that need freshness
 // (how long since we last talked to claude at all) want the failed
 // attempts too. Callers that need a reading use LatestParsedUsage.
-func (s *Store) LatestUsage(ctx context.Context) (*LatestObservation, error) {
+func (s *Store) LatestUsage(ctx context.Context, accountID int64) (*LatestObservation, error) {
 	return scanObservation(s.DB.QueryRowContext(ctx,
-		observationCols+`ORDER BY ts_unix_ms DESC LIMIT 1`))
+		observationCols+`WHERE account_id = ? ORDER BY ts_unix_ms DESC LIMIT 1`, accountOr1(accountID)))
 }
 
 // LatestParsedUsage returns the most recent observation that actually
@@ -58,9 +58,9 @@ func (s *Store) LatestUsage(ctx context.Context) (*LatestObservation, error) {
 // cycle. The previous reading is still the best answer available; it is
 // just older than the poll timestamp suggests, which is what the Stale
 // flag on the computed window exists to say.
-func (s *Store) LatestParsedUsage(ctx context.Context) (*LatestObservation, error) {
+func (s *Store) LatestParsedUsage(ctx context.Context, accountID int64) (*LatestObservation, error) {
 	return scanObservation(s.DB.QueryRowContext(ctx,
-		observationCols+`WHERE parse_ok = 1 ORDER BY ts_unix_ms DESC LIMIT 1`))
+		observationCols+`WHERE account_id = ? AND parse_ok = 1 ORDER BY ts_unix_ms DESC LIMIT 1`, accountOr1(accountID)))
 }
 
 func scanObservation(row *sql.Row) (*LatestObservation, error) {
@@ -125,13 +125,13 @@ type PctPoint struct {
 
 // SessionPctSinceLastReset returns session %s since the most recent
 // session_reset_detected, ordered by time. Used for burn-rate projection.
-func (s *Store) SessionPctSinceLastReset(ctx context.Context) ([]PctPoint, error) {
-	return s.pctSince(ctx, "session_pct", "session_pct_valid", "session_saturated", "session_reset_detected")
+func (s *Store) SessionPctSinceLastReset(ctx context.Context, accountID int64) ([]PctPoint, error) {
+	return s.pctSince(ctx, accountID, "session_pct", "session_pct_valid", "session_saturated", "session_reset_detected")
 }
 
 // WeekPctSinceLastReset is the week analog of SessionPctSinceLastReset.
-func (s *Store) WeekPctSinceLastReset(ctx context.Context) ([]PctPoint, error) {
-	return s.pctSince(ctx, "week_pct", "week_pct_valid", "week_saturated", "week_reset_detected")
+func (s *Store) WeekPctSinceLastReset(ctx context.Context, accountID int64) ([]PctPoint, error) {
+	return s.pctSince(ctx, accountID, "week_pct", "week_pct_valid", "week_saturated", "week_reset_detected")
 }
 
 // pctSince feeds slopeOver (burn.go) and etaToLimit (the statusline): an
@@ -145,19 +145,20 @@ func (s *Store) WeekPctSinceLastReset(ctx context.Context) ([]PctPoint, error) {
 // which is also the new window's first point. Excluding it with a strict
 // `>` discarded that point, so every window projected a rate over one fewer
 // observation than it actually had.
-func (s *Store) pctSince(ctx context.Context, pctCol, validCol, saturatedCol, resetCol string) ([]PctPoint, error) {
+func (s *Store) pctSince(ctx context.Context, accountID int64, pctCol, validCol, saturatedCol, resetCol string) ([]PctPoint, error) {
 	q := `
 		SELECT ts_unix_ms, ` + pctCol + `
 		FROM usage_observations
-		WHERE ` + pctCol + ` IS NOT NULL
+		WHERE account_id = ?1
+		  AND ` + pctCol + ` IS NOT NULL
 		  AND ` + validCol + ` = 1
 		  AND ` + saturatedCol + ` = 0
 		  AND ts_unix_ms >= COALESCE(
-		       (SELECT MAX(ts_unix_ms) FROM usage_observations WHERE ` + resetCol + ` = 1),
+		       (SELECT MAX(ts_unix_ms) FROM usage_observations WHERE account_id = ?1 AND ` + resetCol + ` = 1),
 		       0)
 		ORDER BY ts_unix_ms ASC
 	`
-	rows, err := s.DB.QueryContext(ctx, q)
+	rows, err := s.DB.QueryContext(ctx, q, accountOr1(accountID))
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +263,8 @@ type SessionListRow struct {
 // of them near-empty. Use SubagentCount / SubagentTurnCount to see that a
 // session delegated work, and the session-detail payload to see what it
 // dispatched.
-func (s *Store) ListSessions(ctx context.Context) ([]SessionListRow, error) {
+// ListSessions lists one account's top-level sessions, newest first.
+func (s *Store) ListSessions(ctx context.Context, accountID int64) ([]SessionListRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT s.session_uuid, s.project,
 		       s.first_ts_unix_ms, s.last_ts_unix_ms,
@@ -280,9 +282,9 @@ func (s *Store) ListSessions(ctx context.Context) ([]SessionListRow, error) {
 			WHERE parent_session_uuid <> ''
 			GROUP BY parent_session_uuid
 		) sub ON sub.puuid = s.session_uuid
-		WHERE s.parent_session_uuid = ''
+		WHERE s.parent_session_uuid = '' AND s.account_id = ?
 		ORDER BY s.last_ts_unix_ms DESC
-	`)
+	`, accountOr1(accountID))
 	if err != nil {
 		return nil, err
 	}
@@ -307,13 +309,14 @@ func (s *Store) ListSessions(ctx context.Context) ([]SessionListRow, error) {
 }
 
 // LatestBucket returns the most recent 5h bucket, or nil if none.
-func (s *Store) LatestBucket(ctx context.Context) (*BucketRow, error) {
+func (s *Store) LatestBucket(ctx context.Context, accountID int64) (*BucketRow, error) {
 	row := s.DB.QueryRowContext(ctx, `
 		SELECT start_unix_ms, end_unix_ms, reset_inferred,
 		       raw_token_total, cost_weighted_total, output_token_total, turn_count
 		FROM buckets
+		WHERE account_id = ?
 		ORDER BY start_unix_ms DESC LIMIT 1
-	`)
+	`, accountOr1(accountID))
 	var r BucketRow
 	var ri int
 	err := row.Scan(&r.StartUnixMS, &r.EndUnixMS, &ri,

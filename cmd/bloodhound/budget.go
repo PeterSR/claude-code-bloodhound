@@ -118,7 +118,11 @@ func runBudgetSet(cmd *cobra.Command, args []string) error {
 	defer s.Close()
 
 	now := time.Now()
-	windowEnds, err := budgetWindowEnds(ctx, s, now)
+	acct, err := s.AccountForCwd(ctx, cwd)
+	if err != nil {
+		return err
+	}
+	windowEnds, err := budgetWindowEnds(ctx, s, acct, now)
 	if err != nil {
 		return err
 	}
@@ -414,13 +418,13 @@ func resolveBudgetCwd() (string, error) {
 
 // budgetWindowEnds reports each bucket's open-window end, which a window_reset
 // lease needs at binding time.
-func budgetWindowEnds(ctx context.Context, s *store.Store, now time.Time) (map[string]int64, error) {
+func budgetWindowEnds(ctx context.Context, s *store.Store, acct int64, now time.Time) (map[string]int64, error) {
 	out := map[string]int64{}
 	for bucket, back := range map[string]time.Duration{
 		budget.BucketSession: 10 * time.Hour,
 		budget.BucketWeek:    14 * 24 * time.Hour,
 	} {
-		windows, err := s.ListLimitWindows(ctx, budget.AttributeBucket(bucket), now.Add(-back).UnixMilli())
+		windows, err := s.ListLimitWindows(ctx, acct, budget.AttributeBucket(bucket), now.Add(-back).UnixMilli())
 		if err != nil {
 			return nil, err
 		}

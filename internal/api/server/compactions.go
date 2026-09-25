@@ -9,15 +9,19 @@ import (
 
 func (s *Server) handleCompactions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	acct, ok := s.withAccount(w, r)
+	if !ok {
+		return
+	}
 	rows, err := s.Store.DB.QueryContext(ctx, `
 		SELECT id, session_uuid, project, ts, ts_unix_ms,
 		       prefix_tokens_est, summary_tokens_est,
 		       gap_to_prev_s, cache_state,
 		       confirmed, confirm_reason
 		FROM compactions
-		WHERE confirmed = 1
+		WHERE confirmed = 1 AND account_id = ?
 		ORDER BY ts_unix_ms DESC
-	`)
+	`, acct)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return

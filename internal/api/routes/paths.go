@@ -24,4 +24,5 @@ const (
 	PathExtractorRetrain = "/api/extractor/retrain"
 	PathTrail            = "/api/trail"
 	PathTrailResolve     = "/api/trail/resolve"
+	PathAccounts         = "/api/accounts"
 )

@@ -53,8 +53,11 @@ const (
 	weekSpan    = 7 * 24 * time.Hour
 )
 
-func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowResponse, error) {
-	out := &routes.NowResponse{NowMS: now.UnixMilli()}
+// accountID picks whose meter: every account has its own percentages,
+// resets and refusals.
+func Compute(ctx context.Context, s *store.Store, accountID int64, now time.Time) (*routes.NowResponse, error) {
+	out := &routes.NowResponse{NowMS: now.UnixMilli(), AccountID: accountID}
+	pts := accountPctSource{s, accountID}
 
 	if cfg, err := config.Load(); err == nil {
 		out.PollIntervalS = cfg.PollIntervalS
@@ -72,12 +75,12 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 	// A failure here must not take the percentages down with it: not
 	// knowing why the meter stopped is better than not knowing where it
 	// stopped, so on error the verdict is simply absent.
-	verdict, verr := s.QuotaNow(ctx, now.UnixMilli())
+	verdict, verr := s.QuotaNow(ctx, accountID, now.UnixMilli())
 	if verr == nil {
 		out.Quota = quotaOut(verdict)
 	}
 
-	obs, err := s.LatestUsage(ctx)
+	obs, err := s.LatestUsage(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +113,7 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 	// that never existed on screen.
 	stale := false
 	if !obs.ParseOK {
-		prev, err := s.LatestParsedUsage(ctx)
+		prev, err := s.LatestParsedUsage(ctx, accountID)
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +128,7 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 		ws := buildWindow(*obs.SessionPct, obs.SessionResetTSISO, sessionSpan, obs.SessionResetDetected, now)
 		ws.Saturated = obs.SessionSaturated
 		ws.CapState = capState(verdict, "session")
-		fillBurn(ctx, s, ws, *obs.SessionPct, true, sessionSpan, now)
+		fillBurn(ctx, pts, ws, *obs.SessionPct, true, sessionSpan, now)
 		markStale(ws, stale, obs.TSISO)
 		out.Session = ws
 	}
@@ -134,7 +137,7 @@ func Compute(ctx context.Context, s *store.Store, now time.Time) (*routes.NowRes
 		ws := buildWindow(*obs.WeekPct, obs.WeekResetTSISO, weekSpan, obs.WeekResetDetected, now)
 		ws.Saturated = obs.WeekSaturated
 		ws.CapState = capState(verdict, "week")
-		fillBurn(ctx, s, ws, *obs.WeekPct, false, weekSpan, now)
+		fillBurn(ctx, pts, ws, *obs.WeekPct, false, weekSpan, now)
 		markStale(ws, stale, obs.TSISO)
 		out.Week = ws
 	}

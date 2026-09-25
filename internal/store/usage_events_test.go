@@ -13,7 +13,7 @@ func pctOf(v int) *int { return &v }
 
 func recordPct(t *testing.T, s *Store, at time.Time, sess, week int) Observation {
 	t.Helper()
-	obs, err := s.RecordUsage(context.Background(), usage.Result{
+	obs, err := s.RecordUsage(context.Background(), 1, usage.Result{
 		OK:         true,
 		FetchedAt:  at,
 		ElapsedS:   8,

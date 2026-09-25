@@ -45,7 +45,7 @@ func TestListSessions_ExcludesSubagentsAndReportsCount(t *testing.T) {
 	insertTestSessionWithTurns(t, s, sub2, "proj", parent, 5)
 	insertTestSessionWithTurns(t, s, other, "proj", "", 3)
 
-	rows, err := s.ListSessions(ctx)
+	rows, err := s.ListSessions(ctx, 1)
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}

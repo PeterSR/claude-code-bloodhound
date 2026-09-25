@@ -53,6 +53,12 @@
       "default": "",
       "description": "Path to the claude executable the /usage scraper drives. Empty means look up \"claude\" on $PATH. Point it at something inert like /bin/false when running against a scratch database, or startup will spend real quota."
     },
+    "claude_dirs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Claude Code config dirs to watch, one per account if you run several with CLAUDE_CONFIG_DIR. Each is ingested and polled for /usage on its own, and usage is kept apart per account. Empty means just ~/.claude. List ~/.claude explicitly if you want it alongside others."
+    },
     "statusline_prefix": {
       "type": "string",
       "default": "\ud83e\ude78",

@@ -27,6 +27,8 @@ type SessionRow struct {
 	// Cwd is the session's own working directory (see turns.cwd for why
 	// this can't be reconstructed from Project alone).
 	Cwd string
+	// AccountID is the account of the session's latest turn.
+	AccountID int64
 }
 
 // BucketRow mirrors the `buckets` table.
@@ -62,8 +64,8 @@ func (s *Store) ReplaceSessions(ctx context.Context, rows []SessionRow) error {
 			idle_miss_count, rotation_count, restructure_count,
 			compaction_count, cold_compaction_count,
 			cache_ttl, models,
-			parent_session_uuid, cwd
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			parent_session_uuid, cwd, account_id
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`)
 	if err != nil {
 		return err
@@ -77,7 +79,7 @@ func (s *Store) ReplaceSessions(ctx context.Context, rows []SessionRow) error {
 			r.IdleMissCount, r.RotationCount, r.RestructureCount,
 			r.CompactionCount, r.ColdCompactionCount,
 			r.CacheTTL, r.Models,
-			r.ParentSessionUUID, r.Cwd,
+			r.ParentSessionUUID, r.Cwd, accountOr1(r.AccountID),
 		); err != nil {
 			return err
 		}
@@ -85,15 +87,16 @@ func (s *Store) ReplaceSessions(ctx context.Context, rows []SessionRow) error {
 	return tx.Commit()
 }
 
-// ReplaceBuckets wipes and re-inserts the buckets table in one tx.
-func (s *Store) ReplaceBuckets(ctx context.Context, rows []BucketRow) error {
+// ReplaceBuckets wipes and re-inserts one account's buckets in one tx.
+func (s *Store) ReplaceBuckets(ctx context.Context, accountID int64, rows []BucketRow) error {
+	accountID = accountOr1(accountID)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM buckets`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM buckets WHERE account_id = ?`, accountID); err != nil {
 		return err
 	}
 	if len(rows) == 0 {
@@ -101,9 +104,9 @@ func (s *Store) ReplaceBuckets(ctx context.Context, rows []BucketRow) error {
 	}
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO buckets (
-			start_unix_ms, end_unix_ms, reset_inferred,
+			account_id, start_unix_ms, end_unix_ms, reset_inferred,
 			raw_token_total, cost_weighted_total, output_token_total, turn_count
-		) VALUES (?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?)
 	`)
 	if err != nil {
 		return err
@@ -115,7 +118,7 @@ func (s *Store) ReplaceBuckets(ctx context.Context, rows []BucketRow) error {
 			ri = 1
 		}
 		if _, err := stmt.ExecContext(ctx,
-			r.StartUnixMS, r.EndUnixMS, ri,
+			accountID, r.StartUnixMS, r.EndUnixMS, ri,
 			r.RawTokenTotal, r.CostWeightedTotal, r.OutputTokenTotal, r.TurnCount,
 		); err != nil {
 			return err

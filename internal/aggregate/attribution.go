@@ -30,11 +30,30 @@ func calibrationBucket(b string) string {
 // its own transaction: a weekly rebuild that fails leaves the 5h view
 // standing rather than blanking the whole page.
 func refreshAttribution(ctx context.Context, s *store.Store) (int, error) {
-	turns, err := loadAttributionTurns(ctx, s)
+	ids, err := s.AccountIDs(ctx)
 	if err != nil {
 		return 0, err
 	}
-	sessObs, weekObs, err := loadAttributionObs(ctx, s)
+	written := 0
+	for _, id := range ids {
+		n, err := attributeAccount(ctx, s, id)
+		written += n
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, nil
+}
+
+// attributeAccount reconstructs one account's windows from that account's
+// meter and turns alone. Another account's turns never touch this meter, and
+// this meter's unexplained movement is this account's unattributed remainder.
+func attributeAccount(ctx context.Context, s *store.Store, accountID int64) (int, error) {
+	turns, err := loadAttributionTurns(ctx, s, accountID)
+	if err != nil {
+		return 0, err
+	}
+	sessObs, weekObs, err := loadAttributionObs(ctx, s, accountID)
 	if err != nil {
 		return 0, err
 	}
@@ -53,7 +72,7 @@ func refreshAttribution(ctx context.Context, s *store.Store) (int, error) {
 		// and every row simply comes out with tokens but no percentage until
 		// enough /usage observations accumulate.
 		var tokensPerPct float64
-		if cw, _, _, ok, err := s.LatestCalibrationMedian(ctx, calibrationBucket(b.bucket), 10); err != nil {
+		if cw, _, _, ok, err := s.LatestCalibrationMedian(ctx, accountID, calibrationBucket(b.bucket), 10); err != nil {
 			return written, err
 		} else if ok {
 			tokensPerPct = cw
@@ -94,7 +113,7 @@ func refreshAttribution(ctx context.Context, s *store.Store) (int, error) {
 				LastTSUnixMS:      r.LastTSUnixMS,
 			})
 		}
-		if err := s.ReplaceAttribution(ctx, b.bucket, windows, rows); err != nil {
+		if err := s.ReplaceAttribution(ctx, accountID, b.bucket, windows, rows); err != nil {
 			return written, err
 		}
 		written += len(rows)
@@ -105,14 +124,15 @@ func refreshAttribution(ctx context.Context, s *store.Store) (int, error) {
 // loadAttributionTurns pulls every turn's session, project and weighted size.
 // Cost weighting happens in Go rather than SQL so it goes through the exact
 // same costweight.CW the calibrator uses.
-func loadAttributionTurns(ctx context.Context, s *store.Store) ([]attribute.Turn, error) {
+func loadAttributionTurns(ctx context.Context, s *store.Store, accountID int64) ([]attribute.Turn, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT session_uuid, project, ts_unix_ms, model,
 		       input_tokens, output_tokens, cache_read,
 		       cache_create_5m, cache_create_1h
 		FROM turns
+		WHERE account_id = ?
 		ORDER BY ts_unix_ms ASC
-	`)
+	`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +161,7 @@ func loadAttributionTurns(ctx context.Context, s *store.Store) ([]attribute.Turn
 
 // loadAttributionObs reads the /usage series once and splits it into the two
 // per-bucket views the reconstruction wants.
-func loadAttributionObs(ctx context.Context, s *store.Store) (sess, week []attribute.Obs, err error) {
+func loadAttributionObs(ctx context.Context, s *store.Store, accountID int64) (sess, week []attribute.Obs, err error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT ts_unix_ms,
 		       session_pct, week_pct,
@@ -149,8 +169,9 @@ func loadAttributionObs(ctx context.Context, s *store.Store) (sess, week []attri
 		       session_saturated, week_saturated,
 		       session_reset_ts, week_reset_ts
 		FROM usage_observations
+		WHERE account_id = ?
 		ORDER BY ts_unix_ms ASC, id ASC
-	`)
+	`, accountID)
 	if err != nil {
 		return nil, nil, err
 	}

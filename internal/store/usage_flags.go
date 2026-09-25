@@ -223,9 +223,9 @@ func recomputeUsageFlags(ctx context.Context, q execQuerier) error {
 		       session_pct, week_pct,
 		       session_reset_ts, week_reset_ts,
 		       session_reset_detected, week_reset_detected,
-		       session_pct_valid, week_pct_valid
+		       session_pct_valid, week_pct_valid, account_id
 		FROM usage_observations
-		ORDER BY ts_unix_ms ASC, id ASC
+		ORDER BY account_id ASC, ts_unix_ms ASC, id ASC
 	`)
 	if err != nil {
 		return err
@@ -238,6 +238,7 @@ func recomputeUsageFlags(ctx context.Context, q execQuerier) error {
 	}
 	var (
 		ids        []int64
+		accts      []int64
 		curr       []stored
 		sess, week []pctReading
 	)
@@ -249,13 +250,15 @@ func recomputeUsageFlags(ctx context.Context, q execQuerier) error {
 			sResetTS, wResetTS sql.NullString
 			sReset, wReset     int
 			sValid, wValid     int
+			acct               int64
 		)
 		if err := rows.Scan(&id, &tsMS, &sPct, &wPct, &sResetTS, &wResetTS,
-			&sReset, &wReset, &sValid, &wValid); err != nil {
+			&sReset, &wReset, &sValid, &wValid, &acct); err != nil {
 			rows.Close()
 			return err
 		}
 		ids = append(ids, id)
+		accts = append(accts, acct)
 		curr = append(curr, stored{
 			id:        id,
 			sessReset: sReset == 1, weekReset: wReset == 1,
@@ -270,8 +273,20 @@ func recomputeUsageFlags(ctx context.Context, q execQuerier) error {
 	}
 	rows.Close()
 
-	sessFlags := classifyBucket(sess)
-	weekFlags := classifyBucket(week)
+	// Each account is its own meter, so each is its own series. Rows arrive
+	// grouped by account; classify each run separately, or one account's
+	// 80% next to another's 10% reads as a reset every other reading.
+	sessFlags := make([]pctFlags, 0, len(ids))
+	weekFlags := make([]pctFlags, 0, len(ids))
+	for lo := 0; lo < len(ids); {
+		hi := lo
+		for hi < len(ids) && accts[hi] == accts[lo] {
+			hi++
+		}
+		sessFlags = append(sessFlags, classifyBucket(sess[lo:hi])...)
+		weekFlags = append(weekFlags, classifyBucket(week[lo:hi])...)
+		lo = hi
+	}
 
 	for i, id := range ids {
 		want := stored{
