@@ -29,7 +29,7 @@ type Observation struct {
 	WeekSaturated        bool
 }
 
-// RecordUsage persists a /usage scrape (success or failure) into raw_dumps +
+// RecordUsage persists a /usage reading from either source (success or failure) into raw_dumps +
 // usage_observations, computes simple reset detection against the prior
 // observation of the same account, and returns a summary of what landed.
 // accountID is the account the polled config dir was logged in to.
@@ -72,16 +72,23 @@ func (s *Store) RecordUsage(ctx context.Context, accountID int64, res usage.Resu
 	// Parse reset hints (best-effort). Pass the IANA timezone captured
 	// from the panel so wall-clock times resolve to the correct UTC
 	// instant — the TUI emits the time and zone separately.
-	var sessionResetTS, weekResetTS sql.NullString
-	if sessionResetRaw.Valid {
-		if t, ok := usage.ParseReset(sessionResetRaw.String, res.SessionResetTZ, res.FetchedAt); ok {
-			sessionResetTS = sql.NullString{String: t.UTC().Format(time.RFC3339), Valid: true}
+	// A source that reports the exact instant (the api) skips the parse.
+	resetTS := func(exact *time.Time, raw sql.NullString, tz string) sql.NullString {
+		if exact != nil {
+			return sql.NullString{String: exact.UTC().Format(time.RFC3339), Valid: true}
 		}
+		if raw.Valid {
+			if t, ok := usage.ParseReset(raw.String, tz, res.FetchedAt); ok {
+				return sql.NullString{String: t.UTC().Format(time.RFC3339), Valid: true}
+			}
+		}
+		return sql.NullString{}
 	}
-	if weekResetRaw.Valid {
-		if t, ok := usage.ParseReset(weekResetRaw.String, res.WeekResetTZ, res.FetchedAt); ok {
-			weekResetTS = sql.NullString{String: t.UTC().Format(time.RFC3339), Valid: true}
-		}
+	sessionResetTS := resetTS(res.SessionResetAt, sessionResetRaw, res.SessionResetTZ)
+	weekResetTS := resetTS(res.WeekResetAt, weekResetRaw, res.WeekResetTZ)
+	source := res.Source
+	if source == "" {
+		source = usage.SourcePTY
 	}
 
 	// Reset detection and misparse flagging are derived from the whole
@@ -116,15 +123,15 @@ func (s *Store) RecordUsage(ctx context.Context, accountID int64, res usage.Resu
 			session_reset_detected, week_reset_detected,
 			session_saturated, week_saturated,
 			session_pct_valid, week_pct_valid,
-			elapsed_s, parse_ok, account_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1, 1, ?, ?, ?)`,
+			elapsed_s, parse_ok, account_id, source
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1, 1, ?, ?, ?, ?)`,
 		tsISO, tsMS,
 		nullInt(sessionPct), nullInt(weekPct),
 		nullStr(sessionResetRaw), nullStr(weekResetRaw),
 		nullStr(sessionResetTS), nullStr(weekResetTS),
 		dumpID,
 		sessionSaturated, weekSaturated,
-		res.ElapsedS, parseOK, accountOr1(accountID),
+		res.ElapsedS, parseOK, accountOr1(accountID), source,
 	)
 	if err != nil {
 		return Observation{}, err

@@ -27,6 +27,7 @@ type DebugResponse = {
     age_s: number;
     parse_ok: boolean;
     elapsed_s: number;
+    source: string;
     session_pct?: number;
     week_pct?: number;
     session_reset_raw?: string;
@@ -98,6 +99,7 @@ export default function Debug() {
               <>
                 <KV k="ts" v={`${fmtAbs(data.last_poll.ts)} (${fmtRel(data.last_poll.age_s)})`} />
                 <KV k="parse_ok" v={String(data.last_poll.parse_ok)} status={data.last_poll.parse_ok ? 'ok' : 'fail'} />
+                <KV k="source" v={data.last_poll.source} />
                 <KV k="elapsed" v={`${data.last_poll.elapsed_s.toFixed(1)}s`} />
                 <KV k="session_pct" v={data.last_poll.session_pct ?? '—'} />
                 <KV k="week_pct" v={data.last_poll.week_pct ?? '—'} />

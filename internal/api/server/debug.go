@@ -76,6 +76,7 @@ func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 			AgeS:            (now.UnixMilli() - obs.TSUnixMS) / 1000,
 			ParseOK:         obs.ParseOK,
 			ElapsedS:        obs.ElapsedS,
+			Source:          obs.Source,
 			SessionPct:      obs.SessionPct,
 			WeekPct:         obs.WeekPct,
 			SessionResetRaw: obs.SessionResetRaw,

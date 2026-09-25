@@ -20,13 +20,20 @@ var (
 	pollJSON      bool
 	pollTimeoutS  int
 	pollClaudeDir string
+	pollSource    string
 )
 
 var pollCmd = &cobra.Command{
 	Use:   "poll",
-	Short: "Drive Claude Code's /usage panel once and persist the observation",
-	Long: `Spawns the claude binary in a pty, captures /usage, applies the active
-extractor, and persists the result to the local store.
+	Short: "Read /usage once and persist the observation",
+	Long: `Reads the account's usage once and persists the result to the local store.
+
+By default (usage_source "auto") it asks the OAuth usage endpoint the /usage
+panel renders from, using the token Claude Code keeps in the config dir. When
+the endpoint cannot answer it falls back to spawning the claude binary in a
+pty, capturing the /usage panel and applying the active extractor.
+--source api or --source pty forces one path with no fallback, which is how
+to check that each still works.
 
 For ongoing observation, prefer ` + "`bloodhound daemon`" + ` — it polls
 /usage on its own cadence (default every 5 minutes) and auto-heals the
@@ -72,10 +79,21 @@ re-learn the extractor against a fresh capture.`,
 			return fmt.Errorf("%s has no subscription login, so it has no /usage meter", dir)
 		}
 
-		res, fetchErr := usage.Fetch(ctx, usage.Options{
-			ClaudeBinary: cfg.ClaudeBinary,
-			Timeout:      time.Duration(pollTimeoutS-3) * time.Second,
-			ConfigDir:    dir,
+		source := cfg.UsageSource
+		if pollSource != "" {
+			source = pollSource
+		}
+		if !usage.ValidMode(source) {
+			return fmt.Errorf("unknown source %q (want auto, api or pty)", source)
+		}
+		res, fallback, fetchErr := usage.Collect(ctx, usage.CollectOptions{
+			Mode: source,
+			API:  usage.APIOptions{ConfigDir: dir},
+			PTY: usage.Options{
+				ClaudeBinary: cfg.ClaudeBinary,
+				Timeout:      time.Duration(pollTimeoutS-3) * time.Second,
+				ConfigDir:    dir,
+			},
 		})
 
 		obs, recErr := s.RecordUsage(ctx, accountID, res, fetchErr)
@@ -94,6 +112,7 @@ re-learn the extractor against a fresh capture.`,
 		if pollJSON {
 			out := map[string]any{
 				"ok":                     res.OK,
+				"source":                 res.Source,
 				"elapsed_s":              res.ElapsedS,
 				"extractor_origin":       res.ExtractorOrigin,
 				"session_pct":            res.SessionPct,
@@ -108,16 +127,30 @@ re-learn the extractor against a fresh capture.`,
 			if fetchErr != nil {
 				out["error"] = fetchErr.Error()
 			}
+			if fallback != nil {
+				out["fallback_reason"] = fallback.Error()
+			}
 			b, _ := json.MarshalIndent(out, "", "  ")
 			fmt.Fprintln(w, string(b))
 			return nil
 		}
 
-		fmt.Fprintf(w, "scrape %s in %.1fs (observation #%d, extractor: %s)\n",
-			okOrFail(res.OK), res.ElapsedS, obs.ID, res.ExtractorOrigin)
-		printPct(w, "session", res.SessionPct, res.SessionResetRaw)
-		printPct(w, "week (all models)", res.WeekPct, res.WeekResetRaw)
-		if len(res.Extracted.Missing) > 0 {
+		if fallback != nil {
+			fmt.Fprintf(w, "usage endpoint unavailable (%v), read the /usage panel instead\n", fallback)
+		}
+		if res.Source == usage.SourcePTY {
+			fmt.Fprintf(w, "pty scrape %s in %.1fs (observation #%d, extractor: %s)\n",
+				okOrFail(res.OK), res.ElapsedS, obs.ID, res.ExtractorOrigin)
+		} else {
+			fmt.Fprintf(w, "%s read %s in %.1fs (observation #%d)\n",
+				res.Source, okOrFail(res.OK), res.ElapsedS, obs.ID)
+		}
+		if fetchErr != nil {
+			fmt.Fprintf(w, "  error: %v\n", fetchErr)
+		}
+		printPct(w, "session", res.SessionPct, resetLabel(res.SessionResetAt, res.SessionResetRaw))
+		printPct(w, "week (all models)", res.WeekPct, resetLabel(res.WeekResetAt, res.WeekResetRaw))
+		if len(res.Extracted.Missing) > 0 && res.Source == usage.SourcePTY {
 			fmt.Fprintf(w, "  ⚠  required fields missing: %v\n", res.Extracted.Missing)
 			fmt.Fprintf(w, "  hint: trigger a retrain from the Debug page or `curl -X POST --unix-socket $XDG_RUNTIME_DIR/bloodhound/api.sock http://bh/api/extractor/retrain`\n")
 		}
@@ -128,10 +161,19 @@ re-learn the extractor against a fresh capture.`,
 			fmt.Fprintln(w, "  weekly bucket reset detected since last poll")
 		}
 		if !res.OK {
-			return fmt.Errorf("scrape failed extraction")
+			return fmt.Errorf("%s read failed", res.Source)
 		}
 		return nil
 	},
+}
+
+// resetLabel prefers the exact instant (the api's) in local time, and falls
+// back to the panel's own wording.
+func resetLabel(at *time.Time, raw string) string {
+	if at != nil {
+		return at.Local().Format("Jan 2 15:04")
+	}
+	return raw
 }
 
 func okOrFail(ok bool) string {
@@ -160,6 +202,8 @@ func asWriter(w writerOnly) writerOnly { return w }
 func init() {
 	pollCmd.Flags().BoolVar(&pollJSON, "json", false, "emit JSON instead of human text")
 	pollCmd.Flags().IntVar(&pollTimeoutS, "timeout", 30, "overall timeout in seconds")
+	pollCmd.Flags().StringVar(&pollSource, "source", "",
+		"auto | api | pty (default: the usage_source config key, itself \"auto\")")
 	pollCmd.Flags().StringVar(&pollClaudeDir, "claude-dir", "",
 		"Claude Code config dir whose account to scrape (default: the first of claude_dirs)")
 	rootCmd.AddCommand(pollCmd)

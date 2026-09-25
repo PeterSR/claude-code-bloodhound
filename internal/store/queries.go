@@ -23,6 +23,7 @@ type LatestObservation struct {
 	WeekSaturated        bool
 	ElapsedS             float64
 	ParseOK              bool
+	Source               string // "api" | "pty"
 }
 
 // observationCols is the column list both observation queries select, in
@@ -34,7 +35,7 @@ const observationCols = `
 	       session_reset_ts, week_reset_ts,
 	       session_reset_detected, week_reset_detected,
 	       session_saturated, week_saturated,
-	       elapsed_s, parse_ok
+	       elapsed_s, parse_ok, source
 	FROM usage_observations
 `
 
@@ -78,7 +79,7 @@ func scanObservation(row *sql.Row) (*LatestObservation, error) {
 		&sessTS, &weekTS,
 		&sessReset, &weekReset,
 		&sessSat, &weekSat,
-		&elapsed, &parseOK,
+		&elapsed, &parseOK, &o.Source,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

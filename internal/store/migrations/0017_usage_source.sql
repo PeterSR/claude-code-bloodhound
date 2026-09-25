@@ -1,0 +1,12 @@
+-- Which source a /usage reading came from.
+--
+-- Readings used to come only from driving the /usage panel in a pty. They now
+-- come first from the OAuth usage endpoint the panel itself renders from, with
+-- the pty as the fallback when the endpoint cannot answer (no token on disk,
+-- expired token, rate limited, response shape moved). Both land in the same
+-- rows and the same series; the column says which one answered, for the Debug
+-- page and for telling a source-specific quirk from a real movement.
+--
+-- 'api' or 'pty'. Every row before this migration came from the pty, so the
+-- default is also the backfill.
+ALTER TABLE usage_observations ADD COLUMN source TEXT NOT NULL DEFAULT 'pty';

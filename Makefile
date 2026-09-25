@@ -1,4 +1,4 @@
-.PHONY: build build-gui install install-gui test fmt vet tidy clean dev doctor web web-install
+.PHONY: build build-gui install install-gui test smoke smoke-api smoke-pty fmt vet tidy clean dev doctor web web-install
 
 GO       ?= go
 BIN      ?= bloodhound
@@ -58,6 +58,18 @@ install-gui: build-gui
 
 test:
 	$(GO) test ./...
+
+# Smoke tests against the real usage endpoint and a real claude in a pty,
+# using a real config dir (BLOODHOUND_SMOKE_DIR, default ~/.claude). Not part
+# of `make test` or CI: they need a logged-in account and spend a little of it.
+# `smoke` runs both paths and checks they agree; the other two run one each.
+SMOKE = $(GO) test -tags smoke -count=1 -v ./internal/usage/
+smoke:
+	$(SMOKE) -run 'TestSmoke$$'
+smoke-api:
+	$(SMOKE) -run 'TestSmoke$$/api'
+smoke-pty:
+	$(SMOKE) -run 'TestSmoke$$/pty'
 
 fmt:
 	gofmt -s -w .

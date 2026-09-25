@@ -13,7 +13,7 @@
       "type": "integer",
       "minimum": 1,
       "default": 300,
-      "description": "How often the daemon drives a /usage capture. Each poll spends real quota, so this is the one cadence worth thinking about before lowering."
+      "description": "How often the daemon reads /usage for each watched account. A reading from the usage endpoint is one small request; a pty fallback spawns claude and spends real quota. The endpoint allows roughly 30 requests an hour per account, shared with anything else polling it, so this is the one cadence worth thinking about before lowering."
     },
     "ingest_interval_s": {
       "type": "integer",
@@ -55,13 +55,15 @@
     },
     "claude_dirs": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "default": [],
       "description": "Claude Code config dirs to watch, one per account if you run several with CLAUDE_CONFIG_DIR. Each is ingested and polled for /usage on its own, and usage is kept apart per account. Empty means just ~/.claude. List ~/.claude explicitly if you want it alongside others."
     },
     "statusline_prefix": {
       "type": "string",
-      "default": "\ud83e\ude78",
+      "default": "🩸",
       "description": "Prepended to `bloodhound status`. Set it to \"BH\" or \"\" on terminals that render the default emoji badly."
     },
     "stale_after_s": {
@@ -81,6 +83,16 @@
       "minimum": 1,
       "default": 86400,
       "description": "How far back the Now page's recent-sessions panel looks."
+    },
+    "usage_source": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "api",
+        "pty"
+      ],
+      "default": "auto",
+      "description": "Where /usage readings come from. \"auto\" asks the OAuth usage endpoint the /usage panel renders from, and drives the panel in a pty only when the endpoint cannot answer (no token on disk, as on macOS; an expired token; a rate limit; a changed response). \"api\" uses the endpoint only, \"pty\" the panel only."
     },
     "extractor_self_heal": {
       "type": "boolean",

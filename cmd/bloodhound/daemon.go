@@ -260,7 +260,11 @@ func liveClaudeDirs(w io.Writer) []string {
 	return dirs
 }
 
-// runPollOnce scrapes /usage once for every watched config dir, recording
+// apiGate remembers, across polls, which dirs' usage endpoint is backed off
+// after a rate limit, so the daemon goes straight to the pty for them.
+var apiGate = usage.NewAPIGate()
+
+// runPollOnce reads /usage once for every watched config dir, recording
 // each reading against the account that dir is logged in to. Dirs with no
 // subscription login have no meter and are skipped.
 func runPollOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Writer) {
@@ -292,7 +296,15 @@ func pollDirOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	}
 	pollCtx, cancel := context.WithTimeout(ctx, pollBudget)
 	defer cancel()
-	res, fetchErr := usage.Fetch(pollCtx, usage.Options{ClaudeBinary: cfg.ClaudeBinary, ConfigDir: dir})
+	res, fallback, fetchErr := usage.Collect(pollCtx, usage.CollectOptions{
+		Mode: cfg.UsageSource,
+		API:  usage.APIOptions{ConfigDir: dir},
+		PTY:  usage.Options{ClaudeBinary: cfg.ClaudeBinary, ConfigDir: dir},
+		Gate: apiGate,
+	})
+	if fallback != nil {
+		fmt.Fprintf(w, "[daemon] poll %s: usage endpoint unavailable (%v), read the /usage panel instead\n", dir, fallback)
+	}
 
 	// Self-heal: if extraction missed required fields, hand the heal
 	// off to selfheal.Run — which spawns its own inner claude in a pty
@@ -308,8 +320,10 @@ func pollDirOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	// own quota to "fix" regexes that were never wrong, then saves the
 	// result, replacing a working extractor with one trained on a screen
 	// that never showed the panel. Those polls just retry next cycle.
+	// Only a pty reading has an extractor to heal. An api reading that
+	// failed says nothing about the panel's layout.
 	switch {
-	case !cfg.ExtractorSelfHeal || fetchErr != nil || res.OK:
+	case !cfg.ExtractorSelfHeal || fetchErr != nil || res.OK || res.Source != usage.SourcePTY:
 		// Nothing to heal, or self-heal is off.
 	case !usage.PanelCaptured(res.RawFull):
 		fmt.Fprintf(w, "[daemon] poll: no /usage panel in capture after %.1fs (still loading?), skipping self-heal\n", res.ElapsedS)
@@ -346,7 +360,7 @@ func pollDirOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 	case err != nil:
 		fmt.Fprintf(w, "[daemon] poll: record error %v\n", err)
 	case fetchErr != nil && !errors.Is(fetchErr, context.Canceled):
-		fmt.Fprintf(w, "[daemon] poll: scrape failed (%v)\n", fetchErr)
+		fmt.Fprintf(w, "[daemon] poll: %s read failed (%v)\n", res.Source, fetchErr)
 	case !res.OK && !usage.PanelCaptured(res.RawFull):
 		// Distinct from the line below on purpose: "extraction failed"
 		// reads as the extractor being wrong, and here it never got a
@@ -363,8 +377,8 @@ func pollDirOnce(ctx context.Context, cfg config.Config, s *store.Store, w io.Wr
 		if res.WeekPct != nil {
 			week = fmt.Sprintf("%d%%", *res.WeekPct)
 		}
-		fmt.Fprintf(w, "[daemon] poll: ok session=%s week=%s account=%d (#%d, %.1fs)\n",
-			sess, week, accountID, obs.ID, res.ElapsedS)
+		fmt.Fprintf(w, "[daemon] poll: ok session=%s week=%s account=%d source=%s (#%d, %.1fs)\n",
+			sess, week, accountID, res.Source, obs.ID, res.ElapsedS)
 	}
 }
 

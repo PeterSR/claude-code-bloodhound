@@ -1,7 +1,11 @@
-// Package usage drives Claude Code's /usage TUI panel in a pty, renders
-// the captured output through a virtual terminal grid, and applies a
-// configurable Extractor to pull out the session and week percentages
-// plus reset hints.
+// Package usage reads an account's session and week percentages. It has two
+// sources: the OAuth usage endpoint the /usage panel itself renders from
+// (FetchAPI, the default), and the panel itself, driven in a pty (Fetch).
+// Collect tries them in that order.
+//
+// The pty path renders the captured output through a virtual terminal grid
+// and applies a configurable Extractor to pull out the percentages plus reset
+// hints.
 //
 // The extractor is data-driven (regex DSL persisted to $XDG_STATE_HOME) so
 // we can tolerate Anthropic redesigning the panel: extraction failures
@@ -27,7 +31,8 @@ type Result struct {
 	ElapsedS        float64   `json:"elapsed_s"`
 	Raw             string    `json:"raw"`              // tail of the cleaned terminal output (debug)
 	RawFull         string    `json:"-"`                // full cleaned output (kept in-memory for bootstrap; not serialised)
-	ExtractorOrigin string    `json:"extractor_origin"` // "user" | "default"
+	ExtractorOrigin string    `json:"extractor_origin"` // "user" | "default"; empty for the api source
+	Source          string    `json:"source"`           // SourceAPI | SourcePTY
 
 	SessionPct      *int   `json:"session_pct,omitempty"`
 	WeekPct         *int   `json:"week_pct,omitempty"`
@@ -35,6 +40,12 @@ type Result struct {
 	WeekResetRaw    string `json:"week_reset_raw,omitempty"`
 	SessionResetTZ  string `json:"session_reset_tz,omitempty"`
 	WeekResetTZ     string `json:"week_reset_tz,omitempty"`
+
+	// SessionResetAt / WeekResetAt are exact reset instants, set when the
+	// source reports one (the api does). When nil, the raw strings above are
+	// parsed with ParseReset instead.
+	SessionResetAt *time.Time `json:"session_reset_at,omitempty"`
+	WeekResetAt    *time.Time `json:"week_reset_at,omitempty"`
 
 	// Extracted is the raw output of the Extractor, exposed for the
 	// Debug page so the user can see exactly what fired and what didn't.
@@ -71,6 +82,7 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 	cleaned := renderVT(rawBytes)
 
 	res := Result{
+		Source:    SourcePTY,
 		FetchedAt: time.Now().UTC(),
 		ElapsedS:  round2(elapsed),
 		Raw:       tail(cleaned, 3000),

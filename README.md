@@ -31,7 +31,7 @@ The opt-in **Join the pack** community-insights upload is next - see [Privacy](#
 
 Three jobs, scheduled either by your OS or by a built-in scheduler:
 
-- `bloodhound poll`: drives the Claude Code TUI in a pty, parses the `/usage` panel, persists the observation.
+- `bloodhound poll`: reads the account's `/usage` numbers and persists the observation. It asks the OAuth usage endpoint the `/usage` panel itself renders from, with the token Claude Code already keeps in the config dir, and falls back to driving the Claude Code TUI in a pty and parsing the panel when the endpoint can't answer (see below).
 - `bloodhound ingest`: walks `~/.claude/projects/*.jsonl`, parses every assistant turn and compaction event into local SQLite.
 - `bloodhound aggregate`: recomputes rolling metrics (sessions, 5-hour buckets, tokens-per-1% calibration, per-session limit attribution) on a slower cadence.
 
@@ -52,6 +52,12 @@ The Attribution page rolls this up by working directory and by session, over wee
 ## Currency
 
 Your currency is the percentage shown in `/usage`. Bloodhound never asks you to guess your plan's token cap or pick a billing-weight mode - those are implementation details we figure out from your data. The calibration phase converts the opaque percentage into a tokens-per-1% estimate by pairing adjacent observations and dividing the cost-weighted spend in between by the percentage points the bucket moved. Saturated observations (≥99%, when you're on the pay-per-use Extra usage tier and the bucket has stopped moving) are excluded.
+
+## Two ways to read /usage
+
+The default (`usage_source: "auto"`) is one small HTTPS request to the endpoint Claude Code's `/usage` panel renders from, the same one claude-swap polls. It takes well under a second, spends no quota, and returns exact reset times. It is not a documented API, though, and it has a budget of roughly 30 requests an hour per account that anything else polling it shares, so bloodhound keeps the pty path behind it. The panel is read instead when there is no token on disk (macOS keeps it in the Keychain), the token has expired, the endpoint rate limits (it is then left alone for 15 minutes), or the response no longer has the shape bloodhound expects. Bloodhound never refreshes a token itself: Claude Code owns that file, and starting `claude` for the fallback refreshes it anyway. Set `usage_source` to `"api"` or `"pty"` to use one path only; each reading records which one answered.
+
+To check that a path still works even when the daemon isn't exercising it, run `bloodhound poll --source api` or `--source pty`, or `make smoke` (both paths against a real config dir, plus a check that they agree; `make smoke-api` / `make smoke-pty` run one each, and `BLOODHOUND_SMOKE_DIR` picks the dir).
 
 ## Self-healing extractor
 

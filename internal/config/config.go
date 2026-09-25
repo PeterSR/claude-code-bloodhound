@@ -90,6 +90,15 @@ type Config struct {
 	// excluded entirely. Defaults to 24h.
 	RecentSessionWindowS int `json:"recent_session_window_s"`
 
+	// UsageSource picks where /usage readings come from.
+	//   "auto" (default): the OAuth usage endpoint the /usage panel
+	//      renders from, falling back to driving the panel in a pty when
+	//      the endpoint cannot answer (no token on disk, as on macOS; an
+	//      expired token; a rate limit; a changed response).
+	//   "api": the endpoint only. A failure is recorded as a failed poll.
+	//   "pty": the panel only, as before the endpoint was used.
+	UsageSource string `json:"usage_source"`
+
 	// ExtractorSelfHeal toggles the daemon's automatic self-heal: when
 	// a poll's required fields go missing, the daemon spawns a fresh
 	// orchestrator over a live pty (via MCP tools) and lets it re-learn
@@ -168,6 +177,7 @@ func Default() Config {
 		StaleAfterS:             600,
 		ActiveSessionThresholdS: 1800,
 		RecentSessionWindowS:    86400,
+		UsageSource:             "auto",
 		ExtractorSelfHeal:       true,
 		SelfHealMode:            SelfHealModeInteractive,
 		PriceSelfHeal:           true,

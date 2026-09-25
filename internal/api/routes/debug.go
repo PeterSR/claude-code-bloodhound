@@ -51,6 +51,7 @@ type DebugLastPollInfo struct {
 	AgeS            int64   `json:"age_s"`
 	ParseOK         bool    `json:"parse_ok"`
 	ElapsedS        float64 `json:"elapsed_s"`
+	Source          string  `json:"source"` // "api" | "pty"
 	SessionPct      *int    `json:"session_pct,omitempty"`
 	WeekPct         *int    `json:"week_pct,omitempty"`
 	SessionResetRaw string  `json:"session_reset_raw,omitempty"`
